@@ -1,0 +1,5 @@
+/*
+ * Global styles only. Chakra's ChakraProvider applies its own CSS reset
+ * (preflight), so element defaults and page background come from the theme.
+ * Prefer Chakra components and theme tokens over adding rules here.
+ */
