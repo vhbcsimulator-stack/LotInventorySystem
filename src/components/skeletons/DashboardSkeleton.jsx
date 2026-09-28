@@ -42,7 +42,7 @@ export default function DashboardSkeleton() {
       <Flex direction="column" gap="16px">
         <Card p="24px">
           <Flex align="flex-start" justify="space-between" gap="20px" flexWrap="wrap">
-            <Flex direction="column" gap="8px" minW="260px" flex="1">
+            <Flex direction="column" gap="8px" minW={0} flex="1">
               <Skeleton h="22px" w="62%" rounded="8px" />
               <Skeleton h="13px" w="86%" />
               <Skeleton h="13px" w="48%" />

@@ -3,15 +3,18 @@ import { Box, CloseButton, Dialog, Flex, Input, NativeSelect, Portal, Spinner, T
 import {
   DEFAULT_LOT_TERMS,
   LOT_STATUS_OPTIONS,
+  RESERVE_TYPE_OPTIONS,
   categoriesFor,
   createLot,
   deleteLot,
   deleteLots,
   updateLot,
+  updateReserveType,
 } from '@/data/projectsData'
 import { PRICE_CONFIG } from '@/data/pricesData'
 import { COLORS, LOT_STATUS } from '@/theme/colors'
-import { formatDate, formatNumber, formatPeso } from '@/utils/format'
+import { formatNumber, formatPeso } from '@/utils/format'
+import { notifyFailed, notifySaved } from '@/lib/notify'
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -61,18 +64,19 @@ function LotDialog({ open, title, busy, onClose, children, footer }) {
       }}
       placement="center"
       size="sm"
+      scrollBehavior="inside"
     >
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
                 {title}
               </Dialog.Title>
             </Dialog.Header>
             <Dialog.Body py="18px">{children}</Dialog.Body>
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               {footer}
             </Dialog.Footer>
             <Dialog.CloseTrigger asChild top="14px" right="14px">
@@ -93,9 +97,70 @@ function ErrorText({ children }) {
   ) : null
 }
 
-/** Read-only view of one lot. */
-export function LotDetailsDialog({ lot, projectName, terms = DEFAULT_LOT_TERMS, onClose }) {
+/**
+ * A reserved lot's reserve type, saved as soon as it is picked. The lot keeps
+ * its reserved status; this only records who it is held for.
+ */
+function ReserveTypeSelect({ lot, projectCode, onSaved }) {
+  const [value, setValue] = useState(lot.reserveType ?? '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  async function handleChange(next) {
+    const previous = value
+    setValue(next)
+    setSaving(true)
+    setError('')
+    try {
+      await updateReserveType(lot.id, projectCode, next)
+      notifySaved('Reserve type updated', `${lot.identifier} is now ${RESERVE_TYPE_OPTIONS.find((option) => option.value === next)?.label ?? next}.`)
+      onSaved?.(next)
+    } catch (err) {
+      console.error('[projects] could not update reserve type:', err)
+      notifyFailed('Could not update the reserve type', err)
+      setValue(previous)
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Flex direction="column" align="flex-end" gap="4px">
+      <Flex align="center" gap="8px">
+        {saving ? <Spinner size="xs" /> : null}
+        <NativeSelect.Root size="sm" width="170px" disabled={saving}>
+          <NativeSelect.Field
+            aria-label="Reserve type"
+            value={value}
+            onChange={(event) => handleChange(event.target.value)}
+            fontFamily={FONT}
+            fontSize="14px"
+            fontWeight="600"
+            color={COLORS.heading}
+          >
+            {RESERVE_TYPE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </NativeSelect.Field>
+          <NativeSelect.Indicator />
+        </NativeSelect.Root>
+      </Flex>
+      {error ? (
+        <Text role="alert" fontFamily={FONT} fontSize="12px" color="#B91C1C" textAlign="end">
+          {error}
+        </Text>
+      ) : null}
+    </Flex>
+  )
+}
+
+/** View of one lot; a reserved lot's reserve type can be changed here. */
+export function LotDetailsDialog({ lot, projectName, projectCode, terms = DEFAULT_LOT_TERMS, onClose, onReserveTypeSaved }) {
   const statusLabel = LOT_STATUS_OPTIONS.find((option) => option.value === lot?.rawStatus)?.label ?? (lot?.rawStatus || '—')
+  const reserved = lot?.status === 'reserved'
   const rows = lot
     ? [
         ['Project', projectName || '—'],
@@ -111,13 +176,9 @@ export function LotDetailsDialog({ lot, projectName, terms = DEFAULT_LOT_TERMS, 
               ['TCP', formatPeso(lot.tcp)],
             ]),
         ['Status', statusLabel],
-        [
-          'Last Updated',
-          lot.lastUpdated ? formatDate(lot.lastUpdated, { precision: lot.lastUpdatedPrecision || 'day' }) : '—',
-        ],
+        ...(reserved && lot.reserveType && lot.reservedFor ? [['Reserved For', lot.reservedFor]] : []),
       ]
     : []
-
   return (
     <LotDialog
       open={Boolean(lot)}
@@ -142,6 +203,14 @@ export function LotDetailsDialog({ lot, projectName, terms = DEFAULT_LOT_TERMS, 
             </Text>
           </Flex>
         ))}
+        {reserved ? (
+          <Flex justify="space-between" align="center" gap="16px" py="9px" borderBottom="1px solid" borderColor={COLORS.border}>
+            <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
+              Reserve Type
+            </Text>
+            <ReserveTypeSelect key={lot.id} lot={lot} projectCode={projectCode} onSaved={onReserveTypeSaved} />
+          </Flex>
+        ) : null}
       </Flex>
     </LotDialog>
   )
@@ -196,17 +265,8 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
   const [status, setStatus] = useState('available')
   const showSoldBy = isNew ? status === 'sold' : lot.rawStatus === 'sold'
   const [soldBy, setSoldBy] = useState(lot?.soldBy ?? '')
-  /*
-   * The lot's own "last updated" day, editable because the sheet date a lot came
-   * from is often not the day someone types it in. Imports may hold a month only
-   * ("2026-09"); the date input needs a day, so such a month opens on its 1st.
-   */
-  const [lastUpdated, setLastUpdated] = useState(() => {
-    const stored = String(lot?.lastUpdated ?? '').slice(0, 10)
-    if (/^\d{4}-\d{2}-\d{2}$/.test(stored)) return stored
-    if (/^\d{4}-\d{2}$/.test(stored)) return `${stored}-01`
-    return new Date().toISOString().slice(0, 10)
-  })
+  // New lots can carry a source date. Editing other fields keeps the stored date.
+  const [lastUpdated, setLastUpdated] = useState(() => new Date().toISOString().slice(0, 10))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -219,15 +279,17 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
         phase: hasPhases && phase !== '' ? Number(phase) : hasPhases ? NaN : null,
         category,
         areaSqm: Number(area),
-        lastUpdated,
+        ...(isNew ? { lastUpdated } : {}),
         ...(unitFields.length ? { unit } : {}),
       }
       if (isNew) await createLot(projectCode, { ...fields, status, soldBy })
       else await updateLot(lot.id, projectCode, { ...fields, ...(showSoldBy ? { soldBy } : {}) })
       setSaving(false)
+      notifySaved(`${terms.item} ${isNew ? 'added' : 'updated'}`, `${terms.item} ${lotNo.trim()} was ${isNew ? 'added' : 'saved'}.`)
       onSaved(`${terms.item} ${lotNo.trim()} ${isNew ? 'added' : 'updated'}.`)
     } catch (err) {
       setError(err.message)
+      notifyFailed(`Could not ${isNew ? 'add' : 'update'} the ${terms.item.toLowerCase()}`, err)
       setSaving(false)
     }
   }
@@ -337,15 +399,17 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
           </FormRow>
         ) : null}
 
-        <FormRow id="lot-last-updated" label="Last Updated">
-          <Input
-            id="lot-last-updated"
-            type="date"
-            value={lastUpdated}
-            onChange={(event) => setLastUpdated(event.target.value)}
-            {...fieldProps}
-          />
-        </FormRow>
+        {isNew ? (
+          <FormRow id="lot-last-updated" label="Last Updated">
+            <Input
+              id="lot-last-updated"
+              type="date"
+              value={lastUpdated}
+              onChange={(event) => setLastUpdated(event.target.value)}
+              {...fieldProps}
+            />
+          </FormRow>
+        ) : null}
 
         {showSoldBy ? (
           <FormRow id="lot-sold-by" label="Sold By">
@@ -382,9 +446,12 @@ export function LotsBulkDeleteDialog({ ids, projectCode, terms = DEFAULT_LOT_TER
     try {
       const removed = await deleteLots(ids, projectCode)
       setDeleting(false)
-      onDeleted(`${formatNumber(removed)} ${removed === 1 ? terms.item.toLowerCase() : `${terms.item.toLowerCase()}s`} deleted.`)
+      const message = `${formatNumber(removed)} ${removed === 1 ? terms.item.toLowerCase() : `${terms.item.toLowerCase()}s`} deleted.`
+      notifySaved(message)
+      onDeleted(message)
     } catch (err) {
       setError(err.message)
+      notifyFailed(`Could not delete the ${noun}`, err)
       setDeleting(false)
     }
   }
@@ -428,9 +495,11 @@ export function LotDeleteDialog({ lot, projectCode, terms = DEFAULT_LOT_TERMS, o
     try {
       await deleteLot(lot.id, projectCode)
       setDeleting(false)
+      notifySaved(`${terms.item} ${lot.identifier} deleted`)
       onDeleted(`${terms.item} ${lot.identifier} deleted.`)
     } catch (err) {
       setError(err.message)
+      notifyFailed(`Could not delete ${terms.item.toLowerCase()} ${lot.identifier}`, err)
       setDeleting(false)
     }
   }

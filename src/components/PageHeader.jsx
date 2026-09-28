@@ -7,7 +7,7 @@ import { COLORS } from '@/theme/colors'
  */
 export default function PageHeader({ title, description, actions }) {
   return (
-    <Flex align="flex-start" justify="space-between" gap="16px" mb="24px">
+    <Flex align="flex-start" justify="space-between" gap="16px" mb="24px" flexWrap="wrap">
       <Box minW={0}>
         <Text
           as="h1"
@@ -32,7 +32,7 @@ export default function PageHeader({ title, description, actions }) {
           </Text>
         ) : null}
       </Box>
-      {actions ? <Box flexShrink={0}>{actions}</Box> : null}
+      {actions ? <Box maxW="100%">{actions}</Box> : null}
     </Flex>
   )
 }

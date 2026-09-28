@@ -7,6 +7,7 @@
 import Papa from 'papaparse'
 import { num, text } from './api'
 import { fetchAllRows, supabase } from './supabase'
+import { checkUpload } from '@/lib/uploadRules'
 import {
   LOT_STATUS_OPTIONS,
   LOT_TABLES,
@@ -14,8 +15,11 @@ import {
   SOURCE,
   categoriesFor,
   fetchProjectLots,
+  formatLotIdentifier,
+  isLotIdentifierValid,
   lotTermsFor,
   parsePhaseCode,
+  CATEGORY_CODES,
 } from './projectsData'
 import { fetchPriceLookup } from './pricesData'
 
@@ -25,8 +29,12 @@ const HEADER_ALIASES = {
   phase: ['phase', 'phase_no'],
   category: ['category', 'lot_category', 'type'],
   size_sqm: ['size_sqm', 'size', 'area', 'area_sqm', 'lot_area', 'lot_area_sqm', 'sqm'],
-  price_per_sqm: ['price_per_sqm', 'price_sqm', 'price', 'price_per_sq_m'],
+  // No price column: a lot's price per sqm always comes from the project's
+  // category prices in the database (one per category, edited under Category
+  // prices), so a price in the file is ignored.
   status: ['status', 'lot_status'],
+  // Reservation sheets identify either "Company" or the client's name here.
+  client: ['client', 'client_name', 'buyer', 'reserved_for', 'reservee'],
   // The commercial sheets title the agent column "SD/SM/REALTY".
   sold_by: ['sold_by', 'sales_agent', 'agent', 'sd_sm_realty', 'sd_sm_realty_', 'sd_sm', 'realty'],
   year: ['year', 'yr'],
@@ -119,9 +127,9 @@ function monthYearStamp(record, cell) {
 }
 
 export const CSV_TEMPLATE = [
-  'lot_no,phase,category,size_sqm,price_per_sqm,status,sold_by',
-  'B1 L1,1,regular,250,,available,',
-  'B1 L2,1,prime_corner,320,12500,sold,Juan Dela Cruz',
+  'lot_no,phase,category,size_sqm,status,client,sold_by',
+  'B1 L1,1,regular,250,available,,',
+  'B1 L2,1,prime_corner,320,RSV,Juan Dela Cruz,',
 ].join('\n')
 
 const BATCH = 500
@@ -166,7 +174,10 @@ const isBlankRow = (record, cell) =>
 
 const normalizeHeader = (header) => text(header).trim().toLowerCase().replace(/[\s\-/.]+/g, '_').replace(/[^\w]/g, '')
 const normalizeCategory = (value) => text(value).trim().toLowerCase().replace(/[\s-]+/g, '_')
-const matchKey = (lotNo, phase) => `${text(lotNo).trim().toLowerCase().replace(/\s+/g, ' ')}|${phase ?? ''}`
+const matchKey = (lotNo, phase, section = '') =>
+  `${text(lotNo).trim().toLowerCase().replace(/\s+/g, ' ')}|${phase ?? ''}|${text(section).toLowerCase()}`
+const phaseDisplay = (phase, section, group = 'Phase') =>
+  phase === null ? '—' : `${group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
 
 function parseNumber(value) {
   const cleaned = text(value).replace(/[₱,\s]/g, '').replace(/sqm$/i, '')
@@ -188,6 +199,21 @@ function normalizeStatus(value) {
     (item) => item.value === raw || item.label.toLowerCase() === raw || item.label.toLowerCase().replace(/[()]/g, '') === raw,
   )
   return option?.value ?? null
+}
+
+/** Reservation metadata encoded by the sales sheet's RSV status and Client column. */
+export function reservationFromCsv(statusValue, clientValue) {
+  const status = text(statusValue).trim()
+  if (!/^rsv(?:\b|[-_])/i.test(status)) return { reserve_type: null, reserved_for: null }
+
+  const client = text(clientValue).trim()
+  if (!client) return { reserve_type: null, reserved_for: null }
+  if (/^company$/i.test(client)) return { reserve_type: 'company', reserved_for: null }
+  // "DD" / "MSD" (optionally followed by "RESERVED") are company holds, not client
+  // names, but the sheet's label is kept so the lot still shows which one.
+  const companyHold = client.match(/^(dd|msd)(?:\s+reserved)?$/i)
+  if (companyHold) return { reserve_type: 'company', reserved_for: companyHold[1].toUpperCase() }
+  return { reserve_type: 'client', reserved_for: client }
 }
 
 function parseCsv(file) {
@@ -212,6 +238,7 @@ export async function previewLotImport(projectCode, file) {
   const table = LOT_TABLES[projectCode]
   if (!table) throw new Error(`No lot table is set up for ${projectCode}.`)
   if (!file) throw new Error('Choose a CSV file.')
+  await checkUpload('csv', file)
 
   const parsed = await parseCsv(file)
   const headers = parsed.meta.fields ?? []
@@ -221,12 +248,13 @@ export async function previewLotImport(projectCode, file) {
   const terms = lotTermsFor(projectCode)
   /*
    * Projects whose lots are not grouped (ERHD) need no phase column for grouping —
-   * but when the project encodes its category there (CATEGORY_FROM_PHASE) the
-   * column is required for that instead, and the category column becomes optional.
+   * but the category can be encoded there instead of in a column of its own: a
+   * project's own codes (PHASE_CODES), or, for a sheet with no category column,
+   * the shared ones (CATEGORY_CODES: P, PC, C, or nothing for Regular). The phase
+   * column is then required for that, and the category column is optional.
    */
-  // The category is read out of the phase cell itself, so no category column of
-  // its own has to be present.
-  const derivesCategory = Boolean(PHASE_CODES[projectCode])
+  const codes = PHASE_CODES[projectCode] ?? (column.category ? null : { ...CATEGORY_CODES, phase: Boolean(terms.group) })
+  const derivesCategory = Boolean(codes)
   const missingHeaders = [
     'lot_no',
     ...(terms.group || derivesCategory ? ['phase'] : []),
@@ -235,11 +263,12 @@ export async function previewLotImport(projectCode, file) {
   ].filter((field) => !column[field])
   if (missingHeaders.length) return { rows: [], errors: [], counts: { total: 0, insert: 0, update: 0 }, missingHeaders }
 
+  const tracksSections = projectCode === 'MVLC'
   const [existing, priceFor] = await Promise.all([
-    fetchAllRows(table, 'id, lot_no, phase, category'),
+    fetchAllRows(table, `id, lot_no, phase, category${tracksSections ? ', map_section' : ''}`),
     fetchPriceLookup(projectCode),
   ])
-  const idByKey = new Map(existing.map((lot) => [matchKey(lot.lot_no, lot.phase), lot.id]))
+  const idByKey = new Map(existing.map((lot) => [matchKey(formatLotIdentifier(projectCode, lot.lot_no), lot.phase, lot.map_section), lot.id]))
   // Categories already in the table plus the ones this project offers, so a valid
   // category that no lot happens to use yet is not rejected as unknown.
   const knownCategories = new Set(
@@ -263,13 +292,20 @@ export async function previewLotImport(projectCode, file) {
       return
     }
 
-    const lotNo = repairLotNo(cell(record, 'lot_no'))
+    const lotNo = formatLotIdentifier(projectCode, repairLotNo(cell(record, 'lot_no')))
     if (!lotNo) problems.push('lot number is empty')
+    else if (!isLotIdentifierValid(projectCode, lotNo)) problems.push('lot number must use a format such as B21 L1, B23-B L1, or C L1')
 
     const phaseCell = cell(record, 'phase')
     // A coded phase (MVLC's "MV-C-1A") gives the number; otherwise it is read as one.
-    const coded = parsePhaseCode(projectCode, phaseCell)
-    const phase = terms.group ? (coded.phase ?? parseNumber(phaseCell.replace(/^(phase|tower)\s*/i, ''))) : null
+    const coded = parsePhaseCode(projectCode, phaseCell, codes)
+    /*
+     * A cell that only carries a category code and no number at all ("ERHD-PC",
+     * "ERHD") names no phase: the lot is imported without one rather than rejected.
+     */
+    const codeOnly = derivesCategory && coded.phase === null && !/\d/.test(phaseCell)
+    const phase = terms.group && !codeOnly ? (coded.phase ?? parseNumber(phaseCell.replace(/^(phase|tower)\s*/i, ''))) : null
+    const mapSection = tracksSections ? (coded.section ?? null) : null
     if (phase !== null && !(Number.isInteger(phase) && phase > 0)) {
       problems.push(`${terms.group.toLowerCase()} "${phaseCell}" is not a whole number`)
     }
@@ -278,24 +314,26 @@ export async function previewLotImport(projectCode, file) {
     const category = normalizeCategory(cell(record, 'category')) || coded.category
     if (!category) problems.push(derivesCategory ? `no category could be read from "${phaseCell}"` : 'category is empty')
     else if (knownCategories.size && !knownCategories.has(category)) {
-      problems.push(`unknown category "${cell(record, 'category')}" (use: ${[...knownCategories].sort().join(', ')})`)
+      problems.push(`unknown category "${cell(record, 'category') || category}" (use: ${[...knownCategories].sort().join(', ')})`)
     }
 
     const sizeSqm = parseNumber(cell(record, 'size_sqm'))
     if (!(Number.isFinite(sizeSqm) && sizeSqm > 0)) problems.push('lot area must be a number greater than 0')
 
-    const csvPrice = parseNumber(cell(record, 'price_per_sqm'))
-    if (csvPrice !== null && !(Number.isFinite(csvPrice) && csvPrice > 0)) problems.push('price per sqm must be a number greater than 0')
-    // An ungrouped project (ERHD) prices every lot from a single row, so its null
-    // phase is a valid lookup rather than a reason to skip the price table.
-    const pricePerSqm =
-      csvPrice ?? (category && (phase === null || Number.isInteger(phase)) ? priceFor(phase, category) : null) ?? null
-    if (pricePerSqm === null && category) {
-      problems.push(`no price per sqm given and none set for ${phase === null ? 'this project' : `${terms.group} ${phase}`} ${category}`)
-    }
+    // The price is always the category's price in the database. An ungrouped
+    // project (ERHD) prices every lot from a single row, so its null phase is a
+    // valid lookup rather than a reason to skip the price table.
+    const pricePerSqm = (category && (phase === null || Number.isInteger(phase)) ? priceFor(phase, category) : null) ?? null
+    /*
+     * No price set in the database for this category is not a reason to skip
+     * the lot: a new one is added with no price and TCP, an existing one keeps
+     * what it has, and saving the category's price later (Category prices)
+     * re-prices every lot in it, these included.
+     */
 
     const status = normalizeStatus(cell(record, 'status'))
     if (!status) problems.push(`unknown status "${cell(record, 'status')}" (use: ${LOT_STATUS_OPTIONS.map((o) => o.value).join(', ')})`)
+    const reservation = reservationFromCsv(cell(record, 'status'), cell(record, 'client'))
 
     /*
      * The sales sheets keep agent names in columns of their own that the portal
@@ -305,8 +343,8 @@ export async function previewLotImport(projectCode, file) {
      */
     const soldBy = cell(record, 'sold_by')
 
-    const key = matchKey(lotNo, phase)
-    if (lotNo && seen.has(key)) problems.push(`duplicate of row ${seen.get(key)} (same lot number and phase)`)
+    const key = matchKey(lotNo, phase, mapSection)
+    if (lotNo && seen.has(key)) problems.push(`duplicate of row ${seen.get(key)} (same lot number, phase, and section)`)
     else if (lotNo) seen.set(key, rowNumber)
 
     if (problems.length) {
@@ -319,11 +357,14 @@ export async function previewLotImport(projectCode, file) {
       id: idByKey.get(key) ?? null,
       lot_no: lotNo,
       phase,
+      ...(tracksSections ? { map_section: mapSection } : {}),
+      phase_label: phaseDisplay(phase, mapSection, terms.group),
       category,
       size_sqm: sizeSqm,
       price_per_sqm: pricePerSqm,
-      total: Math.round(sizeSqm * pricePerSqm * 100) / 100,
+      total: pricePerSqm === null ? null : Math.round(sizeSqm * pricePerSqm * 100) / 100,
       status,
+      ...reservation,
       sold_by: soldBy || null,
       ...monthYearStamp(record, cell),
     })
@@ -362,11 +403,15 @@ export async function commitLotImport(projectCode, rows, onProgress = () => {}) 
   const toColumns = (row) => ({
     lot_no: row.lot_no,
     phase: row.phase,
+    ...(projectCode === 'MVLC' ? { map_section: row.map_section ?? null } : {}),
     category: row.category,
     size_sqm: row.size_sqm,
-    price_per_sqm: row.price_per_sqm,
-    // `total` is generated by the database from size_sqm * price_per_sqm.
+    // The category's database price; left out when it has none, so an updated
+    // lot keeps its stored price. `total` is generated from size_sqm * price_per_sqm.
+    ...(row.price_per_sqm !== null ? { price_per_sqm: row.price_per_sqm } : {}),
     status: row.status,
+    reserve_type: row.reserve_type,
+    reserved_for: row.reserved_for,
     // Left out when the file named no agent, so the stored one survives the import.
     ...(row.sold_by ? { sold_by: row.sold_by } : {}),
     last_updated: row.date,
@@ -393,6 +438,9 @@ export async function commitLotImport(projectCode, rows, onProgress = () => {}) 
     floor_level: '20260916_add_mscc_unit_columns.sql',
     unit_view: '20260916_add_mscc_unit_columns.sql',
     end_unit: '20260916_add_mscc_unit_columns.sql',
+    map_section: '20261001_add_mvlc_lot_map_sections.sql',
+    reserve_type: '20260921_add_lot_reserve_type.sql',
+    reserved_for: '20261004_add_lot_reserved_for.sql',
   }
   const migrationHint = (message) => {
     const column = Object.keys(COLUMN_MIGRATIONS).find((name) => message.includes(name))
@@ -456,17 +504,21 @@ export async function exportLotsCsv(query) {
       'price_per_sqm',
       'total',
       'status',
+      'client',
       'sold_by',
       ...unitFields.map((field) => field.column),
     ],
     data: lots.map((lot) => [
       lot.lotNo,
-      lot.phaseNo ?? '',
+      // Keep MVLC's A/B/C/East section in an exported file so importing it back
+      // cannot collapse Phase 1A and Phase 1B into the same phase.
+      project.code === 'MVLC' ? lot.phase : (lot.phaseNo ?? ''),
       lot.rawCategory,
       lot.areaSqm,
       lot.pricePerSqm,
       lot.tcp,
       lot.rawStatus,
+      lot.reserveType === 'company' ? lot.reservedFor || 'Company' : lot.reserveType === 'client' ? lot.reservedFor : '',
       lot.soldBy,
       ...unitFields.map((field) => lot[field.key] ?? ''),
     ]),

@@ -1,11 +1,12 @@
 import { Box, Flex, Menu, Portal, Text } from '@chakra-ui/react'
 import { LuDownload, LuSlidersHorizontal } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
+import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import { COLORS } from '@/theme/colors'
 
 /**
- * `projects`, `project` and `onExport` drive the two buttons in the corner.
+ * `projects`, `project`, `onRefresh` and `onExport` drive the buttons in the corner.
  * Filters opens a menu over the same state the transactions table reads, and
  * Export writes out exactly what those filters leave — so both controls
  * describe one set of movements rather than two.
@@ -14,14 +15,14 @@ import { COLORS } from '@/theme/colors'
  * only a `last_updated` stamp that is empty on most rows, so every window built
  * on it hid stock rather than narrowing it.
  */
-export default function PortfolioHero({ projects = [], project = 'overall', onProjectChange, onExport }) {
+export default function PortfolioHero({ projects = [], project = 'overall', onProjectChange, onRefresh, onExport, exporting = false }) {
   // Said on the button itself, so a narrowed dashboard is never silent about it.
   const active = project !== 'overall' ? 1 : 0
 
   return (
     <Card p="24px">
       <Flex align="flex-start" justify="space-between" gap="20px" flexWrap="wrap">
-        <Box minW="260px" flex="1">
+        <Box minW={0} flex="1" flexBasis={{ base: '100%', sm: 'auto' }}>
           <Text
             as="h2"
             fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -47,6 +48,7 @@ export default function PortfolioHero({ projects = [], project = 'overall', onPr
         </Box>
 
         <Flex align="center" gap="10px" flexWrap="wrap">
+          {onRefresh ? <RefreshButton onRefresh={onRefresh} label="Refresh dashboard" /> : null}
           <Menu.Root closeOnSelect={false} positioning={{ placement: 'bottom-end', gutter: 6 }}>
             <Menu.Trigger asChild>
               <ToolbarButton icon={LuSlidersHorizontal}>{active ? `Filters (${active})` : 'Filters'}</ToolbarButton>
@@ -81,8 +83,8 @@ export default function PortfolioHero({ projects = [], project = 'overall', onPr
             </Portal>
           </Menu.Root>
 
-          <ToolbarButton icon={LuDownload} variant="primary" onClick={onExport}>
-            Export
+          <ToolbarButton icon={LuDownload} variant="primary" onClick={onExport} disabled={exporting}>
+            {exporting ? 'Exporting…' : 'Export'}
           </ToolbarButton>
         </Flex>
       </Flex>

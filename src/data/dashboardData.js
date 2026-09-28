@@ -2,9 +2,10 @@
  * ---------------------------------------------------------------------------
  * DASHBOARD DATA SOURCE
  * ---------------------------------------------------------------------------
- * Every figure is computed from the Supabase `lots` and `projects` tables. There
- * is no sample data: until VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are set the
- * dashboard renders zeros.
+ * Every figure is computed from the per-project Supabase lot tables and the
+ * `projects` table. MVLC is read from `mvlc_lots` through LOT_TABLES; the legacy
+ * `lots` table is not used for it. There is no sample data: until
+ * VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY are set the dashboard renders zeros.
  *
  * Every figure is a count or an area, never an amount of money. A lot's `total`
  * is its size times whatever price per sqm the price table holds at the moment,
@@ -94,8 +95,13 @@ export const EMPTY_DASHBOARD = {
  * The grouping word is the project's own — Tower at MSCC — and is left out
  * entirely by a project that does not group its lots.
  */
+const phaseLabel = (group, phase, section = null) =>
+  group && phase !== null && phase !== undefined
+    ? `${group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
+    : ''
+
 const lotLabel = (project, lot) =>
-  [project.name, project.group && lot.phase !== null ? `${project.group} ${lot.phase}` : '', lot.lot_no]
+  [project.name, phaseLabel(project.group, lot.phase, lot.map_section), lot.lot_no]
     .filter(Boolean)
     .join(' · ')
 
@@ -127,13 +133,15 @@ function sellThrough(rows) {
       })
     }
     const project = byProject.get(lot.projectCode)
+    // MVLC sections are distinct phases on screen: 1A, 1B, 1 East, and so on.
     // null covers a project that does not group its lots, and a row missing its phase.
-    const phaseKey = lot.phase === null ? '' : String(lot.phase)
+    const phaseKey = lot.phase === null ? '' : `${lot.phase}|${lot.mapSection ?? ''}`
     if (!project.phases.has(phaseKey)) {
       project.phases.set(phaseKey, {
         key: `${lot.projectCode}-${phaseKey || 'ungrouped'}`,
-        label: phaseKey && project.unit ? `${project.unit} ${phaseKey}` : project.label,
+        label: phaseKey ? phaseLabel(project.unit, lot.phase, lot.mapSection) : project.label,
         phase: lot.phase,
+        mapSection: lot.mapSection,
         sold: 0,
         reserved: 0,
         open: 0,
@@ -157,7 +165,11 @@ function sellThrough(rows) {
       ...withPct(project),
       phases: [...project.phases.values()]
         // Numbered phases in order, then whatever the project does not group.
-        .sort((a, b) => (a.phase === null ? 1 : b.phase === null ? -1 : a.phase - b.phase))
+        .sort(
+          (a, b) =>
+            (a.phase === null ? 1 : b.phase === null ? -1 : a.phase - b.phase) ||
+            String(a.mapSection ?? '').localeCompare(String(b.mapSection ?? '')),
+        )
         .map(withPct),
     }))
 }
@@ -193,7 +205,11 @@ async function fetchProjectNames() {
 async function fetchLotsFor(code, table, names) {
   try {
     // No `last_updated`: nothing the dashboard shows is counted by date any more.
-    const lots = await fetchAllRows(table, 'id, lot_no, phase, size_sqm, status, total')
+    const tracksSections = table === LOT_TABLES.MVLC
+    const lots = await fetchAllRows(
+      table,
+      `id, lot_no, phase, size_sqm, status, total${tracksSections ? ', map_section' : ''}`,
+    )
     const count = { available: 0, reserved: 0, sold: 0 }
     // Square metres per status: the size of what has moved, which no repricing
     // can change underneath the figure.
@@ -237,6 +253,7 @@ async function fetchLotsFor(code, table, names) {
           status: uiStatus(lot.status),
           // Phase and the project's word for it, for the sell-through card.
           phase: lot.phase === null || lot.phase === undefined || lot.phase === '' ? null : Number(lot.phase),
+          mapSection: String(lot.map_section ?? '').trim() || null,
           group: project.group,
         }))
         // A status the portal does not recognise belongs to no count at all.
@@ -412,3 +429,6 @@ export async function fetchDashboard() {
 }
 
 export default fetchDashboard
+
+/** The tables fetchDashboard reads, so its Refresh button knows what to check. */
+fetchDashboard.tables = () => ['projects', ...Object.values(LOT_TABLES), 'announcements']

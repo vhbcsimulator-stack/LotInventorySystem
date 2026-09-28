@@ -13,6 +13,7 @@ import {
   LuX,
 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
+import RefreshButton from '@/components/ui-kit/RefreshButton'
 import { GallerySkeleton } from '@/components/skeletons/ProjectViewSkeletons'
 import EmptyState from '@/components/EmptyState'
 import { FullscreenImageDialog, ZoomableImage } from '@/components/projects/ProjectMapView'
@@ -20,8 +21,44 @@ import useApiQuery from '@/hooks/useApiQuery'
 import { DEV_GALLERIES, deleteDevImage, fetchDevImages, replaceDevImage, uploadDevImage } from '@/data/devImagesData'
 import { COLORS } from '@/theme/colors'
 import { formatDate } from '@/utils/format'
+import { notifyFailed, notifySaved } from '@/lib/notify'
+import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
 
 const FONT = 'Inter, system-ui, sans-serif'
+
+export function DevGalleryDialog({ open, onClose, gallery, projectCode, projectName }) {
+  const title = DEV_GALLERIES[gallery]?.title ?? 'Project images'
+
+  return (
+    <Dialog.Root open={open} onOpenChange={({ open: nextOpen }) => { if (!nextOpen) onClose?.() }} placement="center" size="xl">
+      <Portal>
+        <Dialog.Backdrop />
+        <Dialog.Positioner p={{ base: '12px', md: '24px' }}>
+          <Dialog.Content maxH="calc(100dvh - 48px)" borderRadius="16px" overflow="hidden">
+            <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} pr="56px">
+              <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="19px" color={COLORS.heading}>
+                {title}
+              </Dialog.Title>
+            </Dialog.Header>
+            <Dialog.Body p={{ base: '14px', md: '20px' }} overflowY="auto">
+              {open ? (
+                <DevGalleryView
+                  key={`${gallery}:${projectCode}`}
+                  gallery={gallery}
+                  projectCode={projectCode}
+                  projectName={projectName}
+                />
+              ) : null}
+            </Dialog.Body>
+            <Dialog.CloseTrigger asChild top="12px" right="12px">
+              <CloseButton size="sm" />
+            </Dialog.CloseTrigger>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
+    </Dialog.Root>
+  )
+}
 
 function Button({ icon, children, tone = 'neutral', loading, ...rest }) {
   const tones = {
@@ -118,7 +155,7 @@ function UploadImagesDialog({ open, title, busy, progress, error, onClose, onUpl
 
   function addFiles(list) {
     const incoming = [...(list ?? [])]
-    const images = incoming.filter((file) => file.type.startsWith('image/'))
+    const images = incoming.filter((file) => !uploadProblem('photo', file))
     setRejected(incoming.length - images.length)
     setFiles((prev) => {
       const seen = new Set(prev.map(fileKey))
@@ -149,11 +186,12 @@ function UploadImagesDialog({ open, title, busy, progress, error, onClose, onUpl
       }}
       placement="center"
       size="lg"
+      scrollBehavior="inside"
     >
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px" pr="56px">
               <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
                 Upload {title} Images
@@ -197,11 +235,14 @@ function UploadImagesDialog({ open, title, busy, progress, error, onClose, onUpl
                 <Text fontFamily={FONT} fontSize="14px" color={COLORS.subtle}>
                   or click to browse
                 </Text>
+                <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+                  {describeUpload('photo')} each
+                </Text>
               </Flex>
               <input
                 ref={input}
                 type="file"
-                accept="image/*"
+                accept={acceptFor('photo')}
                 multiple
                 hidden
                 onChange={(event) => {
@@ -212,7 +253,7 @@ function UploadImagesDialog({ open, title, busy, progress, error, onClose, onUpl
 
               {rejected ? (
                 <Text mt="10px" fontFamily={FONT} fontSize="12.5px" color="#92400E">
-                  {rejected} {rejected === 1 ? 'file was' : 'files were'} skipped because {rejected === 1 ? 'it is' : 'they are'} not an image.
+                  {rejected} {rejected === 1 ? 'file was' : 'files were'} skipped. Only {describeUpload('photo')} images can be uploaded.
                 </Text>
               ) : null}
 
@@ -340,7 +381,6 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
   const [openIndex, setOpenIndex] = useState(null)
   const [busy, setBusy] = useState('') // '' | 'upload' | 'replace:<id>' | 'delete'
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(null) // array of images awaiting confirmation
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState(() => new Set())
@@ -352,7 +392,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
   const title = DEV_GALLERIES[gallery]?.title ?? ''
 
   const query = useMemo(() => ({ gallery, projectCode }), [gallery, projectCode])
-  const { data, loading, reload } = useApiQuery(fetchDevImages, query)
+  const { data, loading, reload, refresh } = useApiQuery(fetchDevImages, query)
   const images = data?.images ?? []
   const current = openIndex === null ? null : images[openIndex]
   const canEdit = data?.source === 'database' && Boolean(projectCode)
@@ -361,14 +401,15 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
   async function run(kind, action, success) {
     setBusy(kind)
     setError('')
-    setNotice('')
     try {
       const result = await action()
-      setNotice(typeof result === 'string' ? result : success)
+      const message = typeof result === 'string' ? result : success
+      notifySaved(message.replace(/\.$/, ''))
       reload()
       return true
     } catch (err) {
       setError(err.message)
+      notifyFailed(kind === 'upload' ? 'Upload failed' : kind === 'delete' ? 'Delete failed' : 'Replace failed', err)
       // A replace can fail after the old image was deleted; re-read so the grid is accurate.
       reload()
       return false
@@ -523,9 +564,9 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
             </Text>
           ) : null}
         </Flex>
-        {canEdit ? (
-          <Flex gap="8px" wrap="wrap">
-            {selecting ? (
+        <Flex gap="8px" wrap="wrap">
+            <RefreshButton onRefresh={refresh} label="Refresh images" size="34px" />
+            {!canEdit ? null : selecting ? (
               <>
                 <Button
                   disabled={Boolean(busy)}
@@ -569,16 +610,10 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                 </Button>
               </>
             )}
-          </Flex>
-        ) : null}
-        <input ref={replaceInput} type="file" accept="image/*" hidden onChange={handleReplace} />
+        </Flex>
+        <input ref={replaceInput} type="file" accept={acceptFor('photo')} hidden onChange={handleReplace} />
       </Flex>
 
-      {notice ? (
-        <Text role="status" mb="12px" fontFamily={FONT} fontSize="13px" color={COLORS.brandGreen}>
-          {notice}
-        </Text>
-      ) : null}
       {error && !confirmDelete ? (
         <Text role="alert" mb="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
           {error}
@@ -672,12 +707,14 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
         }}
         placement="center"
         size="xl"
+        scrollBehavior="inside"
       >
         <Portal>
           <Dialog.Backdrop />
           <Dialog.Positioner px="16px">
             <Dialog.Content
               borderRadius="16px"
+              maxH="calc(100dvh - 32px)"
               onKeyDown={(event) => {
                 if (busy) return
                 if (event.key === 'ArrowLeft' && openIndex > 0) setOpenIndex(openIndex - 1)

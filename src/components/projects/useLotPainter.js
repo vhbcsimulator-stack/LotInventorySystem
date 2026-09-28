@@ -1,25 +1,59 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createRegionFinder, hexToRgb, paintRegion, regionContains } from './lotRecolor'
-import { MAP_LOT_FILL } from '@/theme/colors'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { TOLERANCE_DEFAULT, createRegionFinder, hexToRgb, regionContains, sampleColor } from './lotRecolor'
+import { DEFAULT_PALETTE } from './legendPalette'
+import { SVG_TYPE, isSvgUrl, lotMask, maskPath, pictureSvg, recolorMatrix, recolorSvg, sanitizeSvg } from '@/lib/svgMaps'
+import { UPLOAD_RULES } from '@/lib/uploadRules'
 
-const FILL_RGB = Object.fromEntries(MAP_LOT_FILL.map(({ value, color }) => [value, hexToRgb(color)]))
+/*
+ * An SVG map can hold far more detail than its annotations' size — the MVLC
+ * maps are a 7016-pixel picture drawn into a 2048-unit SVG. Lots are found on a
+ * copy drawn that much sharper, within this many pixels, so thin letter strokes
+ * and small white lettering are still told apart from the lot around them.
+ */
+const SVG_PIXEL_BUDGET = 16_000_000
+const SVG_MAX_SCALE = 4
 
-/** The map drawn at the annotations' size, so polygon coordinates are pixel coordinates. */
-function loadPixels(url, width, height) {
+/*
+ * A JPG, PNG or WebP map has its lots found at its own full resolution,
+ * whatever size the annotations were drawn at — up to this many pixels, past
+ * which the browser would run short of memory.
+ */
+const RASTER_PIXEL_BUDGET = 64_000_000
+
+/** How much larger than the annotations' size to draw the map for finding lots. */
+function detailScale(url, width, height) {
+  if (!isSvgUrl(url) || !width || !height) return 1
+  return Math.max(1, Math.min(SVG_MAX_SCALE, Math.sqrt(SVG_PIXEL_BUDGET / (width * height))))
+}
+
+/**
+ * The map's pixels: an SVG drawn at `width` × `height` (the annotations' size)
+ * times `scale`; a picture at its own size, or smaller past the budget.
+ */
+function loadPixels(url, width, height, scale) {
   return new Promise((resolve, reject) => {
     const img = new Image()
     // Storage serves public files with CORS headers, which lets the canvas read them.
     img.crossOrigin = 'anonymous'
     img.onload = () => {
       try {
+        let W = Math.round(width * scale)
+        let H = Math.round(height * scale)
+        if (!isSvgUrl(url) && img.naturalWidth && img.naturalHeight) {
+          const shrink = Math.min(1, Math.sqrt(RASTER_PIXEL_BUDGET / (img.naturalWidth * img.naturalHeight)))
+          W = Math.round(img.naturalWidth * shrink)
+          H = Math.round(img.naturalHeight * shrink)
+        }
         const canvas = document.createElement('canvas')
-        canvas.width = width
-        canvas.height = height
+        canvas.width = W
+        canvas.height = H
         const context = canvas.getContext('2d', { willReadFrequently: true })
         context.imageSmoothingQuality = 'high'
-        context.drawImage(img, 0, 0, width, height)
-        const image = context.getImageData(0, 0, width, height)
-        resolve({ image, finder: createRegionFinder(image), regions: new Map() })
+        context.drawImage(img, 0, 0, W, H)
+        const image = context.getImageData(0, 0, W, H)
+        // How much sharper than the annotations' size this copy is; lot sizes are judged by it.
+        const detail = Math.sqrt((W * H) / (width * height))
+        resolve({ image, finder: createRegionFinder(image, { scale: detail }), regions: new Map() })
       } catch {
         reject(new Error('This map image cannot be recolored — its host does not allow reading its pixels.'))
       }
@@ -29,74 +63,147 @@ function loadPixels(url, width, height) {
   })
 }
 
+/** The file's own bytes as a data: URL — read, not re-encoded. */
+const toDataUrl = (blob) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error('The map could not be read for saving.'))
+    reader.readAsDataURL(blob)
+  })
+
 const keyOf = (paint) => (paint.shapeId !== undefined ? `s:${paint.shapeId}` : `p:${paint.x.toFixed(1)},${paint.y.toFixed(1)}`)
 
 /**
- * Repaints lots of the map at `url` onto `canvasRef`, a <canvas width height>
- * the caller renders at the annotations' size.
+ * Finds and recolours lots of the map at `url`, drawn at `width` × `height`
+ * (the annotations' size, so polygon coordinates are pixel coordinates).
  *
  * `paints` is [{ shapeId, status }] for an annotated lot (its outline comes from
  * `shapes`) or [{ x, y, status }] for a lot clicked outside any annotation, in
  * the same coordinates. Later entries win where two cover the same lot.
  *
- * Returns { ready, error, locatePoint(x, y), toBlob() }: locatePoint says whether
- * a point is inside a lot and which point-paint (if any) already covers it.
+ * `palette` is { status: '#RRGGBB' } — the colour each status paints; the
+ * defaults, or colours read off the map's own legend.
+ *
+ * Returns { ready, error, isSvg, layers, locatePoint(x, y), sampleColor(x, y),
+ * toSvgBlob() — async, the map and its coloured lots as one SVG }. `layers` is what the preview draws over the map (see
+ * PaintLayers); locatePoint says whether a point is inside a lot and which
+ * point-paint (if any) already covers it.
  */
-export default function useLotPainter({ enabled, url, width, height, shapes, paints, canvasRef }) {
+export default function useLotPainter({
+  enabled,
+  url,
+  width,
+  height,
+  shapes,
+  paints,
+  tolerance = TOLERANCE_DEFAULT,
+  palette = DEFAULT_PALETTE,
+  // How an annotated lot is found: 'polygon' colors exactly inside its outline; 'lines' follows the printed lot lines from it.
+  shapeMode = 'polygon',
+}) {
   const [loaded, setLoaded] = useState(null) // { key, pixels }
   const [failed, setFailed] = useState(null) // { key, message }
-  const output = useRef(null)
-  const loadKey = `${url}|${width}x${height}`
-  const rings = useMemo(() => new Map(shapes.map((shape) => [shape.id, shape.rings])), [shapes])
+  const scale = detailScale(url, width, height)
+  const loadKey = `${url}|${width}x${height}|${scale}`
+  const pixels = loaded?.key === loadKey ? loaded.pixels : null
+  /*
+   * Lots are found on a copy drawn W × H — a picture's own size, or the
+   * annotations' size made sharper for an SVG map. Regions are in that copy's
+   * pixels; outlines and clicks are scaled into it, and what the preview draws
+   * is scaled back.
+   */
+  const W = pixels?.image.width ?? Math.round(width * scale)
+  const H = pixels?.image.height ?? Math.round(height * scale)
+  const sx = width ? W / width : 1
+  const sy = height ? H / height : 1
+  const rings = useMemo(
+    () => new Map(shapes.map((shape) => [shape.id, shape.rings.map((ring) => ring.map(([x, y]) => [x * sx, y * sy]))])),
+    [shapes, sx, sy],
+  )
 
   useEffect(() => {
     if (!enabled || !url || !width || !height) return undefined
     let live = true
-    loadPixels(url, width, height).then(
+    loadPixels(url, width, height, scale).then(
       (pixels) => live && setLoaded({ key: loadKey, pixels }),
       (err) => live && setFailed({ key: loadKey, message: err.message }),
     )
     return () => {
       live = false
     }
-  }, [enabled, url, width, height, loadKey])
+  }, [enabled, url, width, height, scale, loadKey])
 
-  const pixels = loaded?.key === loadKey ? loaded.pixels : null
+  const fillRgb = useMemo(() => Object.fromEntries(Object.entries(palette).map(([status, hex]) => [status, hexToRgb(hex)])), [palette])
 
-  /** The pixels a paint covers, worked out once from the untouched original. */
+  /**
+   * The pixels a paint covers, worked out once per tolerance from the untouched
+   * original — so moving the tolerance back and forth costs nothing the second time.
+   */
   const regionOf = useCallback(
     (paint) => {
-      const key = keyOf(paint)
+      const shape = paint.shapeId !== undefined
+      const key = `${keyOf(paint)}@${tolerance}${shape ? `/${shapeMode}` : ''}`
       if (!pixels.regions.has(key)) {
+        const findShape = shapeMode === 'lines' ? pixels.finder.inPolygon : pixels.finder.inPolygonExact
         const region =
-          paint.shapeId !== undefined
+          shape
             ? rings.has(paint.shapeId)
-              ? pixels.finder.inPolygon(rings.get(paint.shapeId))
+              ? findShape(rings.get(paint.shapeId), { tolerance })
               : null
-            : pixels.finder.at(paint.x / (width - 1), paint.y / (height - 1))
+            : pixels.finder.at(paint.x / (width - 1), paint.y / (height - 1), { tolerance })
         pixels.regions.set(key, region)
       }
       return pixels.regions.get(key)
     },
-    [pixels, rings, width, height],
+    [pixels, rings, width, height, tolerance, shapeMode],
   )
 
-  // Layout effect, so the canvas never shows unpainted for a frame.
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current
-    if (!enabled || !pixels || !canvas) return
-    const { image } = pixels
-    if (output.current?.width !== image.width || output.current?.height !== image.height) {
-      output.current = new ImageData(image.width, image.height)
-    }
-    const out = output.current
-    out.data.set(image.data)
-    for (const paint of paints) {
+  /**
+   * Each painted lot once — its last paint wins — with its new colour and the
+   * colour it has on the untouched map.
+   */
+  const painted = useMemo(() => {
+    if (!pixels) return []
+    const { data } = pixels.image
+    const lots = []
+    for (const paint of [...paints].reverse()) {
       const region = regionOf(paint)
-      if (region && FILL_RGB[paint.status]) paintRegion(out.data, region, FILL_RGB[paint.status])
+      if (!region || !fillRgb[paint.status]) continue
+      if (lots.some((lot) => regionContains(lot.region, region.seed))) continue
+      const o = region.seed * 4
+      lots.unshift({ region, rgb: fillRgb[paint.status], fill: [data[o], data[o + 1], data[o + 2]] })
     }
-    canvas.getContext('2d').putImageData(out, 0, 0)
-  }, [enabled, pixels, paints, regionOf, canvasRef])
+    return lots
+  }, [pixels, paints, regionOf, fillRgb])
+
+  /*
+   * The preview's colour layers: per old → new colour pair, the painted lots'
+   * outlines (in canvas pixels, the preview's own units), the colour matrix, and
+   * the area it works over. The preview draws the map it already shows through
+   * these, clipped to the lots — at full display resolution, the instant a lot
+   * is painted, with no copy of the map at a lower resolution in between.
+   */
+  const layers = useMemo(() => {
+    const byPair = new Map()
+    for (const { region, rgb, fill } of painted) {
+      const key = `${fill.join('-')}_${rgb.join('-')}`
+      if (!byPair.has(key)) {
+        byPair.set(key, { key, matrix: recolorMatrix(fill, rgb), paths: [], box: [Infinity, Infinity, -Infinity, -Infinity] })
+      }
+      const layer = byPair.get(key)
+      const mask = lotMask(region, W, H)
+      layer.paths.push(maskPath(mask))
+      layer.box = [
+        Math.min(layer.box[0], mask.x0),
+        Math.min(layer.box[1], mask.y0),
+        Math.max(layer.box[2], mask.x0 + mask.w),
+        Math.max(layer.box[3], mask.y0 + mask.h),
+      ]
+    }
+    // Outlines are in the sharper copy's pixels; `scale` takes them back to the preview's units.
+    return [...byPair.values()].map(({ paths, ...layer }) => ({ ...layer, d: paths.join(''), scale: [sx, sy] }))
+  }, [painted, W, H, sx, sy])
 
   const locatePoint = useCallback(
     (x, y) => {
@@ -113,20 +220,51 @@ export default function useLotPainter({ enabled, url, width, height, shapes, pai
     [pixels, paints, regionOf],
   )
 
-  const toBlob = useCallback(
-    () =>
-      new Promise((resolve, reject) => {
-        const canvas = canvasRef.current
-        if (!canvas) return reject(new Error('Nothing to save yet.'))
-        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('The browser could not export the image.'))), 'image/png')
-      }),
-    [canvasRef],
+  /** The untouched map's colour at (x, y), in the annotations' coordinates — for reading a legend swatch. */
+  const sample = useCallback(
+    (x, y) => (pixels ? sampleColor(pixels.image, x * sx, y * sy, Math.max(2, Math.round(3 * sx))) : null),
+    [pixels, sx, sy],
   )
 
+  /*
+   * The recoloured map, always as SVG — the map and its coloured lots in one
+   * file, with nothing re-encoded:
+   *  - an SVG map is its own SVG, with each painted lot written in (see recolorSvg);
+   *  - a JPG, PNG or WebP map is first wrapped, byte for byte, in an SVG of the
+   *    annotations' size (see pictureSvg) — the file as uploaded, not a
+   *    re-compressed copy — and the lots are written in over it.
+   * Lots become plain filled paths, traced on the sharpest copy lots are found
+   * on, so lettering and lines stay crisp; nothing the Flutter app's
+   * flutter_svg cannot draw is used.
+   */
+  const toSvgBlob = useCallback(async () => {
+    if (!pixels) throw new Error('Nothing to save yet.')
+    const response = await fetch(url)
+    if (!response.ok) throw new Error('The map could not be loaded for saving.')
+    let original = await response.blob()
+    const svg = isSvgUrl(url) || /svg/i.test(original.type)
+    if (!svg && !/^image\//.test(original.type)) {
+      // Storage served no type: go by the file's extension.
+      const ext = /\.(png|jpe?g|webp|gif)(?:$|[?#])/i.exec(url)?.[1].toLowerCase()
+      original = new Blob([original], { type: `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}` })
+    }
+    const source = svg ? await original.text() : pictureSvg(await toDataUrl(original), width, height)
+    const { text } = recolorSvg(source, { width: W, height: H, lots: painted })
+    const blob = new Blob([sanitizeSvg(text)], { type: SVG_TYPE })
+    if (blob.size > UPLOAD_RULES.map.maxBytes) {
+      throw new Error(`The colored map comes to ${(blob.size / 1024 / 1024).toFixed(1)} MB, past the ${UPLOAD_RULES.map.maxBytes / 1024 / 1024} MB map limit.`)
+    }
+    return blob
+  }, [pixels, url, width, height, W, H, painted])
+
+  const ready = enabled && Boolean(pixels)
   return {
-    ready: enabled && Boolean(pixels),
+    ready,
     error: enabled && failed?.key === loadKey ? failed.message : '',
+    isSvg: isSvgUrl(url),
+    layers: ready ? layers : [],
     locatePoint,
-    toBlob,
+    sampleColor: sample,
+    toSvgBlob,
   }
 }

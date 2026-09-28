@@ -2,41 +2,19 @@ import { Box, Flex, Icon, Menu, NativeSelect, Portal, Text } from '@chakra-ui/re
 import {
   LuChevronDown,
   LuFolderKanban,
-  LuHammer,
   LuMap,
-  LuSparkles,
-  LuMapPin,
-  LuNewspaper,
   LuMountain,
   LuTable2,
 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
-import SegmentedControl from '@/components/ui-kit/SegmentedControl'
 import { COLORS } from '@/theme/colors'
-import { formatNumber } from '@/utils/format'
 
 const VIEWS = [
   { value: 'table', label: 'Lot Table', icon: LuTable2 },
   { value: 'map', label: 'Map', icon: LuMap },
-  { value: 'project-dev', label: 'Project Development', icon: LuHammer },
-  { value: 'future-dev', label: 'Future Development', icon: LuSparkles },
-  { value: 'flyers', label: 'Flyers Pictures', icon: LuNewspaper },
 ]
 
-function Dot() {
-  return <Box boxSize="3px" borderRadius="full" bg="#C4CAD4" flexShrink={0} aria-hidden="true" />
-}
-
-function MetaText({ label, value }) {
-  return (
-    <Text fontFamily="Inter, system-ui, sans-serif" fontSize="13px" lineHeight="18px" color={COLORS.subtle}>
-      {label}{' '}
-      <Text as="span" fontWeight="600" color={COLORS.heading}>
-        {value}
-      </Text>
-    </Text>
-  )
-}
+const ACTION_CATEGORIES = ['Content & media', 'Pricing', 'Lots & data']
 
 /**
  * Project identity, view switch, and the project-level action menu. Every value
@@ -52,14 +30,10 @@ export default function ProjectHeader({
   onAction,
 }) {
   const hasProject = Boolean(project.name)
-  const area = project.grossAreaHectares
-    ? `${formatNumber(project.grossAreaHectares)} Hectares`
-    : '—'
-
   return (
-    <Card p="24px">
+    <Card p={{ base: '16px', md: '24px' }} minW={0}>
       <Flex align="center" justify="space-between" gap="20px" flexWrap="wrap">
-        <Flex align="center" gap="16px" minW="280px" flex="1">
+        <Flex align="center" gap="16px" minW={0} flex="1" flexBasis={{ base: '100%', xl: 'auto' }}>
           <Flex
             align="center"
             justify="center"
@@ -88,9 +62,9 @@ export default function ProjectHeader({
           </Box>
         </Flex>
 
-        <Flex align="center" gap="10px" flexWrap="wrap">
+        <Flex align="center" gap="10px" flexWrap="wrap" minW={0} w={{ base: 'full', xl: 'auto' }}>
           {projects.length ? (
-            <NativeSelect.Root size="sm" w="auto" minW="170px">
+            <NativeSelect.Root size="sm" w={{ base: 'full', sm: 'auto' }} minW={{ base: 0, sm: '170px' }}>
               <NativeSelect.Field
                 name="project"
                 aria-label="Project"
@@ -119,13 +93,6 @@ export default function ProjectHeader({
             </NativeSelect.Root>
           ) : null}
 
-          <SegmentedControl
-            options={VIEWS}
-            value={view}
-            onChange={onViewChange}
-            activeColor={COLORS.brandGreen}
-          />
-
           <Menu.Root onSelect={(details) => onAction?.(details.value)}>
             <Menu.Trigger
               display="flex"
@@ -149,25 +116,101 @@ export default function ProjectHeader({
             </Menu.Trigger>
             <Portal>
               <Menu.Positioner>
-                <Menu.Content minW="200px">
-                  {actions.map((action) => (
-                    <Menu.Item
-                      key={action.value}
-                      value={action.value}
-                      disabled={action.disabled}
-                      gap="8px"
-                      fontFamily="Inter, system-ui, sans-serif"
-                      fontSize="13px"
-                    >
-                      {action.icon ? <Icon as={action.icon} boxSize="14px" /> : null}
-                      {action.label}
-                    </Menu.Item>
-                  ))}
+                <Menu.Content minW="240px" p="6px">
+                  {ACTION_CATEGORIES.map((category, index) => {
+                    const categoryActions = actions.filter((action) => action.category === category)
+                    if (!categoryActions.length) return null
+                    return (
+                      <Menu.ItemGroup key={category} mt={index ? '6px' : undefined}>
+                        <Menu.ItemGroupLabel
+                          px="8px"
+                          py="5px"
+                          fontFamily="Inter, system-ui, sans-serif"
+                          fontSize="10px"
+                          fontWeight="700"
+                          letterSpacing="0.08em"
+                          textTransform="uppercase"
+                          color={COLORS.subtle}
+                        >
+                          {category}
+                        </Menu.ItemGroupLabel>
+                        {categoryActions.map((action) => (
+                          <Menu.Item
+                            key={action.value}
+                            value={action.value}
+                            disabled={action.disabled}
+                            gap="9px"
+                            px="8px"
+                            fontFamily="Inter, system-ui, sans-serif"
+                            fontSize="13px"
+                          >
+                            {action.icon ? <Icon as={action.icon} boxSize="14px" color={COLORS.subtle} /> : null}
+                            {action.label}
+                          </Menu.Item>
+                        ))}
+                      </Menu.ItemGroup>
+                    )
+                  })}
                 </Menu.Content>
               </Menu.Positioner>
             </Portal>
           </Menu.Root>
         </Flex>
+      </Flex>
+
+      <Box mt="18px" display={{ base: 'block', sm: 'none' }}>
+        <NativeSelect.Root size="sm">
+          <NativeSelect.Field value={view} onChange={(event) => onViewChange?.(event.target.value)} aria-label="Project section">
+            {VIEWS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </NativeSelect.Field>
+          <NativeSelect.Indicator />
+        </NativeSelect.Root>
+      </Box>
+      <Flex
+        display={{ base: 'none', sm: 'inline-flex' }}
+        alignSelf="flex-start"
+        gap="4px"
+        mt="18px"
+        p="4px"
+        border="1px solid"
+        borderColor={COLORS.border}
+        borderRadius="10px"
+        bg={COLORS.hoverBg}
+        role="tablist"
+        aria-label="Project section"
+      >
+        {VIEWS.map((option) => {
+          const active = view === option.value
+          return (
+            <Flex
+              as="button"
+              type="button"
+              key={option.value}
+              role="tab"
+              align="center"
+              justify="center"
+              gap="7px"
+              minW="132px"
+              h="36px"
+              px="14px"
+              borderRadius="7px"
+              bg={active ? COLORS.brandGreen : 'transparent'}
+              boxShadow={active ? '0 2px 6px rgba(0, 101, 44, 0.2)' : undefined}
+              color={active ? '#FFFFFF' : COLORS.subtle}
+              cursor="pointer"
+              aria-selected={active}
+              onClick={() => onViewChange?.(option.value)}
+              transition="background-color 120ms ease, color 120ms ease, box-shadow 120ms ease"
+              _hover={{ bg: active ? '#00541F' : COLORS.surface, color: active ? '#FFFFFF' : COLORS.heading }}
+              _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '1px' }}
+            >
+              <Icon as={option.icon} boxSize="17px" flexShrink={0} />
+              <Text fontFamily="Inter, system-ui, sans-serif" fontSize="13px" fontWeight="600" textAlign="center">
+                {option.label}
+              </Text>
+            </Flex>
+          )
+        })}
       </Flex>
     </Card>
   )

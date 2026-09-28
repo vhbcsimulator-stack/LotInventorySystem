@@ -15,6 +15,25 @@ import { summarize } from '@/data/dashboardData'
 import { DEFAULT_PROJECT_CODE } from '@/data/projectsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
+import { notifyFailed } from '@/lib/notify'
+
+const workbookHeader = (value) => ({ value, fontWeight: 'bold', textColor: '#FFFFFF', backgroundColor: '#00652C' })
+
+function workbookSheet(title, headers, rows, widths, metadata) {
+  return {
+    sheet: title,
+    data: [
+      [{ value: title, fontWeight: 'bold', fontSize: 16, textColor: '#0B1C30', columnSpan: headers.length }],
+      ['Generated', metadata.generated],
+      ['Project filter', metadata.project],
+      [null],
+      headers.map(workbookHeader),
+      ...rows,
+    ],
+    columns: widths.map((width) => ({ width })),
+    stickyRowsCount: 5,
+  }
+}
 
 function CenteredNotice({ children }) {
   return (
@@ -39,7 +58,8 @@ export default function DashboardPage({ onNavigate }) {
    * a lot moved, so every window built on it hid stock rather than narrowing it.
    */
   const [project, setProject] = useState('overall')
-  const { data, loading, error, reload } = useDashboard()
+  const [exporting, setExporting] = useState(false)
+  const { data, loading, error, reload, refresh } = useDashboard()
   const filters = useMemo(() => ({ project }), [project])
 
   /*
@@ -49,83 +69,57 @@ export default function DashboardPage({ onNavigate }) {
    */
   const view = useMemo(() => summarize(data?.lots ?? [], filters), [data?.lots, filters])
 
-  /**
-   * The whole dashboard as one CSV, exactly as the filters leave it.
-   *
-   * A CSV file has no sheets, so each card is written as its own titled block
-   * with a blank line between — which Excel and Sheets both read as separate
-   * regions, and which stays legible in a text editor. The filters themselves
-   * head the file: a sheet of figures with no record of what was selected is a
-   * sheet nobody can check later.
-   */
-  function exportDashboard() {
-    const sections = [
-      [
-        ['Dashboard export'],
-        ['Generated', new Date().toISOString().slice(0, 16).replace('T', ' ')],
-        ['Project', project === 'overall' ? 'All projects' : project],
-      ],
-      [
-        ['Summary'],
-        ['Lots', 'Available', 'Reserved', 'Sold', 'Total area (sqm)'],
-        [
-          view.distribution.activeLots,
-          view.distribution.available,
-          view.distribution.reserved,
-          view.distribution.sold,
-          view.distribution.totalAreaSqm,
-        ],
-      ],
-      [
-        ['Sell-through'],
-        ['Estate', 'Phase', 'Sold', 'Reserved', 'Open', 'Total', '% sold'],
-        // Each estate's own line, then one line per phase beneath it.
-        ...view.sellThrough.flatMap((estate) => [
-          [estate.label, 'All', estate.sold, estate.reserved, estate.open, estate.total, Math.round(estate.soldPct)],
-          ...estate.phases.map((phase) => [
-            estate.label,
-            phase.label,
-            phase.sold,
-            phase.reserved,
-            phase.open,
-            phase.total,
-            Math.round(phase.soldPct),
+  /** Export each dashboard section as its own worksheet in one Excel workbook. */
+  async function exportDashboard() {
+    if (exporting) return
+    setExporting(true)
+    try {
+      const { default: writeExcelFile } = await import('write-excel-file/browser')
+      const date = new Date()
+      const metadata = {
+        generated: date.toISOString().slice(0, 16).replace('T', ' '),
+        project: project === 'overall' ? 'All projects' : project,
+      }
+      const sheets = [
+        workbookSheet(
+          'Sell-Through by Phase',
+          ['Estate', 'Phase', 'Sold', 'Reserved', 'Open', 'Total', '% Sold'],
+          view.sellThrough.flatMap((estate) => [
+            [estate.label, 'All', estate.sold, estate.reserved, estate.open, estate.total, Math.round(estate.soldPct)],
+            ...estate.phases.map((phase) => [estate.label, phase.label, phase.sold, phase.reserved, phase.open, phase.total, Math.round(phase.soldPct)]),
           ]),
-        ]),
-      ],
-      [
-        ['Inventory by estate'],
-        ['Project', 'Sold', 'Reserved', 'Available', 'Total'],
-        ...view.estates.map((estate) => [estate.name, estate.sold, estate.reserved, estate.open, estate.total]),
-      ],
-      [
-        ['Portfolio distribution'],
-        ['Scope', 'Lots', 'Available', 'Reserved', 'Sold', 'Total area (sqm)'],
-        ...view.distributions.map((entry) => [
-          entry.label,
-          entry.activeLots,
-          entry.available,
-          entry.reserved,
-          entry.sold,
-          entry.totalAreaSqm,
-        ]),
-      ],
-      [
-        ['Sold and reserved lots'],
-        ['Project', 'Lot', 'Status', 'Lot area (sqm)'],
-        ...view.transactions.rows.map((row) => [row.projectName, row.property, row.status, row.areaSqm]),
-      ],
-    ]
+          [24, 18, 12, 12, 12, 12, 12],
+          metadata,
+        ),
+        workbookSheet(
+          'Inventory by Estate',
+          ['Project', 'Sold', 'Reserved', 'Available', 'Total'],
+          view.estates.map((estate) => [estate.name, estate.sold, estate.reserved, estate.open, estate.total]),
+          [30, 14, 14, 14, 14],
+          metadata,
+        ),
+        workbookSheet(
+          'Portfolio Distribution',
+          ['Scope', 'Lots', 'Available', 'Reserved', 'Sold', 'Total Area (sqm)'],
+          view.distributions.map((entry) => [entry.label, entry.activeLots, entry.available, entry.reserved, entry.sold, entry.totalAreaSqm]),
+          [28, 12, 14, 14, 12, 20],
+          metadata,
+        ),
+        workbookSheet(
+          'Sold & Reserved Lots',
+          ['Project', 'Lot', 'Status', 'Lot Area (sqm)'],
+          view.transactions.rows.map((row) => [row.projectName, row.property, row.status, row.areaSqm]),
+          [30, 22, 16, 20],
+          metadata,
+        ),
+      ]
 
-    // Every field quoted: project names and lot labels carry commas of their own.
-    const cell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`
-    const csv = sections.map((rows) => rows.map((row) => row.map(cell).join(',')).join('\n')).join('\n\n')
-
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-    link.download = `dashboard-${project}-${new Date().toISOString().slice(0, 10)}.csv`
-    link.click()
-    URL.revokeObjectURL(link.href)
+      await writeExcelFile(sheets).toFile(`dashboard-${project}-${date.toISOString().slice(0, 10)}.xlsx`)
+    } catch (err) {
+      notifyFailed('Could not export dashboard', err)
+    } finally {
+      setExporting(false)
+    }
   }
 
   // A skeleton in the page's own shape, so the cards do not jump into place.
@@ -171,7 +165,9 @@ export default function DashboardPage({ onNavigate }) {
         projects={data.projects ?? []}
         project={project}
         onProjectChange={setProject}
+        onRefresh={refresh}
         onExport={exportDashboard}
+        exporting={exporting}
       />
 
       <SourceNotice source={data.source} envVar={SUPABASE_ENV} />

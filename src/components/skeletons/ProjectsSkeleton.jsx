@@ -1,4 +1,4 @@
-import { Box, Flex, SimpleGrid } from '@chakra-ui/react'
+import { Box, Flex, Grid } from '@chakra-ui/react'
 import { Card } from '@/components/ui-kit/Card'
 import { Skeleton, SkeletonPage } from '@/components/ui-kit/Skeleton'
 import { COLORS } from '@/theme/colors'
@@ -6,9 +6,9 @@ import { COLORS } from '@/theme/colors'
 /** The project identity card: crest, name, meta row, then the controls. */
 function ProjectHeaderSkeleton() {
   return (
-    <Card p="24px">
+    <Card p={{ base: '16px', md: '24px' }}>
       <Flex align="center" justify="space-between" gap="20px" flexWrap="wrap">
-        <Flex align="center" gap="16px" minW="280px" flex="1">
+        <Flex align="center" gap="16px" minW={0} flex="1">
           <Skeleton h="56px" w="56px" rounded="12px" />
           <Flex direction="column" gap="8px" minW={0} flex="1">
             <Skeleton h="22px" w="46%" rounded="8px" />
@@ -19,7 +19,7 @@ function ProjectHeaderSkeleton() {
             </Flex>
           </Flex>
         </Flex>
-        <Flex align="center" gap="10px" flexWrap="wrap">
+        <Flex align="center" gap="10px" flexWrap="wrap" minW={0}>
           <Skeleton h="36px" w="170px" rounded="8px" />
           <Skeleton h="36px" w="230px" rounded="10px" />
           <Skeleton h="36px" w="150px" rounded="8px" />
@@ -29,17 +29,13 @@ function ProjectHeaderSkeleton() {
   )
 }
 
-/** One LotStatsRow tile: label + icon, value, then the share bar. */
-function StatCardSkeleton() {
+/** One LotStatsRow tile: label, value, then the share bar. */
+function StatCardSkeleton({ primary = false }) {
   return (
-    <Card p="18px">
-      <Flex align="flex-start" justify="space-between" gap="12px">
-        <Skeleton h="13px" w="52%" />
-        <Skeleton h="28px" w="28px" rounded="8px" />
-      </Flex>
-      <Skeleton h="24px" w="44%" rounded="8px" mt="12px" />
+    <Card p={primary ? { base: '20px', md: '24px' } : '18px'} h="full" display="flex" flexDirection="column" justifyContent={primary ? 'center' : undefined}>
+      <Skeleton h="13px" w="52%" />
+      <Skeleton h={primary ? '40px' : '24px'} w={primary ? '60%' : '44%'} rounded="8px" mt="12px" />
       <Skeleton h="6px" rounded="full" mt="14px" />
-      <Skeleton h="11px" w="64%" mt="10px" />
     </Card>
   )
 }
@@ -55,15 +51,18 @@ export default function ProjectsSkeleton({ rows = 10, columns = 9 }) {
       <Flex direction="column" gap="16px">
         <ProjectHeaderSkeleton />
 
-        <SimpleGrid columns={{ base: 1, sm: 2, xl: 4 }} gap="16px">
-          {Array.from({ length: 4 }, (_, index) => (
-            <StatCardSkeleton key={index} />
-          ))}
-        </SimpleGrid>
+        <Grid templateColumns={{ base: '1fr', '2xl': 'repeat(4, 1fr)' }} gap="16px">
+          <StatCardSkeleton primary />
+          <Grid gridColumn={{ '2xl': 'span 3' }} templateColumns={{ base: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)', '2xl': 'repeat(6, 1fr)' }} gap="16px">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Box key={index} gridColumn={{ '2xl': index < 3 ? 'span 2' : 'span 3' }}><StatCardSkeleton /></Box>
+            ))}
+          </Grid>
+        </Grid>
 
         <Card p="20px">
           <Flex align="center" gap="10px" flexWrap="wrap">
-            <Skeleton h="40px" rounded="8px" flex="1" minW="240px" />
+            <Skeleton h="40px" rounded="8px" flex="1" minW={0} />
             <Skeleton h="40px" w="150px" rounded="8px" />
             <Skeleton h="40px" w="150px" rounded="8px" />
             <Skeleton h="40px" w="150px" rounded="8px" />

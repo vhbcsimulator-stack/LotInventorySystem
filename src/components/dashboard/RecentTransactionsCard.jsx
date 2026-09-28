@@ -291,7 +291,7 @@ export default function RecentTransactionsCard({ transactions, filters = {}, onP
         </Text>
         {/* Only paginate when there is more than one page of results. */}
         {pageCount > 1 ? (
-          <Flex align="center" gap="4px">
+          <Flex align="center" gap="4px" maxW="100%" minW={0} overflowX="auto">
             {/* Stepping one page at a time is how a list like this is read; the
                 numbers are for jumping. Disabled at the ends rather than hidden,
                 so the row does not change width as it is used. */}

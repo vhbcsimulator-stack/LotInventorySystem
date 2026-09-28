@@ -8,6 +8,7 @@
  */
 import { SOURCE, text } from './api'
 import { fetchAllRows, supabase } from './supabase'
+import { checkUpload } from '@/lib/uploadRules'
 
 export const DEV_GALLERIES = {
   'project-dev': { table: 'project_dev', bucket: 'project_deve_updates', title: 'Project Development' },
@@ -55,7 +56,7 @@ async function requireUser() {
 }
 
 function requireImageFile(file) {
-  if (!file?.type?.startsWith('image/')) throw new Error('Choose an image file (PNG, JPG or WebP).')
+  return checkUpload('photo', file)
 }
 
 /** Bucket and object path from a public Storage URL, or null if it is not one. */
@@ -71,7 +72,7 @@ function storageObjectOf(url) {
 export async function uploadDevImage({ gallery, projectCode, projectLabel, file }) {
   const config = configFor(gallery)
   if (!projectCode) throw new Error('Choose a project first.')
-  requireImageFile(file)
+  await requireImageFile(file)
   const user = await requireUser()
 
   const bucket = supabase.storage.from(config.bucket)
@@ -129,7 +130,7 @@ export async function deleteDevImage({ gallery, image }) {
  */
 export async function replaceDevImage({ gallery, projectCode, projectLabel, image, file }) {
   configFor(gallery)
-  requireImageFile(file)
+  await requireImageFile(file)
   await requireUser()
 
   await deleteDevImage({ gallery, image })
@@ -139,3 +140,6 @@ export async function replaceDevImage({ gallery, projectCode, projectLabel, imag
     throw new Error(`The previous image was deleted, but the new one could not be saved: ${err.message}`, { cause: err })
   }
 }
+
+/** The table fetchDevImages reads for `query.gallery`, so its Refresh button knows what to check. */
+fetchDevImages.tables = (query = {}) => [DEV_GALLERIES[query.gallery]?.table].filter(Boolean)

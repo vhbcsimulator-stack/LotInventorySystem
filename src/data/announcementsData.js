@@ -70,3 +70,6 @@ export async function deleteAnnouncement(id) {
   const { data } = unwrap(await supabase.from('announcements').delete().eq('id', id).select('id'))
   if (!data.length) throw new Error('The database did not delete the announcement — you may need to sign in.')
 }
+
+/** The tables fetchAnnouncements reads, so its Refresh button knows what to check. */
+fetchAnnouncements.tables = () => ['announcements']

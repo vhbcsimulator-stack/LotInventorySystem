@@ -1,11 +1,39 @@
 import { useEffect, useState } from 'react'
-import { Box, CloseButton, Dialog, Flex, Icon, Input, Portal, Spinner, Text } from '@chakra-ui/react'
+import { Box, CloseButton, Dialog, Flex, Icon, Input, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
 import { LuTags } from 'react-icons/lu'
-import SegmentedControl from '@/components/ui-kit/SegmentedControl'
 import { PRICE_CONFIG, fetchPrices, savePrices } from '@/data/pricesData'
+import { fetchProjectMaps } from '@/data/projectMapsData'
 import { COLORS } from '@/theme/colors'
+import { notifyFailed, notifySaved } from '@/lib/notify'
 
 const FONT = 'Inter, system-ui, sans-serif'
+
+/** The phase a map tab stands for; null for Whole Map and Commercial. */
+function tabPhase(tabValue) {
+  const match = /^phase-(\d+)/.exec(tabValue ?? '')
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * The scope choices, named after the project's map tabs minus Whole Map
+ * (Annotated is not a map tab, so it never appears here). Each choice edits the
+ * price row of its phase, which means MVLC's sections — Phase 1A, 1B, 1C, 1East
+ * — all read and write the one row Phase 1 has. A tab with no price row behind
+ * it, such as MVLC's Commercial, is left out.
+ */
+function buildScopeOptions(config, tabs) {
+  if (!config) return []
+  return tabs
+    .filter((tab) => tab.value !== 'whole')
+    .map((tab) => {
+      const scope =
+        config.scopes.length === 1
+          ? config.scopes[0]
+          : config.scopes.find((candidate) => candidate.phase === tabPhase(tab.value))
+      return scope ? { value: tab.value, label: tab.label, scope: scope.value } : null
+    })
+    .filter(Boolean)
+}
 
 /**
  * Edit the price per sqm of each lot category for the selected project. Opening
@@ -13,14 +41,33 @@ const FONT = 'Inter, system-ui, sans-serif'
  */
 export default function CategoryPricesDialog({ open, project, onClose, onSaved }) {
   const config = PRICE_CONFIG[project.code]
-  const [scope, setScope] = useState(config?.scopes[0].value ?? '')
+  const [options, setOptions] = useState([]) // scope choices, taken from the map tabs
+  const [tab, setTab] = useState('') // the chosen map tab
   const [values, setValues] = useState({})
   const [stored, setStored] = useState({}) // prices as loaded; null = category not priced in this scope
   const [loaded, setLoaded] = useState(null) // `${code}:${scope}` of the values on screen
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
+  // Until the map tabs arrive the first price scope stands in, so the fields
+  // still fill for a project whose maps are missing or slow.
+  const scope = options.find((option) => option.value === tab)?.scope ?? config?.scopes[0].value ?? ''
   const loadKey = `${project.code}:${scope}`
+
+  useEffect(() => {
+    if (!open || !config) return undefined
+    let cancelled = false
+    // Never throws: a project without maps simply has no tabs to offer.
+    fetchProjectMaps({ projectCode: project.code }).then(({ tabs }) => {
+      if (cancelled) return
+      const next = buildScopeOptions(config, tabs)
+      setOptions(next)
+      setTab((prev) => (next.some((option) => option.value === prev) ? prev : next[0]?.value ?? ''))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [open, config, project.code])
 
   useEffect(() => {
     if (!open || !config) return undefined
@@ -47,7 +94,7 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
 
   function handleOpenChange({ open: next }) {
     if (next || saving) return
-    setScope(config?.scopes[0].value ?? '')
+    setTab(options[0]?.value ?? '')
     setLoaded(null)
     setError('')
     onClose()
@@ -66,21 +113,23 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
       if (invalid) throw new Error('Prices must be positive numbers.')
 
       const { repriced } = await savePrices(project.code, scope, numbers)
+      notifySaved('Prices saved', `${project.name ?? project.code} category prices were updated.`)
       setSaving(false)
       handleOpenChange({ open: false })
       onSaved?.(repriced)
     } catch (err) {
       setError(err.message)
+      notifyFailed('Could not save the prices', err)
       setSaving(false)
     }
   }
 
   return (
-    <Dialog.Root open={open} onOpenChange={handleOpenChange} placement="center" size="sm">
+    <Dialog.Root open={open} onOpenChange={handleOpenChange} placement="center" size="sm" scrollBehavior="inside">
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Flex align="center" gap="10px">
                 <Icon as={LuTags} boxSize="18px" color={COLORS.heading} />
@@ -98,16 +147,30 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
               ) : (
                 <Flex direction="column" gap="16px">
 
-                  {config.scopes.length > 1 ? (
+                  {config.scopes.length > 1 && options.length > 1 ? (
                     <Flex align="center" gap="10px" flexWrap="wrap">
-                      <Text fontFamily={FONT} fontSize="14px" color={COLORS.heading}>
+                      <Text as="label" htmlFor="price-scope" fontFamily={FONT} fontSize="14px" color={COLORS.heading}>
                         Price scope:
                       </Text>
-                      <SegmentedControl
-                        options={config.scopes.map(({ value, label }) => ({ value, label }))}
-                        value={scope}
-                        onChange={setScope}
-                      />
+                      <Box flex="1" minW="160px">
+                        <NativeSelect.Root size="sm">
+                          <NativeSelect.Field
+                            id="price-scope"
+                            value={tab}
+                            disabled={saving}
+                            onChange={(event) => setTab(event.target.value)}
+                            fontFamily={FONT}
+                            fontSize="14px"
+                          >
+                            {options.map(({ value, label }) => (
+                              <option key={value} value={value}>
+                                {label}
+                              </option>
+                            ))}
+                          </NativeSelect.Field>
+                          <NativeSelect.Indicator />
+                        </NativeSelect.Root>
+                      </Box>
                     </Flex>
                   ) : null}
 
@@ -157,7 +220,7 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
               )}
             </Dialog.Body>
 
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <Box
                 as="button"
                 type="button"

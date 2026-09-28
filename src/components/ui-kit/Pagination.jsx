@@ -62,7 +62,7 @@ export default function Pagination({ page, pageCount, onChange }) {
   if (pageCount <= 1) return null
 
   return (
-    <Flex as="nav" aria-label="Pagination" align="center" gap="4px">
+    <Flex as="nav" aria-label="Pagination" align="center" gap="4px" maxW="100%" minW={0} overflowX="auto">
       <PageButton label="Previous page" disabled={page <= 1} onClick={() => onChange(page - 1)}>
         <Icon as={LuChevronLeft} boxSize="16px" />
       </PageButton>

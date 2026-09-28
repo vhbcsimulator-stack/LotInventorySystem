@@ -1,0 +1,21 @@
+{
+  // Editor type-checking only: Supabase bundles these functions with Deno, which
+  // reads deno.json, not this file. Lets VS Code's regular TypeScript accept the
+  // `.ts` import paths Deno requires.
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext", "DOM"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    // Deno fetches `npm:` imports itself; the editor reads the same package
+    // from the portal's node_modules.
+    "paths": {
+      "npm:@supabase/supabase-js@2": ["../../node_modules/@supabase/supabase-js"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

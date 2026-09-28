@@ -26,6 +26,7 @@ import AnnouncementsSkeleton from '@/components/skeletons/AnnouncementsSkeleton'
 import { Reveal } from '@/components/ui-kit/Reveal'
 import EmptyState from '@/components/EmptyState'
 import { Card } from '@/components/ui-kit/Card'
+import RefreshButton from '@/components/ui-kit/RefreshButton'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
 import useAuth from '@/hooks/useAuth'
@@ -38,6 +39,7 @@ import {
 } from '@/data/announcementsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
+import { notifyFailed, notifySaved } from '@/lib/notify'
 
 const FONT = 'Inter, system-ui, sans-serif'
 const HEADING_FONT = "'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -291,9 +293,11 @@ function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted 
       if (announcement) await updateAnnouncement(announcement.id, form)
       else await createAnnouncement({ ...form, userId })
       setForm({ title: '', body: '' })
+      notifySaved(announcement ? 'Announcement updated' : 'Announcement posted')
       onPosted()
     } catch (err) {
       setError(err.message)
+      notifyFailed(announcement ? 'Could not update the announcement' : 'Could not post the announcement', err)
     } finally {
       setBusy(false)
     }
@@ -313,11 +317,12 @@ function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted 
       }}
       placement="center"
       size="md"
+      scrollBehavior="inside"
     >
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title fontFamily={HEADING_FONT} fontSize="18px" color={COLORS.heading}>
                 {announcement ? 'Edit Announcement' : 'Post New Announcement'}
@@ -340,7 +345,7 @@ function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted 
                 ) : null}
               </Flex>
             </Dialog.Body>
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <Box
                 as="button"
                 type="button"
@@ -386,9 +391,11 @@ function DeleteAnnouncementDialog({ announcement, onClose, onDeleted }) {
     setError('')
     try {
       await deleteAnnouncement(announcement.id)
+      notifySaved('Announcement deleted')
       onDeleted()
     } catch (err) {
       setError(err.message)
+      notifyFailed('Could not delete the announcement', err)
     } finally {
       setBusy(false)
     }
@@ -459,11 +466,10 @@ export default function AnnouncementsPage() {
   const [posting, setPosting] = useState(false)
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
-  const [notice, setNotice] = useState('')
 
   const debouncedSearch = useDebouncedValue(search.trim(), 300)
   const query = useMemo(() => ({ search: debouncedSearch, sort }), [debouncedSearch, sort])
-  const { data, loading, reload } = useApiQuery(fetchAnnouncements, query)
+  const { data, loading, reload, refresh } = useApiQuery(fetchAnnouncements, query)
 
   const announcements = data?.announcements ?? []
   const filtered = Boolean(debouncedSearch)
@@ -534,6 +540,7 @@ export default function AnnouncementsPage() {
             color={COLORS.heading}
           />
         </Flex>
+        <Flex align="center" gap="8px">
         <Flex
           align="center"
           gap="6px"
@@ -559,13 +566,10 @@ export default function AnnouncementsPage() {
             <NativeSelect.Indicator />
           </NativeSelect.Root>
         </Flex>
+        <RefreshButton onRefresh={refresh} label="Refresh announcements" size="40px" />
+        </Flex>
       </Flex>
 
-      {notice ? (
-        <Text role="status" fontFamily={FONT} fontSize="13px" color={COLORS.brandGreen}>
-          {notice}
-        </Text>
-      ) : null}
 
       {loading && !data ? (
         <AnnouncementsSkeleton />
@@ -602,7 +606,6 @@ export default function AnnouncementsPage() {
           setEditing(null)
         }}
         onPosted={() => {
-          setNotice(editing ? 'Announcement updated.' : 'Announcement posted.')
           setPosting(false)
           setEditing(null)
           reload()
@@ -613,7 +616,6 @@ export default function AnnouncementsPage() {
         onClose={() => setDeleting(null)}
         onDeleted={() => {
           setDeleting(null)
-          setNotice('Announcement deleted.')
           reload()
         }}
       />

@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
-import { invalidateAll } from '@/data/queryClient'
+import { invalidateAll, refreshTables } from '@/data/queryClient'
 
 // Function names are minified in production builds, so each fetcher gets a
 // stable numeric id for its cache key instead.
@@ -13,7 +13,7 @@ function fetcherId(fetcher) {
 
 /**
  * Runs `fetcher(query)` through the TanStack Query cache and returns
- * { data, loading, error, reload }. Shared by every database-backed page.
+ * { data, loading, error, reload, refresh }. Shared by every database-backed page.
  *
  * `fetcher` must be a stable, module-level function (e.g. fetchAgents). Equal
  * queries share one cached result, so revisiting a page, filter, or page number
@@ -24,15 +24,33 @@ function fetcherId(fetcher) {
  * pages that show the changed rows refetch too.
  */
 export default function useApiQuery(fetcher, query) {
+  // `fetcher.tables(query)` lists the tables it reads; the Refresh button checks those.
+  const tables = fetcher.tables?.(query ?? {}) ?? []
+  const tablesKey = tables.join(',')
   const result = useQuery({
     queryKey: ['api', fetcherId(fetcher), query ?? null],
     queryFn: () => fetcher(query),
     placeholderData: keepPreviousData,
+    meta: { tables },
   })
 
   const reload = useCallback(() => {
     invalidateAll()
   }, [])
+
+  /*
+   * For a Refresh button: refetches only when one of the fetcher's tables changed
+   * in Supabase since the last refresh, otherwise keeps the cache. Resolves to
+   * whether anything was refetched.
+   */
+  const { refetch } = result
+  const refresh = useCallback(async () => {
+    if (!tablesKey) {
+      await refetch()
+      return true
+    }
+    return refreshTables(tablesKey.split(','))
+  }, [tablesKey, refetch])
 
   const { data, error, isFetching, isPlaceholderData, isPending } = result
   return useMemo(
@@ -41,7 +59,8 @@ export default function useApiQuery(fetcher, query) {
       error: error ?? null,
       loading: isPending || isPlaceholderData || isFetching,
       reload,
+      refresh,
     }),
-    [data, error, isFetching, isPlaceholderData, isPending, reload],
+    [data, error, isFetching, isPlaceholderData, isPending, reload, refresh],
   )
 }

@@ -63,7 +63,7 @@ export default function SignInPage({ onSignIn }) {
   }
 
   return (
-    <Flex minH="100vh" align="center" justify="center" bg={COLORS.canvas} px="16px" py="32px">
+    <Flex minH="100dvh" align="center" justify="center" bg={COLORS.canvas} px="16px" py="32px">
       <Card as="form" onSubmit={handleSubmit} w="full" maxW="400px" p={{ base: '24px', sm: '32px' }} noValidate>
         <Flex direction="column" align="center" gap="8px" mb="28px">
           <Image src={logo} alt="VHBC" h="48px" objectFit="contain" />

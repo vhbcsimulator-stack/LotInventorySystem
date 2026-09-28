@@ -4,7 +4,9 @@ import { LuDownload, LuFileSpreadsheet, LuTriangleAlert } from 'react-icons/lu'
 import { CSV_TEMPLATE, commitLotImport, previewLotImport } from '@/data/lotImportData'
 import { DEFAULT_LOT_TERMS } from '@/data/projectsData'
 import { COLORS } from '@/theme/colors'
-import { formatDate, formatNumber, formatPeso } from '@/utils/format'
+import { formatDate, formatNumber } from '@/utils/format'
+import { notifyFailed, notifySaved } from '@/lib/notify'
+import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
 
 const FONT = 'Inter, system-ui, sans-serif'
 const PREVIEW_ROWS = 50
@@ -93,8 +95,9 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
 
   async function choose(nextFile) {
     if (!nextFile) return
-    if (!/\.csv$/i.test(nextFile.name) && nextFile.type !== 'text/csv') {
-      setError('Choose a .csv file.')
+    const problem = uploadProblem('csv', nextFile)
+    if (problem) {
+      setError(problem)
       return
     }
     setFile(nextFile)
@@ -120,9 +123,11 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
         setProgress({ done, total }),
       )
       reset()
+      notifySaved(`${item[0].toUpperCase()}${item.slice(1)}s imported`, `${formatNumber(inserted)} added, ${formatNumber(updated)} updated.`)
       onImported(`Imported ${item}s: ${formatNumber(inserted)} added, ${formatNumber(updated)} updated.`)
     } catch (err) {
       setError(err.message)
+      notifyFailed('Import failed', err)
       setStage('ready')
     }
   }
@@ -145,7 +150,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px" pr="56px">
               <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
                 Import {terms.item.toLowerCase()}s (CSV){projectName ? ` — ${projectName}` : ''}
@@ -186,17 +191,20 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
                 ) : (
                   <Icon as={LuFileSpreadsheet} boxSize="34px" color={COLORS.subtle} />
                 )}
-                <Text fontFamily={FONT} fontSize="15px" color={COLORS.heading} mt="4px">
+                <Text fontFamily={FONT} fontSize="15px" color={COLORS.heading} mt="4px" overflowWrap="anywhere">
                   {file ? file.name : 'Drag and drop a CSV file here'}
                 </Text>
                 <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
                   {stage === 'checking' ? 'Checking rows…' : file ? 'Click to choose a different file' : 'or click to browse'}
                 </Text>
+                <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+                  {describeUpload('csv')}
+                </Text>
               </Flex>
               <input
                 ref={input}
                 type="file"
-                accept=".csv,text/csv"
+                accept={acceptFor('csv')}
                 hidden
                 onChange={(event) => {
                   choose(event.target.files?.[0])
@@ -209,14 +217,18 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
                   Columns: <b>lot_no</b>
                   {terms.group ? (
                     <>
-                      , <b>phase</b> ({terms.group.toLowerCase()} number)
+                      , <b>phase</b> ({projectCode === 'MVLC' ? 'MVLC code such as MV-1A or MV 1 E' : `${terms.group.toLowerCase()} number`})
                     </>
                   ) : null}
-                  , <b>category</b>, <b>size_sqm</b>, and optional price_per_sqm, status, sold_by, and a date (year/month
+                  , <b>category</b>, <b>size_sqm</b>, and optional status, client, sold_by, and a date (year/month
                   or a full RSV date). {terms.item}s with the same number{terms.group ? ` and ${terms.group.toLowerCase()}` : ''}{' '}
-                  are updated. Sheets that write the category into the phase column (MV PH1E-C, ERHD-PC, ERHD-P, ERHD-C,
-                  ERHD) need no category column, and the sales sheets' own headings — LOT, Lot Area, SD/SM/REALTY, RSV
-                  DATE — are read as well.
+                  are updated. Sheets that write the category into the phase column need no category column: P is Prime,
+                  PC Prime Corner, C Regular Corner, and no marker at all (just ERHD) is Regular — e.g. ERHD-PC, ERHD-P,
+                  ERHD-C, ERHD, or MV PH1E-C for commercial. The sales sheets' own headings — LOT, Lot Area, SD/SM/REALTY, RSV
+                  DATE — are read as well. The price per sqm is never taken from the file: every {item} gets its
+                  category&apos;s price from Category prices, and TCP follows from it. For an RSV row, a Client value of
+                  Company creates a Company Reserve, a blank Client creates a Default Reserve, and any other Client value creates a
+                  Client Reserve and is saved as the client name.
                 </Text>
                 <Box
                   as="button"
@@ -285,7 +297,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
                       <Box as="table" w="100%" fontFamily={FONT} fontSize="12.5px" style={{ borderCollapse: 'collapse' }}>
                         <Box as="thead" position="sticky" top="0" bg={COLORS.canvas}>
                           <tr>
-                            {['Row', 'Action', terms.item, terms.group, 'Category', 'Area', 'Price / sqm', 'TCP', 'Status', 'Last Updated']
+                            {['Row', 'Action', terms.item, terms.group, 'Category', 'Area', 'Status', 'Last Updated']
                               .filter(Boolean)
                               .map((head) => (
                               <Box as="th" key={head} textAlign="left" px="10px" py="8px" color={COLORS.subtle} fontWeight="600" whiteSpace="nowrap">
@@ -302,13 +314,13 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
                                 {row.id ? 'Update' : 'New'}
                               </Cell>
                               <Cell>{row.lot_no}</Cell>
-                              {terms.group ? <Cell>{row.phase ?? '—'}</Cell> : null}
+                              {terms.group ? <Cell>{row.phase_label ?? row.phase ?? '—'}</Cell> : null}
                               <Cell>{row.category}</Cell>
                               <Cell>{formatNumber(row.size_sqm)} sqm</Cell>
-                              <Cell>{formatPeso(row.price_per_sqm)}</Cell>
-                              <Cell>{formatPeso(row.total)}</Cell>
                               <Cell>
                                 {row.status}
+                                {row.reserve_type === 'company' ? ` · Company Reserve${row.reserved_for ? ` · ${row.reserved_for}` : ''}` : ''}
+                                {row.reserve_type === 'client' ? ` · Client Reserve · ${row.reserved_for}` : ''}
                                 {row.sold_by ? ` · ${row.sold_by}` : ''}
                               </Cell>
                               {/* Blank when the sheet gave no YEAR/MONTH, matching what will be stored. */}
@@ -355,7 +367,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
               ) : null}
             </Dialog.Body>
 
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <Button disabled={busy || !file} onClick={reset}>
                 Clear
               </Button>

@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS public.annotated_images (
   project       TEXT NOT NULL,
   -- Null for a project whose lots are not grouped (ERHD) or a whole-site map.
   phase         INTEGER,
+  -- Section of a split phase map, matching uploads.map_section: A, B, C, or East.
+  map_section   TEXT,
   /*
    * Which map tab these annotations belong to, in that tab's own terms:
    * 'whole', 'phase-1', 'phase-2' (a condominium's floors use the same spelling),
@@ -41,6 +43,7 @@ ALTER TABLE public.annotated_images ADD COLUMN IF NOT EXISTS storage_path TEXT;
 ALTER TABLE public.annotated_images ADD COLUMN IF NOT EXISTS slot TEXT;
 ALTER TABLE public.annotated_images ADD COLUMN IF NOT EXISTS coco_json JSONB;
 ALTER TABLE public.annotated_images ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE public.annotated_images ADD COLUMN IF NOT EXISTS map_section TEXT;
 ALTER TABLE public.annotated_images ALTER COLUMN image_link DROP NOT NULL;
 
 -- Rows written before the slot column existed were keyed by phase alone.

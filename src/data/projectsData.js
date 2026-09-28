@@ -15,7 +15,7 @@
  */
 import { SOURCE, num, text } from './api'
 import { STATUS_ALIASES, fetchAllRows, supabase, uiStatus, unwrap } from './supabase'
-import { fetchPriceLookup } from './pricesData'
+import { PRICE_CONFIG, fetchPriceLookup } from './pricesData'
 import { cached } from './queryClient'
 
 export { SOURCE }
@@ -54,9 +54,10 @@ export const categoriesFor = (projectCode) => CATEGORIES_BY_PROJECT[projectCode]
  *
  *   MV-1A     Phase 1, block A   -> Regular
  *   MV-1C     Phase 1, block C   -> Regular      (C is attached: a block)
- *   MV-2B C   Phase 2, block B   -> Commercial   (C stands alone: a marker)
+ *   MV-2B C   Phase 2, block B   -> Regular Corner
  *   MV-C-1A   Phase 1, block A   -> Commercial
  *   MV 2E     Phase 2, East      -> Regular
+ *   MV 1 E-C  Phase 1, East      -> Commercial
  *   MV 2E-PC  Phase 2, East      -> Prime Corner
  *   MV PH1E-C Phase 1, East      -> Commercial   (the commercial sheets write PH1E)
  *   MV PH1E-CC                     -> Commercial Corner
@@ -90,12 +91,62 @@ export const PHASE_CODES = {
 }
 
 /**
- * The phase number and category encoded in a phase-column code, as
- * { phase, category }. Both are empty for a project that uses plain phase numbers
- * and for a blank cell, so the caller falls back to reading the cell as a number.
+ * The category markers any project's sheet may put in its phase column when it
+ * has no category column: P is Prime, PC Prime Corner, C (Regular) Corner, and
+ * a cell with no marker at all (only the project name, say "ERHD") is Regular.
+ * Projects with their own meanings are in PHASE_CODES.
  */
-export function parsePhaseCode(projectCode, value) {
-  const config = PHASE_CODES[projectCode]
+export const CATEGORY_CODES = { markers: { C: 'regular_corner', P: 'prime', PC: 'prime_corner' }, fallback: 'regular' }
+
+/**
+ * MVLC uses C in two different positions with two different meanings:
+ *
+ * - before the numbered phase (`MV-C-1A`), or after an East marker
+ *   (`MV 1 E-C`): Commercial;
+ * - after any other numbered phase (`MV-2B C`, `MV-3 C`): Regular Corner.
+ *
+ * The other markers are unambiguous. Keeping this positional rule separate
+ * makes the generic parser below continue to work for the other projects.
+ */
+function parseMvlcPhaseCode(tokens, config) {
+  const phaseIndex = tokens.findIndex((token) => /^(?:PH)?\d+/.test(token))
+  if (phaseIndex === -1) return { phase: null, section: null, category: config.fallback }
+
+  const phaseToken = tokens[phaseIndex]
+  const phase = Number.parseInt(/^(?:PH)?(\d+)/.exec(phaseToken)[1], 10)
+  const separateEast = tokens[phaseIndex + 1] === 'E'
+  const east = /^(?:PH)?\d+E/.test(phaseToken) || separateEast
+  const suffix = /^(?:PH)?\d+([ABCE])$/.exec(phaseToken)?.[1] ?? (separateEast ? 'E' : '')
+  const allowedSections = phase === 1 ? ['A', 'B', 'C', 'E'] : phase === 2 ? ['A', 'B', 'E'] : []
+  const section = allowedSections.includes(suffix) ? (suffix === 'E' ? 'East' : suffix) : null
+  const markers = tokens
+    .map((token, index) => ({ token, index }))
+    .filter(({ token, index }) => index !== phaseIndex && !(separateEast && index === phaseIndex + 1) && token !== 'MV')
+
+  // Longer/specific markers win before the overloaded single C.
+  const exact = markers.find(({ token }) => ['CC', 'CP', 'PC', 'P'].includes(token))
+  if (exact) return { phase, section, category: config.markers[exact.token] }
+
+  const commercialWord = markers.find(({ token }) => Object.keys(config.prefixes ?? {}).some((start) => token.startsWith(start)))
+  if (commercialWord) {
+    const prefix = Object.keys(config.prefixes).find((start) => commercialWord.token.startsWith(start))
+    return { phase, section, category: config.prefixes[prefix] }
+  }
+
+  const c = markers.find(({ token }) => token === 'C')
+  if (c) return { phase, section, category: c.index < phaseIndex || east ? 'commercial' : 'regular_corner' }
+
+  return { phase, section, category: config.fallback }
+}
+
+/**
+ * The phase number and category encoded in a phase-column code, as
+ * { phase, category }. MVLC also returns `section` (A, B, C, East, or null).
+ * Both base fields are empty for a project that uses plain phase numbers and for
+ * a blank cell, so the caller falls back to reading the cell as a number.
+ * `config` overrides the project's own codes (see CATEGORY_CODES).
+ */
+export function parsePhaseCode(projectCode, value, config = PHASE_CODES[projectCode]) {
   if (!config) return { phase: null, category: '' }
 
   // Typed by hand, so "MV-3 C", "MV 1 E- C" and an auto-corrected en dash all
@@ -109,6 +160,8 @@ export function parsePhaseCode(projectCode, value) {
     .map((token) => token.replace(/[^A-Z0-9]/g, ''))
     .filter(Boolean)
   if (!tokens.length) return { phase: null, category: '' }
+
+  if (/^MVLC$/i.test(projectCode) && config === PHASE_CODES.MVLC) return parseMvlcPhaseCode(tokens, config)
 
   let phase = null
   let category = ''
@@ -151,7 +204,8 @@ export const UNIT_FIELDS = [
 
 /** Project code → the table holding its lots (same columns as `lots`). */
 export const LOT_TABLES = {
-  MVLC: 'lots',
+  // MVLC reads and writes its dedicated table; public.lots remains untouched.
+  MVLC: 'mvlc_lots',
   // Created by supabase/migrations/20260915_create_project_lot_tables.sql (erhd_lots
   // already existed) and given the lots columns by 20260915_copy_lots_columns_to_project_lot_tables.sql.
   EBLF: 'eblf_lots',
@@ -232,7 +286,7 @@ export const EMPTY_PROJECT_LOTS = {
   // False when the selected project has no lot table yet.
   hasLotTable: false,
   // Project-wide counts. Unlike `lots`/`total`, these ignore the table filters.
-  stats: { totalLots: 0, available: 0, reserved: 0, sold: 0 },
+  stats: { totalLots: 0, available: 0, reserved: 0, sold: 0, byStatus: {}, byPhase: {} },
   // Filter options come from the database, never a hardcoded list.
   facets: { phases: [], phaseFilters: [], categories: [] },
   // [{ id, identifier, phase, category, areaSqm, pricePerSqm, tcp, vatInclusive, status, rawStatus }]
@@ -242,8 +296,10 @@ export const EMPTY_PROJECT_LOTS = {
   pageSize: 10,
 }
 
-const phaseLabel = (phase, terms = DEFAULT_LOT_TERMS) =>
-  phase === null || phase === undefined || !terms.group ? '' : `${terms.group} ${phase}`
+const phaseLabel = (phase, terms = DEFAULT_LOT_TERMS, section = null) =>
+  phase === null || phase === undefined || !terms.group
+    ? ''
+    : `${terms.group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
 const categoryLabel = (category) =>
   text(category)
     .split('_')
@@ -265,17 +321,20 @@ const categoryLabel = (category) =>
 export const PHASE_FILTER_CATEGORIES = ['commercial', 'commercial_corner', 'prime_commercial']
 
 /** A phase-filter option — "Phase 1" or "Phase 1 Commercial" — as { phase, category }. */
-export function parsePhaseFilter(value, terms = DEFAULT_LOT_TERMS) {
+export function parsePhaseFilter(value) {
   const label = text(value).trim()
-  if (!label) return { phase: null, category: '' }
+  if (!label) return { phase: null, section: null, category: '' }
   // The longest matching label wins: "Phase 1 Prime Commercial" ends with
   // "Commercial" too, and must not be read as the plain commercial filter.
   const category =
     PHASE_FILTER_CATEGORIES.filter((name) => label.toLowerCase().endsWith(categoryLabel(name).toLowerCase())).sort(
       (a, b) => b.length - a.length,
     )[0] ?? ''
-  const phase = num(label.replace(/\D/g, ''), NaN)
-  return { phase: Number.isFinite(phase) ? phase : null, category }
+  const withoutCategory = category ? label.slice(0, -categoryLabel(category).length).trim() : label
+  const matched = /(\d+)\s*(East|[ABC])?$/i.exec(withoutCategory)
+  const phase = matched ? num(matched[1], NaN) : NaN
+  const section = matched?.[2] ? (matched[2].toLowerCase() === 'east' ? 'East' : matched[2].toUpperCase()) : null
+  return { phase: Number.isFinite(phase) ? phase : null, section, category }
 }
 
 function emptyPayload(query, source) {
@@ -305,40 +364,52 @@ async function fetchProjects() {
     .sort((a, b) => a.code.localeCompare(b.code))
 }
 
-/**
- * Phase options for the filter: every phase, each followed by the
- * PHASE_FILTER_CATEGORIES that actually have lots in it.
- */
-function phaseFilterOptions(rows, phases, terms) {
-  const present = new Set(rows.map((row) => `${row.phase}|${text(row.category).trim().toLowerCase()}`))
-  return phases.flatMap((phase) => [
-    phaseLabel(phase, terms),
-    ...PHASE_FILTER_CATEGORIES.filter((category) => present.has(`${phase}|${category}`)).map(
-      (category) => `${phaseLabel(phase, terms)} ${categoryLabel(category)}`,
-    ),
-  ])
-}
-
 /** Project-wide stats and filter facets for one lot table — independent of table state. */
 async function fetchSummary(table, terms) {
-  const rows = await cached(['lot-summary', table], () => fetchAllRows(table, 'phase, category, status'))
+  const tracksSections = table === LOT_TABLES.MVLC
+  const rows = await cached(['lot-summary', table], () =>
+    fetchAllRows(table, `phase, category, status${tracksSections ? ', map_section' : ''}`),
+  )
 
-  const stats = { totalLots: rows.length, available: 0, reserved: 0, sold: 0 }
-  rows.forEach((row) => {
-    const status = uiStatus(row.status)
-    if (status) stats[status] += 1
-  })
+  /*
+   * `available`/`reserved`/`sold` group statuses as the rest of the portal does
+   * (pending counts as reserved); `byStatus` counts each stored status on its own
+   * — 'available', 'reserved', 'rsv-p', 'hold', 'sold' — for the stat cards.
+   */
+  const countRows = (items) => {
+    const result = { totalLots: items.length, available: 0, reserved: 0, sold: 0, byStatus: {} }
+    items.forEach((row) => {
+      const status = uiStatus(row.status)
+      if (status) result[status] += 1
+      const raw = String(row.status ?? '').trim().toLowerCase()
+      result.byStatus[raw] = (result.byStatus[raw] ?? 0) + 1
+    })
+    return result
+  }
 
-  const phases = [...new Set(rows.map((row) => row.phase).filter((phase) => phase !== null))].sort((a, b) => a - b)
+  const phases = [
+    ...new Map(
+      rows
+        .filter((row) => row.phase !== null)
+        .map((row) => [`${row.phase}|${text(row.map_section)}`, { phase: row.phase, section: text(row.map_section) || null }]),
+    ).values(),
+  ].sort((a, b) => a.phase - b.phase || text(a.section).localeCompare(text(b.section)))
   const categories = [...new Set(rows.map((row) => row.category).filter(Boolean))].sort()
+  const stats = countRows(rows)
+  stats.byPhase = Object.fromEntries(
+    phases.map(({ phase, section }) => [
+      phaseLabel(phase, terms, section),
+      countRows(rows.filter((row) => row.phase === phase && text(row.map_section) === text(section))),
+    ]),
+  )
 
   return {
     stats,
     // A project whose lots are not grouped (ERHD) offers no phase filter.
     facets: {
-      phases: terms.group ? phases.map((phase) => phaseLabel(phase, terms)) : [],
-      // The filter's own list: the phases plus any "Phase 1 Commercial" entries.
-      phaseFilters: terms.group ? phaseFilterOptions(rows, phases, terms) : [],
+      phases: terms.group ? phases.map(({ phase, section }) => phaseLabel(phase, terms, section)) : [],
+      // Keep this identical to the distinct values displayed in the Phase column.
+      phaseFilters: terms.group ? phases.map(({ phase, section }) => phaseLabel(phase, terms, section)) : [],
       categories: categories.map(categoryLabel),
     },
     categoryByLabel: Object.fromEntries(categories.map((category) => [categoryLabel(category), category])),
@@ -350,18 +421,24 @@ async function fetchSummary(table, terms) {
  * comes from the project's price table (by phase + category) and TCP is area x
  * that price, so sorting and paging happen here, after those are computed.
  */
-async function fetchLotsPage(projectCode, table, query, categoryByLabel) {
+async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) {
+  // Only a category filter needs the summary's labels, so without one the rows
+  // are asked for alongside the summary instead of after it.
+  const categoryByLabel = query.category ? await categoryByLabelPromise : {}
   const page = num(query.page, 1) || 1
   const pageSize = num(query.pageSize, 10) || 10
   const terms = lotTermsFor(projectCode)
 
-  const columns = 'id, lot_no, phase, category, size_sqm, price_per_sqm, status, last_updated, updated_at'
+  const tracksSections = table === LOT_TABLES.MVLC
+  const columns = `id, lot_no, phase, category, size_sqm, price_per_sqm, status, last_updated, updated_at${tracksSections ? ', map_section' : ''}`
   const filter = (request) => {
     let filtered = request
     if (STATUS_ALIASES[query.status]) filtered = filtered.in('status', STATUS_ALIASES[query.status])
     // "Phase 1 Commercial" narrows by category as well as by phase.
-    const { phase, category } = parsePhaseFilter(query.phase, terms)
+    const { phase, section, category } = parsePhaseFilter(query.phase)
     if (phase !== null) filtered = filtered.eq('phase', phase)
+    if (tracksSections && section) filtered = filtered.eq('map_section', section)
+    if (tracksSections && phase !== null && !section) filtered = filtered.is('map_section', null)
     if (category) filtered = filtered.eq('category', category)
     if (categoryByLabel[query.category]) filtered = filtered.eq('category', categoryByLabel[query.category])
     return filtered
@@ -378,7 +455,12 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabel) {
    * filters key the cache — changing pages or typing a search sends no request.
    */
   const unitColumns = terms.unitFields.map((field) => field.column)
-  const attempts = [[...unitColumns, 'last_updated_precision', 'sold_by'], ['sold_by'], []]
+  const attempts = [
+    [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for'],
+    [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type'],
+    ['sold_by'],
+    [],
+  ]
 
   const fetchRows = () =>
     cached(['lot-rows', table, query.status ?? '', query.phase ?? '', query.category ?? ''], async () => {
@@ -402,8 +484,9 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabel) {
       id: lot.id,
       lotNo: text(lot.lot_no),
       phaseNo: typeof lot.phase === 'number' ? lot.phase : null,
+      mapSection: text(lot.map_section) || null,
       identifier: text(lot.lot_no, '—'),
-      phase: phaseLabel(lot.phase, terms) || '—',
+      phase: phaseLabel(lot.phase, terms, text(lot.map_section) || null) || '—',
       category: categoryLabel(lot.category) || '—',
       rawCategory: text(lot.category),
       /*
@@ -423,6 +506,9 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabel) {
       status: uiStatus(lot.status),
       rawStatus: text(lot.status),
       soldBy: text(lot.sold_by),
+      // 'client' or 'company' for a reserved lot; '' for a default reservation or any other status.
+      reserveType: text(lot.reserve_type),
+      reservedFor: text(lot.reserved_for),
       // Empty strings for a project without unit columns, or before the migration.
       ...Object.fromEntries(terms.unitFields.map((field) => [field.key, text(lot[field.column])])),
     }
@@ -481,8 +567,27 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabel) {
  * Never throws and never fabricates: when Supabase is unset or unreachable it
  * resolves to the zero state and reports why via `source`.
  */
+/** A lot table's summary and the requested page of its lots, fetched side by side. */
+async function fetchLotTable(projectCode, query) {
+  const table = LOT_TABLES[projectCode]
+  const summary = fetchSummary(table, lotTermsFor(projectCode))
+  const labels = summary.then((result) => result.categoryByLabel)
+  labels.catch(() => {}) // a failed summary is reported through `summary` below
+  const [{ stats, facets }, lotsPage] = await Promise.all([summary, fetchLotsPage(projectCode, table, query, labels)])
+  return { stats, facets, ...lotsPage }
+}
+
 export async function fetchProjectLots(query = {}) {
   if (!supabase) return emptyPayload(query, SOURCE.NOT_CONFIGURED)
+
+  /*
+   * The project asked for is almost always the one shown, so its lots start
+   * loading alongside the project list rather than after it. Should the list
+   * pick another project, this head start is dropped.
+   */
+  const guess = LOT_TABLES[query.projectCode] ? query.projectCode : DEFAULT_PROJECT_CODE
+  const early = fetchLotTable(guess, query)
+  early.catch(() => {}) // awaited below when used; an unused failure is not an error
 
   try {
     const projects = await fetchProjects()
@@ -503,9 +608,8 @@ export async function fetchProjectLots(query = {}) {
     const table = selected && LOT_TABLES[selected.code]
     if (!table) return base
 
-    const { categoryByLabel, ...summary } = await fetchSummary(table, lotTermsFor(selected.code))
-    const lotsPage = await fetchLotsPage(selected.code, table, query, categoryByLabel)
-    return { ...base, ...summary, ...lotsPage, hasLotTable: true }
+    const lotTable = await (selected.code === guess ? early : fetchLotTable(selected.code, query))
+    return { ...base, ...lotTable, hasLotTable: true }
   } catch (err) {
     // Log it so a broken connection is visible, but render an empty table rather
     // than a blank screen or invented rows.
@@ -544,7 +648,7 @@ function explainMissingColumn(err) {
  * Columns added by a later migration that only refine how a row is displayed.
  * A database that has not been given them yet is still perfectly usable.
  */
-const OPTIONAL_COLUMNS = ['last_updated_precision']
+const OPTIONAL_COLUMNS = ['last_updated_precision', 'reserve_type']
 
 /**
  * Run a write and, when the database lacks one of those optional columns, drop it
@@ -577,14 +681,21 @@ function unitColumnsFor(projectCode, unit) {
 /**
  * `soldBy` is the agent's name and is required for 'sold'. Any other status
  * clears it, so an agent is never credited with a lot that is no longer sold.
+ *
+ * `reserveType` ('client', 'company', or '' for the default) is recorded with a
+ * reserved status; left undefined, a reserved lot keeps the type it had.
  */
-export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE) {
+export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE, { reserveType } = {}) {
   if (!supabase) throw new Error('No database connected.')
   const table = LOT_TABLES[projectCode]
   if (!table) throw new Error(`No lot table is set up for ${projectCode}.`)
   if (!LOT_STATUS_OPTIONS.some((option) => option.value === status)) {
     throw new Error(`Unknown status "${status}".`)
   }
+  if (reserveType !== undefined && !RESERVE_TYPE_OPTIONS.some((option) => option.value === reserveType)) {
+    throw new Error(`Unknown reserve type "${reserveType}".`)
+  }
+  const reserved = uiStatus(status) === 'reserved'
 
   const now = new Date()
   // Editing in the portal always knows the day, so the month-only marker is cleared.
@@ -593,6 +704,8 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
     last_updated: now.toISOString().slice(0, 10),
     last_updated_precision: null,
     updated_at: now.toISOString(),
+    // The reserve type only means something while the lot is reserved.
+    ...(!reserved ? { reserve_type: null } : reserveType !== undefined ? { reserve_type: reserveType || null } : {}),
   }
 
   const updateRow = (body) => supabase.from(table).update(body).eq('id', id).select('id')
@@ -613,22 +726,100 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
   if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
 }
 
+/** Who a reserved lot is held for. '' is the default reservation and is stored as null. */
+export const RESERVE_TYPE_OPTIONS = [
+  { value: '', label: 'Default' },
+  { value: 'client', label: 'Client Reserved' },
+  { value: 'company', label: 'Company Reserved' },
+]
+
+const RESERVE_TYPE_MISSING =
+  'The lot table has no reserve_type column yet — run supabase/migrations/20260921_add_lot_reserve_type.sql in the Supabase SQL Editor.'
+
+/** Record a reserved lot's reserve type. The status itself stays reserved. */
+export async function updateReserveType(id, projectCode, reserveType) {
+  const table = lotTableFor(projectCode)
+  if (!RESERVE_TYPE_OPTIONS.some((option) => option.value === reserveType)) {
+    throw new Error(`Unknown reserve type "${reserveType}".`)
+  }
+
+  const result = await supabase
+    .from(table)
+    .update({
+      reserve_type: reserveType || null,
+      // A client name must not remain attached after switching to Company/Default.
+      ...(reserveType === 'client' ? {} : { reserved_for: null }),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .select('id')
+  if (result.error) {
+    throw new Error(/reserve_type/.test(result.error.message) ? RESERVE_TYPE_MISSING : result.error.message)
+  }
+  if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+}
+
 /** A lot identifier as written on a map or a sheet: case, spaces, and punctuation ignored. */
 export const lotKey = (value) =>
   text(value)
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '')
 
+/** MVLC lot identifiers are stored consistently as "B1 L1" or "C L1". */
+export function formatLotIdentifier(projectCode, value) {
+  let raw = text(value).trim()
+  if (!/^MVLC$/i.test(projectCode)) return raw
+
+  // Excel turns 21-1 through 21-12 into 21-Jan through 21-Dec.
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+  const dated = /^(\d+)-([a-z]{3,9})(?:-\d{2,4})?$/i.exec(raw)
+  if (dated) {
+    const month = months.indexOf(dated[2].slice(0, 3).toLowerCase())
+    if (month !== -1) raw = `${dated[1]}-${month + 1}`
+  }
+
+  const canonical = /^B\s*(\d+)(?:-([A-Z]))?\s*[- ]*\s*L\s*(\d+)([A-Z]?)$/i.exec(raw)
+  if (canonical) {
+    return `B${Number(canonical[1])}${canonical[2] ? `-${canonical[2].toUpperCase()}` : ''} L${Number(canonical[3])}${canonical[4].toUpperCase()}`
+  }
+
+  // 21-32A is Block 21, Lot 32A; 23-B-1 is Block 23-B, Lot 1.
+  const legacy = /^(\d+)(?:-([A-Z]))?-(\d+)([A-Z]?)$/i.exec(raw)
+  if (legacy) {
+    return `B${Number(legacy[1])}${legacy[2] ? `-${legacy[2].toUpperCase()}` : ''} L${Number(legacy[3])}${legacy[4].toUpperCase()}`
+  }
+
+  // MVLC's block-less identifiers are commercial lots, labelled "C L1" on the map.
+  const commercial = /^(?:C\s*[- ]*\s*)?(?:LOT|L)\s*[- ]*\s*(\d+)([A-Z]?)$/i.exec(raw)
+  if (commercial) return `C L${Number(commercial[1])}${commercial[2].toUpperCase()}`
+  return raw
+}
+
+export function isLotIdentifierValid(projectCode, value) {
+  if (!/^MVLC$/i.test(projectCode)) return Boolean(text(value).trim())
+  return /^(?:B[1-9]\d*(?:-[A-Z])?|C) L[1-9]\d*[A-Z]?$/.test(formatLotIdentifier(projectCode, value))
+}
+
 /**
  * The project's lots by identifier (lotKey → [{ id, lotNo, phase, category, status }]),
  * narrowed to one phase when `phase` is given. A key can hold several lots —
  * the same identifier in two phases — which callers must treat as ambiguous.
  */
-export async function fetchLotsByIdentifier(projectCode, { phase = null } = {}) {
+export async function fetchLotsByIdentifier(projectCode, { phase = null, section = null } = {}) {
   const table = lotTableFor(projectCode)
-  const rows = await fetchAllRows(table, 'id, lot_no, phase, category, status', (query) =>
-    phase === null ? query : query.eq('phase', phase),
-  )
+  const tracksSections = table === LOT_TABLES.MVLC
+  const narrow = (query) => {
+    let filtered = phase === null ? query : query.eq('phase', phase)
+    if (tracksSections && section) filtered = filtered.eq('map_section', section)
+    else if (tracksSections && phase !== null) filtered = filtered.is('map_section', null)
+    return filtered
+  }
+  const columns = `id, lot_no, phase, category, status${tracksSections ? ', map_section' : ''}`
+  // reserve_type comes from a later migration; without it every lot reads as the default reservation.
+  const rows = await fetchAllRows(table, `${columns}, reserve_type`, narrow).catch((err) => {
+    if (!/reserve_type/.test(err.message)) throw err
+    return fetchAllRows(table, columns, narrow)
+  })
   const byKey = new Map()
   rows.forEach((row) => {
     const key = lotKey(row.lot_no)
@@ -637,8 +828,10 @@ export async function fetchLotsByIdentifier(projectCode, { phase = null } = {}) 
       id: row.id,
       lotNo: text(row.lot_no),
       phase: row.phase ?? null,
+      mapSection: text(row.map_section) || null,
       category: text(row.category),
       status: text(row.status),
+      reserveType: text(row.reserve_type),
     }
     byKey.set(key, [...(byKey.get(key) ?? []), lot])
   })
@@ -646,7 +839,7 @@ export async function fetchLotsByIdentifier(projectCode, { phase = null } = {}) 
 }
 
 /**
- * Apply several status changes ([{ id, lotNo, status }]) one lot at a time.
+ * Apply several status changes ([{ id, lotNo, status, reserveType? }]) one lot at a time.
  * Never stops at the first failure: returns { updated, failed: [{ lotNo, message }] }.
  */
 export async function updateLotStatuses(changes, projectCode) {
@@ -654,7 +847,7 @@ export async function updateLotStatuses(changes, projectCode) {
   const failed = []
   for (const change of changes) {
     try {
-      await updateLotStatus(change.id, change.status, projectCode)
+      await updateLotStatus(change.id, change.status, projectCode, { reserveType: change.reserveType })
       updated += 1
     } catch (err) {
       failed.push({ lotNo: change.lotNo, message: err.message })
@@ -672,7 +865,7 @@ function lotTableFor(projectCode) {
 
 /**
  * The date a lot was last updated, as the database stores it (YYYY-MM-DD). An
- * edit may set it by hand — a lot's sheet date is often not the day it is typed
+ * new lot may set it by hand — a lot's sheet date is often not the day it is typed
  * in — and anything unparseable falls back to `fallback`.
  */
 function lastUpdatedDay(value, fallback) {
@@ -693,8 +886,9 @@ export async function updateLot(id, projectCode, { lotNo, phase, category, areaS
   // Projects whose lots are not grouped (ERHD) never store a phase.
   if (!lotTermsFor(projectCode).group) phase = null
 
-  const lot_no = text(lotNo).trim()
+  const lot_no = formatLotIdentifier(projectCode, lotNo)
   if (!lot_no) throw new Error(`${lotTermsFor(projectCode).item} identifier is required.`)
+  if (!isLotIdentifierValid(projectCode, lot_no)) throw new Error('MVLC lot identifier must use a format such as B21 L1, B23-B L1, or C L1.')
   if (!text(category).trim()) throw new Error('Category is required.')
   if (!Number.isFinite(areaSqm) || areaSqm <= 0) throw new Error('Lot area must be a number greater than 0.')
   if (phase !== null && !(Number.isInteger(phase) && phase > 0)) throw new Error(`${lotTermsFor(projectCode).group ?? 'Phase'} must be a whole number.`)
@@ -708,9 +902,11 @@ export async function updateLot(id, projectCode, { lotNo, phase, category, areaS
     category,
     size_sqm: areaSqm,
     updated_at: now.toISOString(),
-    last_updated: lastUpdatedDay(lastUpdated, now.toISOString().slice(0, 10)),
-    // A portal edit knows the day, so any month-only marker from an import is cleared.
-    last_updated_precision: null,
+    // Preserve the lot's source date when this form only edits its other fields.
+    ...(lastUpdated === undefined ? {} : {
+      last_updated: lastUpdatedDay(lastUpdated, now.toISOString().slice(0, 10)),
+      last_updated_precision: null,
+    }),
     // `total` is generated by the database from size_sqm * price_per_sqm and cannot be written.
     ...(pricePerSqm === null ? {} : { price_per_sqm: pricePerSqm }),
     // Only sent for sold lots, where the form shows the agent field.
@@ -733,8 +929,9 @@ export async function createLot(projectCode, { lotNo, phase, category, areaSqm, 
   // Projects whose lots are not grouped (ERHD) never store a phase.
   if (!lotTermsFor(projectCode).group) phase = null
 
-  const lot_no = text(lotNo).trim()
+  const lot_no = formatLotIdentifier(projectCode, lotNo)
   if (!lot_no) throw new Error(`${lotTermsFor(projectCode).item} identifier is required.`)
+  if (!isLotIdentifierValid(projectCode, lot_no)) throw new Error('MVLC lot identifier must use a format such as B21 L1, B23-B L1, or C L1.')
   if (!text(category).trim()) throw new Error('Category is required.')
   if (!Number.isFinite(areaSqm) || areaSqm <= 0) throw new Error('Lot area must be a number greater than 0.')
   if (phase !== null && !(Number.isInteger(phase) && phase > 0)) throw new Error(`${lotTermsFor(projectCode).group ?? 'Phase'} must be a whole number.`)
@@ -818,3 +1015,9 @@ export async function deleteLots(ids, projectCode) {
 }
 
 export default fetchProjectLots
+
+/** The tables fetchProjectLots reads for `query`, so its Refresh button knows what to check. */
+fetchProjectLots.tables = (query = {}) => {
+  const code = LOT_TABLES[query.projectCode] ? query.projectCode : DEFAULT_PROJECT_CODE
+  return ['projects', LOT_TABLES[code], PRICE_CONFIG[code]?.table].filter(Boolean)
+}

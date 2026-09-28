@@ -118,7 +118,7 @@ function RowActions({ lot, onDetails, onRowAction }) {
   return (
     <Flex align="center" justify="center" gap="4px">
 
-      <Menu.Root onSelect={(details) => onRowAction?.(details.value, lot)}>
+      <Menu.Root onSelect={(details) => details.value === 'details' ? onDetails?.(lot) : onRowAction?.(details.value, lot)}>
         <Menu.Trigger
           aria-label={`More actions for lot ${lot.identifier}`}
           display="flex"
@@ -207,7 +207,51 @@ export default function LotsTable({
 
   return (
     <Card p="0" overflow="hidden">
-      <Box overflowX="auto">
+      <Box display={{ base: 'block', md: 'none' }} opacity={loading ? 0.55 : 1} transition="opacity 120ms ease">
+        {lots.length > 0 ? (
+          <Flex align="center" gap="10px" px="16px" py="10px" bg={HEADER_BG}>
+            <SelectBox checked={headerChecked} onChange={() => onTogglePage(pageIds)} label="Select all lots on this page" />
+            <Text fontFamily="Inter, system-ui, sans-serif" fontSize="12px" fontWeight="600" color={COLORS.heading}>Select page</Text>
+          </Flex>
+        ) : null}
+        {lots.length === 0 ? (
+          <Text py="40px" px="16px" textAlign="center" fontFamily="Inter, system-ui, sans-serif" fontSize="13px" color={COLORS.subtle}>
+            {hasFilters ? `No ${terms.item.toLowerCase()}s match these filters.` : `No ${terms.item.toLowerCase()}s recorded yet.`}
+          </Text>
+        ) : lots.map((lot) => (
+          <Box as="article" key={lot.id} px="16px" py="14px" borderBottom="1px solid" borderColor={COLORS.border} bg={selectedIds.has(lot.id) ? '#F5F8FF' : COLORS.surface}>
+            <Flex align="center" justify="space-between" gap="10px">
+              <Flex align="center" gap="10px" minW={0}>
+                <SelectBox checked={selectedIds.has(lot.id)} onChange={() => onToggleRow(lot.id)} label={`Select lot ${lot.identifier}`} />
+                <Text fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontWeight="700" fontSize="15px" color={COLORS.heading} truncate>{lot.identifier}</Text>
+              </Flex>
+              <RowActions lot={lot} onDetails={onDetails} onRowAction={onRowAction} />
+            </Flex>
+            <Flex mt="10px" gap="6px 14px" flexWrap="wrap" fontFamily="Inter, system-ui, sans-serif" fontSize="12px" color={COLORS.muted}>
+              {terms.group ? <Text>{terms.group}: {lot.phase}</Text> : null}
+              <Text>Category: {lot.category}</Text>
+              <Text>{terms.area}: {formatNumber(lot.areaSqm)} sqm</Text>
+              {unitFields.map((field) => <Text key={field.key}>{field.label}: {lot[field.key] || '—'}</Text>)}
+              {showPricing ? (
+                <>
+                  <Text>Price / sqm: {formatPeso(lot.pricePerSqm)}</Text>
+                  <Text>TCP: {formatPeso(lot.tcp)}{lot.vatInclusive === null ? '' : lot.vatInclusive ? ' · VAT Incl.' : ' · VAT Excl.'}</Text>
+                </>
+              ) : null}
+            </Flex>
+            <Flex align="center" justify="space-between" gap="8px" mt="12px" flexWrap="wrap">
+              <StatusSelect lot={lot} saving={savingIds?.has(lot.id)} onChange={onStatusChange} />
+              {lot.rawStatus === 'sold' && lot.soldBy ? <Text fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} overflowWrap="anywhere">Sold by {lot.soldBy}</Text> : null}
+              {lot.status === 'reserved' && lot.reserveType ? (
+                <Text fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} overflowWrap="anywhere">
+                  {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}
+                </Text>
+              ) : null}
+            </Flex>
+          </Box>
+        ))}
+      </Box>
+      <Box overflowX="auto" display={{ base: 'none', md: 'block' }}>
         <Table.Root size="sm" minW="980px">
           <Table.Header>
             <Table.Row>
@@ -378,6 +422,11 @@ export default function LotsTable({
                           title={`Sold by ${lot.soldBy}`}
                         >
                           by {lot.soldBy}
+                        </Text>
+                      ) : null}
+                      {lot.status === 'reserved' && lot.reserveType ? (
+                        <Text mt="4px" pl="4px" fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} whiteSpace="nowrap">
+                          {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}
                         </Text>
                       ) : null}
                     </Table.Cell>

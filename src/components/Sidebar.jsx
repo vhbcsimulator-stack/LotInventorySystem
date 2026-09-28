@@ -6,12 +6,14 @@ import {
   LuLayoutDashboard,
   LuLogOut,
   LuMegaphone,
+  LuUserPlus,
 } from 'react-icons/lu'
 
 const DEFAULT_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: LuLayoutDashboard },
   { key: 'projects', label: 'Projects & Lots', icon: LuBuilding2 },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
+  // { key: 'brokers', label: 'Add Brokers', icon: LuUserPlus },
 ]
 
 const DEFAULT_FOOTER_ITEMS = [
@@ -24,11 +26,11 @@ const DEFAULT_BRAND = {
   logo: vhbcLogo,
 }
 
-const DEFAULT_STATUS = {
-  title: 'VHBC Realty Master',
-  subtitle: 'v2.4 Production',
-  icon: LuBuilding2,
-}
+// const DEFAULT_STATUS = {
+//   title: 'VHBC Realty Master',
+//   subtitle: 'v2.4 Production',
+//   icon: LuBuilding2,
+// }
 
 function NavLink({ item, isActive, onSelect }) {
   const isDanger = item.tone === 'danger'
@@ -82,6 +84,7 @@ export default function Sidebar({
   navLabel = 'Navigation',
   navItems = DEFAULT_NAV_ITEMS,
   footerItems = DEFAULT_FOOTER_ITEMS,
+  // status = DEFAULT_STATUS,
   activeKey = navItems[0]?.key,
   onNavigate,
   ...rest

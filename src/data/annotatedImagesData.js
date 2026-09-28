@@ -15,6 +15,8 @@
 import { SOURCE, num, text } from './api'
 import { fetchProjectMaps, sameSlot, saveProjectMap } from './projectMapsData'
 import { supabase, unwrap } from './supabase'
+import { UPLOAD_RULES, checkUpload } from '@/lib/uploadRules'
+import { fitSvg, isSvgFile, pictureSvg, prepareSvgFile } from '@/lib/svgMaps'
 
 const BUCKET = 'annotated-images'
 
@@ -27,13 +29,22 @@ const countAnnotations = (coco) => (Array.isArray(coco?.annotations) ? coco.anno
  * floors too — the tab reads "Floor 2" but the column is still `phase`.
  */
 export function parseSlot(slot) {
-  if (slot === 'commercial') return { phase: null, commercial: true }
-  const phase = /^phase-(\d+)$/.exec(text(slot))?.[1]
-  return { phase: phase ? Number(phase) : null, commercial: false }
+  if (slot === 'commercial') return { phase: null, section: null, commercial: true }
+  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(text(slot))
+  return {
+    phase: match ? Number(match[1]) : null,
+    section: match?.[2] ? match[2].toUpperCase() === 'EAST' ? 'East' : match[2].toUpperCase() : null,
+    commercial: false,
+  }
 }
 
-/** The slot a row belongs to, for rows written before the column existed. */
-const slotOf = (row) => text(row.slot) || (row.phase === null || row.phase === undefined ? 'whole' : `phase-${row.phase}`)
+/** The slot a row belongs to, for rows written before the slot column existed. */
+const slotOf = (row) => {
+  if (text(row.slot)) return text(row.slot)
+  if (row.phase === null || row.phase === undefined) return 'whole'
+  const section = text(row.map_section).toLowerCase()
+  return `phase-${row.phase}${section ? `-${section}` : ''}`
+}
 
 function toImage(row) {
   const phase = typeof row.phase === 'number' ? row.phase : num(row.phase, NaN)
@@ -43,6 +54,7 @@ function toImage(row) {
     url: text(row.image_link),
     storagePath: text(row.storage_path),
     phase: Number.isFinite(phase) ? phase : null,
+    mapSection: text(row.map_section) || null,
     coco: row.coco_json ?? null,
     annotations: countAnnotations(row.coco_json),
     updatedAt: text(row.updated_at || row.created_at),
@@ -68,7 +80,7 @@ export async function fetchAnnotatedImages({ projectCode } = {}) {
    */
   const BASE = 'id, image_link, coco_json, project, phase, created_at, updated_at'
   const attempts = [
-    { columns: `${BASE}, storage_path, slot`, order: 'slot' },
+    { columns: `${BASE}, storage_path, slot, map_section`, order: 'slot' },
     { columns: BASE, order: 'phase' },
   ]
 
@@ -82,12 +94,22 @@ export async function fetchAnnotatedImages({ projectCode } = {}) {
           .eq('project', projectCode)
           .order(attempt.order, { ascending: true, nullsFirst: true }),
       )
-      // No filtering on the image link: a row may hold annotations and no picture.
-      return { images: data.map(toImage), source: SOURCE.DATABASE, message: '' }
+      /*
+       * The picture is the slot's current map in `uploads` — the one the map
+       * tabs show — not the link the row happened to record. A map replaced or
+       * removed there is replaced or gone here too; a slot with no map shows
+       * none. A row may still hold annotations and no picture.
+       */
+      const { maps, source } = await fetchProjectMaps({ projectCode })
+      const images = data.map(toImage).map((image) => ({
+        ...image,
+        url: source === SOURCE.DATABASE ? (findSlotMap(maps, image.slot)?.url ?? '') : image.url,
+      }))
+      return { images, source: SOURCE.DATABASE, message: '' }
     } catch (err) {
       lastError = err
       // Anything other than a missing newer column is a real failure.
-      if (index === attempts.length - 1 || !/slot|storage_path/.test(err.message)) break
+      if (index === attempts.length - 1 || !/slot|storage_path|map_section/.test(err.message)) break
     }
   }
 
@@ -103,6 +125,7 @@ export async function fetchAnnotatedImages({ projectCode } = {}) {
 /** A .json file's parsed contents, with a readable error for a file that is not COCO JSON. */
 export async function readCocoJson(file) {
   if (!file) return null
+  await checkUpload('coco', file)
   let parsed
   try {
     parsed = JSON.parse(await file.text())
@@ -131,10 +154,10 @@ export function cocoSize(coco) {
 }
 
 /**
- * The same picture redrawn at the size the annotations were made against.
+ * The same picture at the size the annotations were made against.
  *
  * A map exported at 16000 x 10000 and annotated on a 2048 x 1448 copy needs one
- * of the two moved before the polygons sit on the right lots. Redrawing the image
+ * of the two moved before the polygons sit on the right lots. Fitting the image
  * is the half that can be done once and stored, leaving every later viewer — and
  * anything else that reads the row — with a picture whose pixels are the COCO
  * file's own coordinates.
@@ -145,38 +168,42 @@ export function cocoSize(coco) {
 export async function fitImageToAnnotations(file, size) {
   if (!file || !size) return file
 
+  // An SVG is resized as a vector — its declared size changes, not its detail.
+  if (isSvgFile(file)) {
+    // fitSvg hands back the very same text when the size already matches.
+    const text = await file.text()
+    return fitSvg(text, size) === text ? file : prepareSvgFile(file, size)
+  }
+
   let bitmap
   try {
     bitmap = await createImageBitmap(file)
   } catch (err) {
     throw new Error(`"${file.name}" could not be read as an image: ${err.message}`)
   }
-  if (bitmap.width === size.width && bitmap.height === size.height) {
-    bitmap.close?.()
-    return file
-  }
-
-  const canvas = document.createElement('canvas')
-  canvas.width = size.width
-  canvas.height = size.height
-  const context = canvas.getContext('2d')
-  // Downscaling a very large map by a factor of eight; without this the result is
-  // visibly harsher than the original and the lot numbers stop being readable.
-  context.imageSmoothingEnabled = true
-  context.imageSmoothingQuality = 'high'
-  context.drawImage(bitmap, 0, 0, size.width, size.height)
+  const fits = bitmap.width === size.width && bitmap.height === size.height
   bitmap.close?.()
+  if (fits) return file
 
-  // PNG keeps line art and text crisp; anything else is written as JPEG, which
-  // keeps a photographic map from ballooning in size.
-  const type = file.type === 'image/png' ? 'image/png' : 'image/jpeg'
-  const blob = await new Promise((resolve, reject) => {
-    canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('the browser could not resize the image'))), type, 0.92)
+  /*
+   * Stored as SVG: the picture as uploaded — its own bytes, never redrawn or
+   * re-compressed — laid over the annotations' size. The polygons land on the
+   * right lots, and the map keeps every pixel of its original quality.
+   */
+  const type = /^image\/(png|jpeg|webp|gif)$/.test(file.type) ? file.type : 'image/png'
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error(`"${file.name}" could not be read.`))
+    reader.readAsDataURL(new Blob([file], { type }))
   })
-
   const base = file.name.replace(/\.[^.]+$/, '')
-  const extension = type === 'image/png' ? 'png' : 'jpg'
-  return new File([blob], `${base}-${size.width}x${size.height}.${extension}`, { type })
+  const svg = new File([pictureSvg(dataUrl, size.width, size.height)], `${base}-${size.width}x${size.height}.svg`, { type: 'image/svg+xml' })
+  // Embedding adds a third to the picture's size.
+  if (svg.size > UPLOAD_RULES.map.maxBytes) {
+    throw new Error(`"${file.name}" comes to ${(svg.size / 1024 / 1024).toFixed(1)} MB as SVG, past the ${UPLOAD_RULES.map.maxBytes / 1024 / 1024} MB map limit.`)
+  }
+  return svg
 }
 
 /** One stored image re-fetched as a File, so it can be resized and written back. */
@@ -246,7 +273,7 @@ export async function syncMapImage({ projectCode, projectId = null, slot = 'whol
    * a Phase 1 commercial map must stay Phase 1 commercial, or saving it would
    * create a second, phase-less commercial map beside the one it replaced.
    */
-  const target = map ? { phase: map.phase, commercial: map.commercial } : parseSlot(slot)
+  const target = map ? { phase: map.phase, section: map.section, commercial: map.commercial } : parseSlot(slot)
   if (!map) {
     throw new Error(
       `No map is uploaded for ${slotName || slot} yet — add one on its map tab first, or choose an image here.`,
@@ -277,7 +304,7 @@ export async function uploadMapImage({ projectCode, projectId = null, slot = 'wh
   if (source !== SOURCE.DATABASE) throw new Error('The uploads table could not be read.')
   const map = findSlotMap(maps, slot)
   // The map's own slot, as in syncMapImage, so a Phase 1 commercial map stays one.
-  const target = map ? { phase: map.phase, commercial: map.commercial } : parseSlot(slot)
+  const target = map ? { phase: map.phase, section: map.section, commercial: map.commercial } : parseSlot(slot)
   await saveProjectMap({ projectCode, projectId, target, file, existing: maps, replaceId: map?.id ?? null })
   const after = await fetchProjectMaps({ projectCode })
   return after.maps.find((existing) => sameSlot(existing, target))?.url ?? ''
@@ -291,17 +318,15 @@ export async function uploadMapImage({ projectCode, projectId = null, slot = 'wh
  * be null to keep what is stored. `file` is an optional image to show the
  * annotations against.
  *
- * An image chosen here is redrawn at the annotations' own size before it is
- * stored, unless `fit` is false. `imageUrl` instead points the row at a picture
- * that already lives elsewhere — the project's map in `uploads` (see
- * syncMapImage) — which is then not copied into this bucket and not deleted with
- * the row.
- *
- * Any image is uploaded first and the row written second; a failed write removes
- * the file it just uploaded, so a half-finished save leaves nothing behind.
+ * The picture is always the slot's map in `uploads`. An image chosen here is
+ * redrawn at the annotations' own size (unless `fit` is false) and saved as that
+ * map; `imageUrl` instead links a map already there (see syncMapImage). Either
+ * way the row only links to it, so the annotations and the map tab always show
+ * the same picture, and deleting the annotations never deletes the map.
  */
 export async function saveAnnotatedImage({
   projectCode,
+  projectId = null,
   slot = 'whole',
   file = null,
   coco = null,
@@ -312,9 +337,9 @@ export async function saveAnnotatedImage({
   if (!supabase) throw new Error('No database connected — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
   if (!projectCode) throw new Error('Choose a project first.')
   if (!slot) throw new Error('Choose which map these annotations belong to.')
-  const { phase } = parseSlot(slot)
+  const { phase, section } = parseSlot(slot)
   if (!coco && !existing) throw new Error('Choose a COCO JSON file.')
-  if (file && !file.type?.startsWith('image/')) throw new Error('The image must be a PNG, JPG or WebP file.')
+  if (file) await checkUpload('map', file)
   if (!file && !coco && !imageUrl) throw new Error('Choose a new COCO JSON file or a new image.')
 
   const { data: auth } = await supabase.auth.getUser()
@@ -322,29 +347,17 @@ export async function saveAnnotatedImage({
   if (!user) throw new Error('Sign in to upload annotated images.')
 
   /*
-   * The annotations being saved decide the size; where only the image is being
-   * replaced, the ones already stored do. A file that records no size leaves the
-   * image exactly as uploaded.
-   */
-  const stored = file && fit ? await fitImageToAnnotations(file, cocoSize(coco ?? existing?.coco)) : file
-
-  const bucket = supabase.storage.from(BUCKET)
-  let storagePath = existing?.storagePath ?? ''
-  /*
-   * A map linked from `uploads` has no file of this table's own, so the stored
-   * path is cleared with it — deleting the annotations must never delete the
-   * project's map.
+   * The picture lives in `uploads`, as the slot's map — the one the map tabs
+   * show — never as a copy of the annotations' own. An image chosen here is
+   * fitted to the annotations' size as an SVG, its picture untouched (unless `fit` is false), and saved as that
+   * map; the row only records a link to it. The annotations being saved decide
+   * the size; where only the image is being replaced, the ones stored do.
    */
   let link = imageUrl || existing?.url || ''
-  if (imageUrl) storagePath = ''
-
-  if (stored) {
-    const safeName = stored.name.replace(/[^\w.-]+/g, '_')
-    const random = Math.random().toString(36).slice(2, 13)
-    storagePath = `${user.id}/${projectCode}/${slot}/${Date.now()}_${random}_${safeName}`
-    const { error } = await bucket.upload(storagePath, stored, { contentType: stored.type })
-    if (error) throw new Error(`Image upload to the "${BUCKET}" bucket failed: ${error.message}`)
-    link = bucket.getPublicUrl(storagePath).data.publicUrl
+  if (file) {
+    const fitted = fit ? await fitImageToAnnotations(file, cocoSize(coco ?? existing?.coco)) : file
+    link = await uploadMapImage({ projectCode, projectId, slot, file: fitted })
+    if (!link) throw new Error('The map was saved, but its link could not be read back — reload and try again.')
   }
 
   const row = {
@@ -352,10 +365,14 @@ export async function saveAnnotatedImage({
     slot,
     // Kept in step with the slot so anything reading by phase still works.
     phase,
+    // Kept in step with uploads.map_section (A, B, C, or East) so section maps
+    // can also be identified directly from the annotated_images table.
+    map_section: section,
     // Null, not '', when no image is attached — the column is nullable and the
     // difference shows up in any query that looks for rows still missing one.
     image_link: link || null,
-    storage_path: storagePath || null,
+    // The picture is the map's, in `uploads`: the annotations own no file.
+    storage_path: null,
     user_id: user.id,
     updated_at: new Date().toISOString(),
     // Left out when no new JSON was chosen, so the stored annotations survive an
@@ -367,17 +384,11 @@ export async function saveAnnotatedImage({
     .from('annotated_images')
     .upsert(row, { onConflict: 'project,slot' })
     .select('id')
-  if (error) {
-    // Only the file this call uploaded is removed; the previous one is untouched.
-    if (file) await bucket.remove([storagePath])
-    throw new Error(explain(error.message))
-  }
+  if (error) throw new Error(explain(error.message))
   if (!data?.length) throw new Error('The database did not accept the annotations — you may need to sign in.')
 
-  // The replaced file is dropped only once the row points at the new one.
-  if (file && existing?.storagePath && existing.storagePath !== storagePath) {
-    await bucket.remove([existing.storagePath])
-  }
+  // A picture of the annotations' own from before, now replaced by the map's, is dropped.
+  if (existing?.storagePath) await supabase.storage.from(BUCKET).remove([existing.storagePath])
   return data[0].id
 }
 
@@ -420,3 +431,6 @@ function explain(message) {
   }
   return message
 }
+
+/** The tables fetchAnnotatedImages reads (pictures come from the maps in `uploads`), for its Refresh button. */
+fetchAnnotatedImages.tables = () => ['annotated_images', 'uploads']

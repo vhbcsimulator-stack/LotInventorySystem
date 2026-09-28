@@ -1,20 +1,30 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Box, CloseButton, Dialog, Flex, Icon, Portal, Spinner, Text } from '@chakra-ui/react'
 import {
+  LuCheck,
+  LuChevronDown,
   LuDownload,
   LuEraser,
   LuEye,
   LuEyeOff,
   LuImage,
   LuPaintbrush,
+  LuPalette,
+  LuPipette,
   LuSave,
   LuShapes,
+  LuSlidersHorizontal,
+  LuRedo2,
   LuTriangleAlert,
+  LuUndo2,
   LuWandSparkles,
   LuZoomIn,
   LuZoomOut,
 } from 'react-icons/lu'
 import useLotPainter from '@/components/projects/useLotPainter'
+import { TOLERANCE_DEFAULT, TOLERANCE_MAX, TOLERANCE_MIN } from '@/components/projects/lotRecolor'
+import { DEFAULT_PALETTE, hexToHsv, hsvToHex, isDefaultPalette, loadPalette, savePalette } from '@/components/projects/legendPalette'
+import { frameMisfit, isSvgUrl } from '@/lib/svgMaps'
 import { planStatusUpdate } from '@/components/projects/lotStatusPlan'
 import { LOT_STATUS_OPTIONS } from '@/data/projectsData'
 import { COLORS, MAP_LOT_FILL } from '@/theme/colors'
@@ -22,8 +32,40 @@ import { COLORS, MAP_LOT_FILL } from '@/theme/colors'
 /** The brush that removes a lot's new colour, leaving the map's own. */
 const ORIGINAL = 'original'
 const FILL_BY_STATUS = Object.fromEntries(MAP_LOT_FILL.map((option) => [option.value, option]))
+/** Who a lot painted Reserved is held for; stored on the lot as its reserve type. */
+const RESERVE_TYPES = [
+  // '' is a plain reservation, held for neither; it is stored as no reserve type.
+  { value: '', label: 'Default' },
+  { value: 'client', label: 'Client' },
+  { value: 'company', label: 'Company' },
+]
+const reserveTypeLabel = (value) => RESERVE_TYPES.find((option) => option.value === value)?.label ?? ''
+/** A paint's colour name, with its reserve type when it has one: "Reserved · Client". */
+function paintLabel({ status, reserveType }) {
+  const label = FILL_BY_STATUS[status]?.label ?? status
+  return reserveType ? `${label} · ${reserveTypeLabel(reserveType)}` : label
+}
 // Polygon clicks before the map is ready to colour.
 const IGNORE = () => {}
+
+/** How many colouring steps Undo can go back. */
+const HISTORY_LIMIT = 100
+
+/**
+ * The paint state after `update` — the new paints, with the ones they replace
+ * kept as a step Undo can return to, and anything undone before dropped. A
+ * change that changes nothing (resetting an empty map, a reserve type no lot
+ * uses) records no step.
+ */
+function withPaints(prev, url, update) {
+  const current = prev.url === url ? prev.paints : []
+  const next = update(current)
+  const same = next.length === current.length && next.every((paint, index) => paint === current[index])
+  if (same) return prev
+  const past = prev.url === url ? prev.past : []
+  return { url, paints: next, past: [...past, current].slice(-HISTORY_LIMIT), future: [] }
+}
+const NONE = []
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -92,6 +134,52 @@ function toShapes(coco) {
     }
   })
 }
+
+/**
+ * The painted lots, drawn over the map while colouring. Each layer is the map
+ * itself — the same picture, at the same full resolution — through a colour
+ * filter turning the lot's old colour into its new one, clipped to its lots.
+ * Nothing is redrawn at a lower resolution and nothing is swapped in later, so a
+ * painted lot is sharp the moment it is clicked. `layers` come from
+ * useLotPainter; their outlines are in canvas pixels, this drawing's own units.
+ * Clicks pass straight through to the lots underneath.
+ */
+const PaintLayers = memo(function PaintLayers({ id, url, width, height, layers }) {
+  if (!layers.length) return null
+  return (
+    <g pointerEvents="none">
+      <defs>
+        {layers.map((layer, index) => {
+          // Outlines come from a copy of the map drawn `scale` times larger.
+          const [sx, sy] = layer.scale ?? [1, 1]
+          return (
+          <Fragment key={layer.key}>
+            <clipPath id={`${id}-clip-${index}`}>
+              <path d={layer.d} transform={`scale(${1 / sx} ${1 / sy})`} />
+            </clipPath>
+            <filter
+              id={`${id}-fill-${index}`}
+              filterUnits="userSpaceOnUse"
+              x={layer.box[0] / sx}
+              y={layer.box[1] / sy}
+              width={(layer.box[2] - layer.box[0]) / sx}
+              height={(layer.box[3] - layer.box[1]) / sy}
+              colorInterpolationFilters="sRGB"
+            >
+              <feColorMatrix type="matrix" values={layer.matrix} />
+            </filter>
+          </Fragment>
+          )
+        })}
+      </defs>
+      {layers.map((layer, index) => (
+        <g key={layer.key} clipPath={`url(#${id}-clip-${index})`} filter={`url(#${id}-fill-${index})`}>
+          <image href={url} x="0" y="0" width={width} height={height} preserveAspectRatio="none" />
+        </g>
+      ))}
+    </g>
+  )
+})
 
 /**
  * The polygons, as their own component.
@@ -170,12 +258,32 @@ export default function AnnotatedImagePreview({
    */
   loadLots,
   onSaveUpdate,
+  // Optional escape hatches for the two synchronization directions.
+  onSkipColoring,
+  allowMapOnlySave = false,
   saving = false,
   saveError = '',
+  /*
+   * Opening on a colouring already begun — a status just changed in the lot
+   * table: `initialPaints` are the draft, `startPainting` opens with the brush
+   * out, `focusShapeIds` are the lots to zoom to, and `notice` says why it opened.
+   */
+  initialPaints = NONE,
+  startPainting = false,
+  // Open with the annotation outlines already drawn over the map.
+  showAnnotations = false,
+  focusShapeIds = NONE,
+  notice = '',
+  // A caution shown above the map in amber — e.g. coloring with no COCO JSON.
+  warning = '',
+  // What to ask before closing with colours unsaved.
+  closeConfirm = 'Discard the lot colors you have not saved?',
 }) {
   const [natural, setNatural] = useState({ width: 0, height: 0 })
   const [selected, setSelected] = useState(null)
-  const [showShapes, setShowShapes] = useState(true)
+  // Keep the base map clean on open; annotations remain available from the
+  // explicit Show annotations control (and appear automatically while painting).
+  const [showShapes, setShowShapes] = useState(showAnnotations)
 
   const shapes = useMemo(() => toShapes(coco), [coco])
   const annotated = cocoSize(coco)
@@ -191,7 +299,33 @@ export default function AnnotatedImagePreview({
     canvas.width > 0 && natural.width > 0
       ? { x: canvas.width / natural.width, y: canvas.height / natural.height }
       : { x: 1, y: 1 }
-  const matches = Math.abs(canvas.width - natural.width) < 1 && Math.abs(canvas.height - natural.height) < 1
+  /*
+   * An SVG map can declare the right size yet draw its picture a little short
+   * of it — an export's rounded scale — and the annotations then drift. Only
+   * the start of the file is read to tell, not the whole picture.
+   */
+  const [misfit, setMisfit] = useState(null) // { url, value }
+  useEffect(() => {
+    if (!open || !isSvgUrl(url)) return undefined
+    const controller = new AbortController()
+    ;(async () => {
+      const response = await fetch(url, { signal: controller.signal })
+      if (!response.ok || !response.body) return
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let head = ''
+      while (head.length < 65536) {
+        const { done, value } = await reader.read()
+        if (done) break
+        head += decoder.decode(value, { stream: true })
+      }
+      controller.abort()
+      setMisfit({ url, value: frameMisfit(head) })
+    })().catch(() => {})
+    return () => controller.abort()
+  }, [open, url])
+  const frameIssue = misfit?.url === url ? misfit.value : null
+  const matches = Math.abs(canvas.width - natural.width) < 1 && Math.abs(canvas.height - natural.height) < 1 && !frameIssue
   // Different factors per axis: the two files disagree on proportion, not only on
   // size, so the picture is visibly reshaped to fit.
   const reshaped = Math.abs(fit.x - fit.y) > 0.01
@@ -213,11 +347,110 @@ export default function AnnotatedImagePreview({
    * the picture they were made on, so uploading the result — which changes
    * `url` — starts the next round from a clean slate on the new map.
    */
-  const [painting, setPainting] = useState(false)
-  const [brush, setBrush] = useState(MAP_LOT_FILL[0].value)
-  const [paintState, setPaintState] = useState({ url, paints: [] })
+  const [painting, setPainting] = useState(startPainting)
+  const [brush, setBrush] = useState(initialPaints.at(-1)?.status ?? MAP_LOT_FILL[0].value)
+  // How far each painted lot's colour reaches; see the toolbar's Tolerance control.
+  const [tolerance, setTolerance] = useState(TOLERANCE_DEFAULT)
+  /*
+   * How an annotated lot is colored: exactly inside its polygon (the default),
+   * or following the printed lot lines out from it — better when outlines were
+   * drawn well inside the lines. Clicked lots always follow the printed lines.
+   */
+  const [shapeMode, setShapeMode] = useState('polygon')
+  const [reserveType, setReserveType] = useState(initialPaints.at(-1)?.reserveType ?? RESERVE_TYPES[0].value)
+  // What a click paints: the brush's colour, and for Reserved who it is held for.
+  const brushPaint = useMemo(
+    () => (brush === 'reserved' ? { status: brush, reserveType } : { status: brush }),
+    [brush, reserveType],
+  )
+  /*
+   * The colour each status paints: the default legend, or the colours read off
+   * this map's own legend. Matching the legend works on a draft: `picking` is
+   * the statuses still to be read — a click on the map then samples a swatch
+   * for the first of them instead of painting a lot, or the colour wheel sets
+   * it by hand — and once none are left the draft waits for confirmation.
+   * Painted lots show the draft meanwhile, as a preview; only confirming it
+   * replaces the saved colours.
+   */
+  const paletteKey = title || url
+  const [savedPalette, setSavedPalette] = useState(() => loadPalette(paletteKey))
+  const [legendDraft, setLegendDraft] = useState(null) // null, or the palette being matched
+  const palette = legendDraft ?? savedPalette
+  const [picking, setPicking] = useState([])
+  const pickingRef = useRef(false)
+  pickingRef.current = picking.length > 0
+  function changePalette(next) {
+    setSavedPalette(next)
+    savePalette(paletteKey, next)
+  }
+  const setDraftColor = (status, hex) => setLegendDraft((draft) => ({ ...(draft ?? savedPalette), [status]: hex }))
+  function pickLegendColor(x, y) {
+    const hex = painter.sampleColor(x, y)
+    if (!hex) return
+    setDraftColor(picking[0], hex)
+    setPicking((queue) => queue.slice(1))
+  }
+  function endMatching(apply) {
+    if (apply && legendDraft) changePalette(legendDraft)
+    setLegendDraft(null)
+    setPicking([])
+  }
+  // The paints, with the steps before (past) and undone after (future) them.
+  const [paintState, setPaintState] = useState({ url, paints: initialPaints, past: [], future: [] })
   const [paintMessage, setPaintMessage] = useState('')
-  const paintCanvasRef = useRef(null)
+  /*
+   * Linking clicked areas to lots. A lot colored by clicking has no annotation
+   * to name it, so it is linked by hand to a row of the lot table — which is
+   * what lets Save Update change its status. `linking` is the { x, y } of the
+   * paint being linked; the lot list loads the first time it is needed.
+   */
+  const canLink = Boolean(loadLots)
+  const [linking, setLinking] = useState(null)
+  const [lotOptions, setLotOptions] = useState(null) // null until loaded: [{ id, lotNo, key, phase, category, status }]
+  const [lotsError, setLotsError] = useState('')
+  const lotsRequested = useRef(false)
+  function ensureLots() {
+    if (!canLink || lotsRequested.current) return
+    lotsRequested.current = true
+    loadLots().then(
+      (byKey) =>
+        setLotOptions(
+          [...byKey.values()]
+            .flat()
+            .map((lot) => ({ ...lot, key: String(lot.lotNo).toLowerCase().replace(/[^a-z0-9]/g, '') }))
+            .sort((a, b) => String(a.lotNo).localeCompare(String(b.lotNo), undefined, { numeric: true })),
+        ),
+      (err) => {
+        lotsRequested.current = false
+        setLotsError(err.message)
+      },
+    )
+  }
+  function openLinker(paint) {
+    setLotsError('')
+    ensureLots()
+    setLinking({ x: paint.x, y: paint.y })
+  }
+  const samePoint = (paint, point) => paint.shapeId === undefined && paint.x === point.x && paint.y === point.y
+  /** Link the area being linked to `lot`, or unlink it with null. */
+  function linkLot(lot) {
+    if (!linking) return
+    const point = linking
+    updatePaints((list) =>
+      list.map((paint) => {
+        if (!samePoint(paint, point)) return paint
+        if (!lot) {
+          const rest = { ...paint }
+          delete rest.lot
+          return rest
+        }
+        return { ...paint, lot: { id: lot.id, lotNo: lot.lotNo } }
+      }),
+    )
+    setLinking(null)
+  }
+  // Colour layers are referenced by id; unique per preview, and safe inside url(#…).
+  const paintLayerId = `paint-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
   const paints = useMemo(() => (paintState.url === url ? paintState.paints : []), [paintState, url])
   const painter = useLotPainter({
     enabled: painting,
@@ -226,65 +459,118 @@ export default function AnnotatedImagePreview({
     height: canvas.height,
     shapes,
     paints,
-    canvasRef: paintCanvasRef,
+    tolerance,
+    palette,
+    shapeMode,
   })
-  const updatePaints = (update) =>
-    setPaintState((prev) => ({ url, paints: update(prev.url === url ? prev.paints : []) }))
+  const updatePaints = (update) => setPaintState((prev) => withPaints(prev, url, update))
+  /*
+   * "Show original" hides the colours to compare with the map as it was. It is
+   * tied to the paints it was turned on for: any change — a paint, undo, redo,
+   * reset — makes new paints, so the colours come back and every edit is seen.
+   */
+  const [originalFor, setOriginalFor] = useState(null)
+  const showOriginal = painting && originalFor !== null && originalFor === paints
+  const toggleOriginal = () => setOriginalFor(showOriginal ? null : paints)
+  const canUndo = paintState.url === url && paintState.past.length > 0
+  const canRedo = paintState.url === url && paintState.future.length > 0
+  const undo = useCallback(() => {
+    setPaintMessage('')
+    setPaintState((prev) =>
+      prev.url !== url || !prev.past.length
+        ? prev
+        : { url, paints: prev.past.at(-1), past: prev.past.slice(0, -1), future: [prev.paints, ...prev.future] },
+    )
+  }, [url])
+  const redo = useCallback(() => {
+    setPaintMessage('')
+    setPaintState((prev) =>
+      prev.url !== url || !prev.future.length
+        ? prev
+        : { url, paints: prev.future[0], past: [...prev.past, prev.paints], future: prev.future.slice(1) },
+    )
+  }, [url])
+  /*
+   * A new reserve type is what the next click paints. The lots this preview was
+   * opened for are already painted Reserved, so they take it straight away —
+   * otherwise picking Company there would still save them as Client.
+   */
+  function pickReserveType(value) {
+    setReserveType(value)
+    if (!focusShapeIds.length) return
+    updatePaints((list) =>
+      list.map((paint) =>
+        paint.status === 'reserved' && focusShapeIds.includes(paint.shapeId) ? { ...paint, reserveType: value } : paint,
+      ),
+    )
+  }
   // The newest paint of each annotated lot, for the swatches in the list.
-  const shapeStatus = new Map(paints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint.status]))
+  const shapePaint = new Map(paints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint]))
+  // Areas colored by clicking, each once; the one being linked, while it still exists (undo can remove it).
+  const clickedPaints = paints.filter((paint) => paint.shapeId === undefined)
+  const linkingPaint = linking ? (clickedPaints.find((paint) => samePoint(paint, linking)) ?? null) : null
+  const linkedIds = new Set(clickedPaints.filter((paint) => paint.lot).map((paint) => paint.lot.id))
 
   // Stable per brush, so the memoised polygons are not rebuilt on every pan frame.
   const paintShape = useCallback(
     (id) => {
       setPaintMessage('')
-      setPaintState((prev) => {
-        const rest = (prev.url === url ? prev.paints : []).filter((paint) => paint.shapeId !== id)
-        return { url, paints: brush === ORIGINAL ? rest : [...rest, { shapeId: id, status: brush }] }
-      })
+      setPaintState((prev) =>
+        withPaints(prev, url, (list) => {
+          const rest = list.filter((paint) => paint.shapeId !== id)
+          return brush === ORIGINAL ? rest : [...rest, { shapeId: id, ...brushPaint }]
+        }),
+      )
     },
-    [brush, url],
+    [brush, brushPaint, url],
   )
   // A polygon click while colouring; the click that ends a pan is not one.
   const paintShapeClick = useCallback(
     (id) => {
-      if (!dragged.current) paintShape(id)
+      // While reading the legend the drawing's own click handler samples instead.
+      if (!dragged.current && !spaceHeld.current && !pickingRef.current) paintShape(id)
     },
     [paintShape],
   )
   function paintPoint(x, y) {
     const { found, index } = painter.locatePoint(x, y)
-    if (!found) {
-      setPaintMessage("That spot isn't inside a lot — click on a lot's colored area.")
-      return
-    }
     setPaintMessage('')
+    // A click off every lot — on a road, a line, the margin — simply does nothing.
+    if (!found) return
+    // Coloring an area again keeps the lot it was linked to.
+    const lot = index >= 0 ? paints[index]?.lot : undefined
     updatePaints((list) => {
       const rest = list.filter((_, n) => n !== index)
-      return brush === ORIGINAL ? rest : [...rest, { x, y, status: brush }]
+      return brush === ORIGINAL ? rest : [...rest, { x, y, ...brushPaint, ...(lot ? { lot } : {}) }]
     })
+    if (brush === ORIGINAL) setLinking(null)
+    else if (canLink && !lot) openLinker({ x, y })
   }
   /** A click on the map itself, off every annotation: colour the lot under it. */
   function onDrawingClick(event) {
     // Every pointer-up resets `dragged`, so reading it is enough to skip the end of a pan.
-    if (!painting || !painter.ready || event.target.tagName === 'polygon' || dragged.current) return
+    if (!painting || !painter.ready || dragged.current || spaceHeld.current) return
+    // Reading a legend swatch takes a click anywhere, over an annotation or not.
+    if (!picking.length && event.target.tagName === 'polygon') return
     // The drawing is letterboxed into the svg box, as its viewBox is.
     const rect = event.currentTarget.getBoundingClientRect()
     const scale = Math.min(rect.width / canvas.width, rect.height / canvas.height)
     const x = (event.clientX - rect.left - (rect.width - canvas.width * scale) / 2) / scale
     const y = (event.clientY - rect.top - (rect.height - canvas.height * scale) / 2) / scale
     if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return
-    paintPoint(x, y)
+    if (picking.length) pickLegendColor(x, y)
+    else paintPoint(x, y)
   }
 
-  const fileName = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored.png`
+  const svgFileName = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored.svg`
 
   async function saveImage() {
     try {
-      const blob = await painter.toBlob()
-      const href = URL.createObjectURL(blob)
+      // Downloads as SVG, the same file a save stores, so it keeps its full detail.
+      const href = URL.createObjectURL(await painter.toSvgBlob())
       const link = document.createElement('a')
       link.href = href
-      link.download = fileName
+      link.download = svgFileName
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -300,22 +586,53 @@ export default function AnnotatedImagePreview({
    * review: null | { loading } | { plan } | { error }
    */
   const [review, setReview] = useState(null)
+
+  // Ctrl+Z undoes a colouring step; Ctrl+Y or Ctrl+Shift+Z redoes it (⌘ on a Mac).
+  useEffect(() => {
+    if (!open || !painting || review) return undefined
+    function onKeyDown(event) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return
+      const target = event.target
+      if (target?.isContentEditable || /^(TEXTAREA|SELECT)$/.test(target?.tagName) || (target?.tagName === 'INPUT' && target.type !== 'range')) return
+      const key = event.key.toLowerCase()
+      if (key === 'z' && !event.shiftKey) {
+        event.preventDefault()
+        undo()
+      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+        event.preventDefault()
+        redo()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, painting, review, undo, redo])
+
   async function openReview() {
     setPaintMessage('')
     setReview({ loading: true })
     try {
-      setReview({ plan: planStatusUpdate(shapes, paints, await loadLots()) })
+      // Every annotated lot's newest colour, as the saved map will show it.
+      const labels = new Map(shapes.map((shape) => [shape.id, shape.label]))
+      const newest = new Map(paints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint]))
+      const linkedPaints = new Map(paints.filter((paint) => paint.shapeId === undefined && paint.lot).map((paint) => [paint.lot.id, paint]))
+      const painted = [
+        ...[...newest].map(([id, paint]) => ({ label: labels.get(id) ?? `Annotation ${id}`, fill: paint.status, paint })),
+        ...[...linkedPaints.values()].map((paint) => ({ label: paint.lot.lotNo, fill: paint.status, paint })),
+      ]
+      setReview({ plan: planStatusUpdate(shapes, paints, await loadLots()), painted })
     } catch (err) {
       setReview({ error: err.message })
     }
   }
-  async function confirmSave() {
+  async function confirmSave(updateTable = true) {
     try {
-      const blob = await painter.toBlob()
-      const { failed } = await onSaveUpdate({
-        file: new File([blob], fileName, { type: 'image/png' }),
-        changes: review.plan.changes,
-      })
+      /*
+       * Always saved as SVG, so nothing is lost: the map as it is — its own SVG,
+       * or the uploaded picture embedded byte for byte — with the colored lots
+       * written in as filled paths, all in one file the Flutter app also shows.
+       */
+      const file = new File([await painter.toSvgBlob()], svgFileName, { type: 'image/svg+xml' })
+      const { failed } = await onSaveUpdate({ file, changes: updateTable ? review.plan.changes : [] })
       setReview(null)
       if (failed.length) {
         setPaintMessage(
@@ -350,6 +667,33 @@ export default function AnnotatedImagePreview({
   // A new picture starts from scratch rather than inheriting the last one's pan.
   useEffect(() => setView({ zoom: ZOOM_MIN, x: 0, y: 0 }), [url])
 
+  /*
+   * Zoom in on the lots being focused, once per picture, as soon as both the
+   * frame and the canvas size are known. The drawing is letterboxed into its
+   * box, so a COCO point sits at (point − centre) × fit-scale from the middle.
+   */
+  const focusedFor = useRef('')
+  useEffect(() => {
+    if (!focusShapeIds.length || !canvas.width || !canvas.height || focusedFor.current === url) return undefined
+    const points = shapes.filter((shape) => focusShapeIds.includes(shape.id)).flatMap((shape) => shape.rings.flat())
+    if (!points.length) return undefined
+    const raf = requestAnimationFrame(() => {
+      const frame = frameRef.current
+      const drawing = drawingRef.current
+      if (!frame || !drawing || !drawing.offsetWidth) return
+      focusedFor.current = url
+      const xs = points.map(([x]) => x)
+      const ys = points.map(([, y]) => y)
+      const scale = Math.min(drawing.offsetWidth / canvas.width, drawing.offsetHeight / canvas.height)
+      const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 1) * scale
+      const zoom = clampZoom(Math.min(4, (Math.min(frame.clientWidth, frame.clientHeight) * 0.3) / size))
+      const cx = ((Math.min(...xs) + Math.max(...xs)) / 2 - canvas.width / 2) * scale
+      const cy = ((Math.min(...ys) + Math.max(...ys)) / 2 - canvas.height / 2) * scale
+      setView(clampPan({ zoom, x: -cx * zoom, y: -cy * zoom }))
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [url, canvas.width, canvas.height, shapes, focusShapeIds])
+
   function clampPan(next) {
     const frame = frameRef.current
     const drawing = drawingRef.current
@@ -366,7 +710,7 @@ export default function AnnotatedImagePreview({
   /** Zoom to `next`, keeping the point (px, py) — from the frame's centre — still. */
   const zoomAt = (next, px = 0, py = 0) =>
     setView((prev) => {
-      const zoom = clampZoom(next)
+      const zoom = clampZoom(typeof next === 'function' ? next(prev.zoom) : next)
       const ratio = zoom / prev.zoom
       return clampPan({ zoom, x: px - (px - prev.x) * ratio, y: py - (py - prev.y) * ratio })
     })
@@ -395,8 +739,52 @@ export default function AnnotatedImagePreview({
     return () => frame.removeEventListener('wheel', onWheel)
   }, [])
 
+  /*
+   * While colouring, a left click paints and never pans. The map moves with
+   * the middle button, or with the left button while Space is held — then a
+   * click only moves the map, it never paints. Outside colouring, the left
+   * button pans as it always has, and the middle one does too.
+   */
+  const spaceHeld = useRef(false)
+  const [panKey, setPanKey] = useState(false)
+  useEffect(() => {
+    if (!open || !painting) return undefined
+    const typing = (target) =>
+      target?.isContentEditable || /^(TEXTAREA|SELECT)$/.test(target?.tagName) || (target?.tagName === 'INPUT' && target.type !== 'range')
+    const release = () => {
+      spaceHeld.current = false
+      setPanKey(false)
+    }
+    function onKeyDown(event) {
+      if (event.code !== 'Space' || typing(event.target)) return
+      // Nor does Space press whatever button last had focus.
+      event.preventDefault()
+      if (spaceHeld.current) return
+      spaceHeld.current = true
+      setPanKey(true)
+    }
+    function onKeyUp(event) {
+      if (event.code !== 'Space') return
+      if (!typing(event.target)) event.preventDefault()
+      release()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', release)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', release)
+      release()
+    }
+  }, [open, painting])
+
   function onPointerDown(event) {
-    if (event.button !== 0) return
+    const middle = event.button === 1
+    // No auto-scroll on a middle press: here it moves the map.
+    if (middle) event.preventDefault()
+    const pans = middle || (event.button === 0 && (!painting || spaceHeld.current))
+    if (!pans) return
     drag.current = { startX: event.clientX, startY: event.clientY, originX: view.x, originY: view.y, moved: false }
   }
   function onPointerMove(event) {
@@ -461,11 +849,18 @@ export default function AnnotatedImagePreview({
       onOpenChange={({ open: next }) => {
         if (next) return
         // Unsaved colours are the one thing closing would silently lose.
-        if (paints.length && !window.confirm('Discard the lot colors you have not saved?')) return
+        if (paints.length && !window.confirm(closeConfirm)) return
         onClose()
       }}
       placement="center"
       size="cover"
+      /*
+       * Focus leaving is not a reason to close: a dialog that opened this one
+       * (the Color lots choice) hands focus back to the page as it closes, which
+       * otherwise shut this modal the moment it appeared. Clicking outside, Esc,
+       * and the close button still close it.
+       */
+      onFocusOutside={(event) => event.preventDefault()}
     >
       <Portal>
         <Dialog.Backdrop />
@@ -484,6 +879,38 @@ export default function AnnotatedImagePreview({
             <Dialog.Body py="16px" overflowY="auto">
               <Flex gap="16px" align="flex-start" direction={{ base: 'column', lg: 'row' }}>
                 <Box flex="1" minW={0} w="100%">
+                  {warning ? (
+                    <Flex
+                      role="alert"
+                      mb="10px"
+                      px="12px"
+                      py="8px"
+                      gap="8px"
+                      align="flex-start"
+                      borderRadius="8px"
+                      border="1px solid #F5C77E"
+                      bg="#FFF7E6"
+                    >
+                      <Icon as={LuTriangleAlert} boxSize="16px" color="#B45309" mt="1px" flexShrink={0} />
+                      <Text fontFamily={FONT} fontSize="12.5px" color="#7C2D12">
+                        {warning}
+                      </Text>
+                    </Flex>
+                  ) : null}
+                  {notice ? (
+                    <Text
+                      mb="10px"
+                      px="12px"
+                      py="8px"
+                      borderRadius="8px"
+                      bg={COLORS.statusBg}
+                      fontFamily={FONT}
+                      fontSize="12.5px"
+                      color={COLORS.heading}
+                    >
+                      {notice}
+                    </Text>
+                  ) : null}
                   <Box
                     ref={frameRef}
                     position="relative"
@@ -503,7 +930,9 @@ export default function AnnotatedImagePreview({
                     display="flex"
                     alignItems="center"
                     justifyContent="center"
-                    cursor={dragging ? 'grabbing' : painting ? 'crosshair' : 'grab'}
+                    cursor={dragging ? 'grabbing' : painting && !panKey ? 'crosshair' : 'grab'}
+                    // While moving the map, the lots' own pointer cursor gives way to the hand.
+                    css={painting && (panKey || dragging) ? { '& *': { cursor: 'inherit !important' } } : undefined}
                     touchAction="none"
                     userSelect="none"
                     onPointerDown={onPointerDown}
@@ -533,27 +962,6 @@ export default function AnnotatedImagePreview({
                       */}
                     {/* No preserveAspectRatio here: the default letterboxes the
                         whole drawing into the frame, which is what fits it. */}
-                    {/*
-                      * While colouring, the recoloured map is a canvas at the
-                      * annotations' size under the svg; `contain` letterboxes it
-                      * exactly as the viewBox letterboxes the drawing, so the two
-                      * stay aligned at every size and zoom.
-                      */}
-                    {painting ? (
-                      <canvas
-                        ref={paintCanvasRef}
-                        width={canvas.width || 1}
-                        height={canvas.height || 1}
-                        style={{
-                          position: 'absolute',
-                          inset: 0,
-                          width: '100%',
-                          height: '100%',
-                          objectFit: 'contain',
-                          visibility: painter.ready ? 'visible' : 'hidden',
-                        }}
-                      />
-                    ) : null}
                     <Box
                       as="svg"
                       position="relative"
@@ -570,8 +978,10 @@ export default function AnnotatedImagePreview({
                         width={canvas.width || 1}
                         height={canvas.height || 1}
                         preserveAspectRatio="none"
-                        visibility={painting && painter.ready ? 'hidden' : 'visible'}
                       />
+                      {painting && !showOriginal ? (
+                        <PaintLayers id={paintLayerId} url={url} width={canvas.width || 1} height={canvas.height || 1} layers={painter.layers} />
+                      ) : null}
                       {showShapes || painting ? (
                         <Shapes
                           shapes={shapes}
@@ -596,6 +1006,48 @@ export default function AnnotatedImagePreview({
                         onLoad={(event) => setNatural({ width: event.target.naturalWidth, height: event.target.naturalHeight })}
                       />
                     </Box>
+                    {painting && legendDraft ? (
+                      <LegendPickBanner
+                        picking={picking}
+                        palette={palette}
+                        saved={savedPalette}
+                        onSkip={() => setPicking((queue) => queue.slice(1))}
+                        onDone={() => setPicking([])}
+                        onPreview={setDraftColor}
+                        onUse={(status, hex) => {
+                          setDraftColor(status, hex)
+                          setPicking((queue) => queue.filter((value) => value !== status))
+                        }}
+                        onRepick={(status) => setPicking([status])}
+                        onApply={() => endMatching(true)}
+                        onCancel={() => endMatching(false)}
+                      />
+                    ) : null}
+                    {showOriginal ? (
+                      <Flex
+                        role="status"
+                        position="absolute"
+                        top="10px"
+                        left="10px"
+                        align="center"
+                        gap="6px"
+                        px="10px"
+                        py="5px"
+                        bg={COLORS.surface}
+                        border="1px solid"
+                        borderColor={COLORS.border}
+                        borderRadius="999px"
+                        boxShadow="0 1px 3px rgba(0,0,0,0.08)"
+                        pointerEvents="none"
+                        fontFamily={FONT}
+                        fontSize="12px"
+                        fontWeight="600"
+                        color={COLORS.heading}
+                      >
+                        <Icon as={LuEyeOff} boxSize="13px" />
+                        Original — before coloring
+                      </Flex>
+                    ) : null}
                     <Flex
                       position="absolute"
                       bottom="10px"
@@ -609,12 +1061,13 @@ export default function AnnotatedImagePreview({
                       borderRadius="8px"
                       boxShadow="0 1px 3px rgba(0,0,0,0.08)"
                       onPointerDown={(event) => event.stopPropagation()}
+                      onDoubleClick={(event) => event.stopPropagation()}
                     >
                       <Flex
                         {...zoomControl}
                         aria-label="Zoom out"
                         disabled={view.zoom <= ZOOM_MIN}
-                        onClick={() => zoomAt(view.zoom - ZOOM_STEP)}
+                        onClick={() => zoomAt((current) => current - ZOOM_STEP)}
                       >
                         <Icon as={LuZoomOut} boxSize="16px" />
                       </Flex>
@@ -636,16 +1089,43 @@ export default function AnnotatedImagePreview({
                         {...zoomControl}
                         aria-label="Zoom in"
                         disabled={view.zoom >= ZOOM_MAX}
-                        onClick={() => zoomAt(view.zoom + ZOOM_STEP)}
+                        onClick={() => zoomAt((current) => current + ZOOM_STEP)}
                       >
                         <Icon as={LuZoomIn} boxSize="16px" />
                       </Flex>
                     </Flex>
+                    {/*
+                      * Opened for approval, the untouched map must never pass for
+                      * the preview: it stays covered until the new colors are on.
+                      */}
+                    {startPainting && painting && !painter.ready ? (
+                      <Flex
+                        position="absolute"
+                        inset="0"
+                        direction="column"
+                        align="center"
+                        justify="center"
+                        gap="10px"
+                        px="24px"
+                        bg={COLORS.canvas}
+                        textAlign="center"
+                      >
+                        {painter.error ? (
+                          <Icon as={LuTriangleAlert} boxSize="22px" color="#B91C1C" />
+                        ) : (
+                          <Spinner size="md" color={COLORS.brandGreen} />
+                        )}
+                        <Text fontFamily={FONT} fontSize="13px" color={painter.error ? '#B91C1C' : COLORS.subtle}>
+                          {painter.error || 'Applying the new lot colors to the map…'}
+                        </Text>
+                      </Flex>
+                    ) : null}
                   </Box>
 
                   <Flex mt="10px" gap="8px" align="center" flexWrap="wrap">
                     <Flex
                       {...controlStyle}
+                      display={startPainting ? 'none' : 'flex'}
                       aria-pressed={painting}
                       bg={painting ? COLORS.hoverBg : undefined}
                       onClick={() => {
@@ -657,10 +1137,12 @@ export default function AnnotatedImagePreview({
                       <Icon as={LuPaintbrush} boxSize="14px" />
                       {painting ? 'Stop coloring' : 'Color lots'}
                     </Flex>
-                    <Flex {...controlStyle} onClick={() => setShowShapes((on) => !on)}>
-                      <Icon as={showShapes ? LuEyeOff : LuEye} boxSize="14px" />
-                      {showShapes ? 'Hide annotations' : 'Show annotations'}
-                    </Flex>
+                    {shapes.length ? (
+                      <Flex {...controlStyle} onClick={() => setShowShapes((on) => !on)}>
+                        <Icon as={showShapes ? LuEyeOff : LuEye} boxSize="14px" />
+                        {showShapes ? 'Hide annotations' : 'Show annotations'}
+                      </Flex>
+                    ) : null}
                     {selected !== null ? (
                       <Flex {...controlStyle} onClick={() => setSelected(null)}>
                         Clear selection
@@ -682,7 +1164,13 @@ export default function AnnotatedImagePreview({
                         onClick={() => (fitting ? null : onFitImage(canvas))}
                       >
                         <Icon as={LuWandSparkles} boxSize="14px" />
-                        {fitting ? 'Resizing image…' : `Resize image to ${canvas.width} × ${canvas.height}`}
+                        {fitting
+                          ? frameIssue
+                            ? 'Fitting map…'
+                            : 'Resizing image…'
+                          : frameIssue
+                            ? 'Fit map to its frame'
+                            : `Resize image to ${canvas.width} × ${canvas.height}`}
                       </Flex>
                     ) : null}
                   </Flex>
@@ -695,6 +1183,23 @@ export default function AnnotatedImagePreview({
                     <PaintToolbar
                       brush={brush}
                       onBrush={setBrush}
+                      reserveType={reserveType}
+                      onReserveType={pickReserveType}
+                      palette={palette}
+                      matching={Boolean(legendDraft)}
+                      onMatchLegend={() => {
+                        setPaintMessage('')
+                        setLegendDraft({ ...savedPalette })
+                        setPicking(MAP_LOT_FILL.map(({ value }) => value))
+                      }}
+                      onDefaultPalette={() => {
+                        endMatching(false)
+                        changePalette(DEFAULT_PALETTE)
+                      }}
+                      tolerance={tolerance}
+                      onTolerance={setTolerance}
+                      shapeMode={shapes.length ? shapeMode : null}
+                      onShapeMode={setShapeMode}
                       count={paints.length}
                       ready={painter.ready}
                       loadError={painter.error}
@@ -702,14 +1207,35 @@ export default function AnnotatedImagePreview({
                       saving={saving || Boolean(review?.loading)}
                       controlStyle={controlStyle}
                       onReset={() => updatePaints(() => [])}
+                      showOriginal={showOriginal}
+                      onToggleOriginal={toggleOriginal}
+                      onUndo={undo}
+                      onRedo={redo}
+                      canUndo={canUndo}
+                      canRedo={canRedo}
                       onDownload={saveImage}
                       onSaveUpdate={onSaveUpdate && loadLots ? openReview : null}
+                      onSkipColoring={onSkipColoring}
+                      unlinked={canLink ? clickedPaints.filter((paint) => !paint.lot).length : 0}
+                    />
+                  ) : null}
+                  {painting && linkingPaint ? (
+                    <LotLinkPanel
+                      key={`${linkingPaint.x}-${linkingPaint.y}`}
+                      paint={linkingPaint}
+                      lots={lotOptions}
+                      error={lotsError}
+                      linkedIds={linkedIds}
+                      palette={palette}
+                      onLink={linkLot}
+                      onUnlink={() => linkLot(null)}
+                      onClose={() => setLinking(null)}
                     />
                   ) : null}
                 </Box>
 
                 <Box w={{ base: '100%', lg: '280px' }} flexShrink={0}>
-                  <SizeReport annotated={annotated} natural={natural} fit={fit} matches={matches} reshaped={reshaped} />
+                  <SizeReport annotated={annotated} natural={natural} fit={fit} matches={matches} reshaped={reshaped} frameIssue={frameIssue} />
                   <Text mt="14px" mb="6px" fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
                     Annotations ({shapes.length})
                   </Text>
@@ -740,16 +1266,16 @@ export default function AnnotatedImagePreview({
                         <Text fontFamily={FONT} fontSize="12.5px" color={COLORS.heading} truncate>
                           {shape.label}
                         </Text>
-                        {shapeStatus.has(shape.id) ? (
+                        {shapePaint.has(shape.id) ? (
                           <Flex align="center" gap="4px" ml="auto" flexShrink={0}>
                             <Box
                               boxSize="10px"
                               borderRadius="3px"
-                              bg={FILL_BY_STATUS[shapeStatus.get(shape.id)].color}
+                              bg={palette[shapePaint.get(shape.id).status]}
                               border="1px solid rgba(0,0,0,0.25)"
                             />
                             <Text fontFamily={FONT} fontSize="11px" color={COLORS.subtle}>
-                              {FILL_BY_STATUS[shapeStatus.get(shape.id)].label}
+                              {paintLabel(shapePaint.get(shape.id))}
                             </Text>
                           </Flex>
                         ) : null}
@@ -766,6 +1292,41 @@ export default function AnnotatedImagePreview({
                       </Text>
                     )}
                   </Flex>
+                  {painting && clickedPaints.length ? (
+                    <>
+                      <Text mt="14px" mb="6px" fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
+                        Clicked lots ({clickedPaints.length})
+                      </Text>
+                      <Flex direction="column" gap="4px" maxH="220px" overflowY="auto">
+                        {clickedPaints.map((paint) => (
+                          <Flex
+                            key={`${paint.x}-${paint.y}`}
+                            as="button"
+                            type="button"
+                            align="center"
+                            gap="8px"
+                            px="8px"
+                            py="6px"
+                            borderRadius="8px"
+                            textAlign="left"
+                            bg={linking && linking.x === paint.x && linking.y === paint.y ? COLORS.statusBg : 'transparent'}
+                            cursor={canLink ? 'pointer' : 'default'}
+                            _hover={canLink ? { bg: COLORS.hoverBg } : undefined}
+                            title={canLink ? 'Link this area to a lot in the table' : undefined}
+                            onClick={() => canLink && openLinker(paint)}
+                          >
+                            <Box boxSize="10px" borderRadius="3px" bg={palette[paint.status]} border="1px solid rgba(0,0,0,0.25)" flexShrink={0} />
+                            <Text fontFamily={FONT} fontSize="12.5px" color={COLORS.heading} truncate>
+                              {paint.lot ? paint.lot.lotNo : 'Not linked'}
+                            </Text>
+                            <Text ml="auto" fontFamily={FONT} fontSize="11px" color={paint.lot ? COLORS.subtle : '#B45309'} flexShrink={0}>
+                              {paint.lot ? paintLabel(paint) : 'pick a lot'}
+                            </Text>
+                          </Flex>
+                        ))}
+                      </Flex>
+                    </>
+                  ) : null}
                 </Box>
               </Flex>
             </Dialog.Body>
@@ -775,33 +1336,49 @@ export default function AnnotatedImagePreview({
           </Dialog.Content>
         </Dialog.Positioner>
       </Portal>
-      {review && !review.loading ? (
-        <SaveReviewDialog
-          review={review}
-          saving={saving}
-          error={review.saveError || saveError}
-          controlStyle={controlStyle}
-          onCancel={() => setReview(null)}
-          onConfirm={confirmSave}
-        />
-      ) : null}
+      <SaveReviewDialog
+        palette={palette}
+        open={Boolean(review && !review.loading)}
+        review={review && !review.loading ? review : null}
+        saving={saving}
+        error={review?.saveError || saveError}
+        controlStyle={controlStyle}
+        onCancel={() => setReview(null)}
+        onConfirm={() => confirmSave(true)}
+        onSaveMapOnly={allowMapOnlySave && review?.plan?.changes.length ? () => confirmSave(false) : null}
+      />
     </Dialog.Root>
   )
 }
 
-const statusLabel = (value) =>
-  LOT_STATUS_OPTIONS.find((option) => option.value === String(value).toLowerCase())?.label ?? (value || 'No status')
+function statusLabel(value, reserveType) {
+  const label = LOT_STATUS_OPTIONS.find((option) => option.value === String(value).toLowerCase())?.label ?? (value || 'No status')
+  // Only a reserved lot has a reserve type worth naming.
+  return reserveType !== undefined && /^(reserved|rsv-p)$/i.test(String(value))
+    ? `${label} · ${reserveTypeLabel(reserveType) || 'Default'}`
+    : label
+}
 
 /**
  * The last look before saving: every lot whose status the table will get, and
  * every coloured lot that will not change (with why). Nothing is written until
  * Save update is pressed here.
  */
-function SaveReviewDialog({ review, saving, error, controlStyle, onCancel, onConfirm }) {
-  const { plan } = review
+function SaveReviewDialog({ open, review: current, palette, saving, error, controlStyle, onCancel, onConfirm, onSaveMapOnly }) {
+  /*
+   * This dialog stays mounted and is opened through `open`. Mounting it already
+   * open, inside the open map dialog, let StrictMode's mount–unmount–mount read
+   * as a dismissal, and the review closed the moment it appeared. The last
+   * review is kept so the content does not empty while the dialog animates shut.
+   */
+  const [last, setLast] = useState(current)
+  if (current && current !== last) setLast(current)
+  const review = current ?? last
+  const plan = review?.plan
   const text = { fontFamily: FONT, fontSize: '12.5px', color: COLORS.heading }
   return (
-    <Dialog.Root open onOpenChange={({ open: next }) => (next || saving ? null : onCancel())} placement="center" size="md">
+    <Dialog.Root open={open} onOpenChange={({ open: next }) => (next || saving ? null : onCancel())} placement="center" size="md">
+      {review ? (
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
@@ -819,9 +1396,25 @@ function SaveReviewDialog({ review, saving, error, controlStyle, onCancel, onCon
               ) : (
                 <>
                   <Text {...text} fontWeight="600" mb="6px">
+                    New map colors ({review.painted.length + plan.mapOnly})
+                  </Text>
+                  <Flex direction="column" gap="4px" mb="14px">
+                    {review.painted.map((entry) => (
+                      <Flex key={entry.label} gap="8px" align="center" px="8px" py="5px" borderRadius="8px" bg={COLORS.canvas}>
+                        <Text {...text} fontWeight="600" flex="1" truncate>
+                          {entry.label}
+                        </Text>
+                        <Box boxSize="12px" borderRadius="3px" bg={palette[entry.fill]} border="1px solid rgba(0,0,0,0.25)" />
+                        <Text {...text} fontWeight="700">
+                          {paintLabel(entry.paint)}
+                        </Text>
+                      </Flex>
+                    ))}
+                  </Flex>
+                  <Text {...text} fontWeight="600" mb="6px">
                     {plan.changes.length
-                      ? `${plan.changes.length} lot status${plan.changes.length === 1 ? '' : 'es'} will change in the table`
-                      : 'No lot status will change — only the map is saved.'}
+                      ? `${plan.changes.length} lot status${plan.changes.length === 1 ? '' : 'es'} will also change in the table`
+                      : 'The lot table already matches these colors — only the map image is saved.'}
                   </Text>
                   <Flex direction="column" gap="4px">
                     {plan.changes.map((change) => (
@@ -830,15 +1423,27 @@ function SaveReviewDialog({ review, saving, error, controlStyle, onCancel, onCon
                           {change.lotNo}
                         </Text>
                         <Text {...text} color={COLORS.subtle}>
-                          {statusLabel(change.from)}
+                          {statusLabel(change.from, change.fromReserveType)}
                         </Text>
                         <Text {...text}>→</Text>
                         <Text {...text} fontWeight="700">
-                          {statusLabel(change.status)}
+                          {statusLabel(change.status, change.reserveType)}
                         </Text>
                       </Flex>
                     ))}
                   </Flex>
+                  {plan.upToDate.length ? (
+                    <Flex direction="column" gap="2px" mt="6px">
+                      {plan.upToDate.map((entry) => (
+                        <Text key={entry.label} {...text} color={COLORS.subtle}>
+                          <Box as="span" fontWeight="600" color={COLORS.heading}>
+                            {entry.label}
+                          </Box>{' '}
+                          — already {statusLabel(entry.status, entry.reserveType)} in the table.
+                        </Text>
+                      ))}
+                    </Flex>
+                  ) : null}
                   {plan.skipped.length ? (
                     <>
                       <Text {...text} fontWeight="600" mt="14px" mb="6px">
@@ -875,24 +1480,534 @@ function SaveReviewDialog({ review, saving, error, controlStyle, onCancel, onCon
                 Keep editing
               </Flex>
               {review.error ? null : (
-                <Flex
-                  {...controlStyle}
-                  bg={COLORS.brandGreen}
-                  borderColor={COLORS.brandGreen}
-                  color="#FFFFFF"
-                  _hover={{ bg: '#00541F' }}
-                  cursor={saving ? 'progress' : 'pointer'}
-                  onClick={saving ? undefined : onConfirm}
-                >
-                  {saving ? <Spinner size="xs" /> : <Icon as={LuSave} boxSize="14px" />}
-                  {saving ? 'Saving…' : 'Save update'}
-                </Flex>
+                <>
+                  {onSaveMapOnly ? (
+                    <Flex
+                      {...controlStyle}
+                      opacity={saving ? 0.55 : 1}
+                      title="Save the new colors without changing lot statuses in the table"
+                      onClick={saving ? undefined : onSaveMapOnly}
+                    >
+                      Save map only (skip table)
+                    </Flex>
+                  ) : null}
+                  <Flex
+                    {...controlStyle}
+                    bg={COLORS.brandGreen}
+                    borderColor={COLORS.brandGreen}
+                    color="#FFFFFF"
+                    _hover={{ bg: '#00541F' }}
+                    cursor={saving ? 'progress' : 'pointer'}
+                    onClick={saving ? undefined : onConfirm}
+                  >
+                    {saving ? <Spinner size="xs" /> : <Icon as={LuSave} boxSize="14px" />}
+                    {saving ? 'Saving…' : 'Save update'}
+                  </Flex>
+                </>
               )}
             </Dialog.Footer>
           </Dialog.Content>
         </Dialog.Positioner>
       </Portal>
+      ) : null}
     </Dialog.Root>
+  )
+}
+
+/** A colour chip: a small square of `color`, outlined so pale ones still show. */
+function Swatch({ color, size = '12px' }) {
+  return <Box boxSize={size} borderRadius="3px" bg={color} border="1px solid rgba(0,0,0,0.3)" flexShrink={0} />
+}
+
+/**
+ * A colour wheel: hue around the rim, saturation from the centre out, and a
+ * brightness slider under it. Dragging on the wheel or the slider reports the
+ * colour as '#RRGGBB' through `onChange` at every move.
+ */
+function ColorWheel({ value, onChange, size = 150 }) {
+  const [hsv, setHsv] = useState(() => hexToHsv(value) ?? { h: 0, s: 0, v: 1 })
+  // A colour typed elsewhere (the hex field) moves the marker too.
+  const [lastValue, setLastValue] = useState(value)
+  if (value !== lastValue) {
+    setLastValue(value)
+    const next = hexToHsv(value)
+    if (next && hsvToHex(hsv.h, hsv.s, hsv.v) !== value) setHsv(next)
+  }
+  const wheelRef = useRef(null)
+  const update = (next) => {
+    setHsv(next)
+    onChange(hsvToHex(next.h, next.s, next.v))
+  }
+  function pickAt(event) {
+    const rect = wheelRef.current.getBoundingClientRect()
+    const dx = event.clientX - rect.left - rect.width / 2
+    const dy = event.clientY - rect.top - rect.height / 2
+    // Hue runs clockwise from red at the top, as the conic gradient draws it.
+    const h = ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360
+    update({ ...hsv, h, s: Math.min(1, Math.hypot(dx, dy) / (rect.width / 2)) })
+  }
+  const rad = (hsv.h * Math.PI) / 180
+  return (
+    <Flex direction="column" align="center" gap="8px" flexShrink={0}>
+      <Box
+        ref={wheelRef}
+        position="relative"
+        boxSize={`${size}px`}
+        borderRadius="50%"
+        cursor="crosshair"
+        touchAction="none"
+        role="slider"
+        aria-label="Hue and saturation"
+        aria-valuetext={hsvToHex(hsv.h, hsv.s, hsv.v)}
+        style={{ background: 'conic-gradient(red, yellow, lime, aqua, blue, magenta, red)' }}
+        onPointerDown={(event) => {
+          event.stopPropagation()
+          event.currentTarget.setPointerCapture(event.pointerId)
+          pickAt(event)
+        }}
+        onPointerMove={(event) => {
+          if (event.buttons & 1) pickAt(event)
+        }}
+      >
+        <Box position="absolute" inset="0" borderRadius="50%" style={{ background: 'radial-gradient(circle closest-side, #fff, rgba(255,255,255,0))' }} />
+        <Box position="absolute" inset="0" borderRadius="50%" bg="#000" opacity={1 - hsv.v} />
+        <Box
+          position="absolute"
+          left={`${50 + 50 * hsv.s * Math.sin(rad)}%`}
+          top={`${50 - 50 * hsv.s * Math.cos(rad)}%`}
+          boxSize="16px"
+          borderRadius="50%"
+          border="2px solid #FFFFFF"
+          boxShadow="0 0 0 1px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4)"
+          transform="translate(-50%, -50%)"
+          pointerEvents="none"
+          bg={hsvToHex(hsv.h, hsv.s, hsv.v)}
+        />
+      </Box>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={Math.round(hsv.v * 100)}
+        aria-label="Brightness"
+        onPointerDown={(event) => event.stopPropagation()}
+        onChange={(event) => update({ ...hsv, v: Number(event.target.value) / 100 })}
+        style={{
+          width: `${size}px`,
+          height: '10px',
+          borderRadius: '999px',
+          appearance: 'none',
+          cursor: 'pointer',
+          background: `linear-gradient(to right, #000, ${hsvToHex(hsv.h, hsv.s, 1)})`,
+        }}
+      />
+    </Flex>
+  )
+}
+
+/**
+ * Choosing one status's colour by hand: the wheel, the colour before and the
+ * one chosen side by side, and its hex code to read or type. Lots already
+ * painted with this status show the new colour on the map as it moves.
+ */
+function ManualColorPanel({ label, value, original, onChange, onUse, onCancel, button }) {
+  const [text, setText] = useState(value)
+  const [lastValue, setLastValue] = useState(value)
+  if (value !== lastValue) {
+    setLastValue(value)
+    setText(value)
+  }
+  return (
+    <Flex gap="16px" align="center" flexWrap="wrap" p="12px" borderRadius="10px" bg={COLORS.canvas} border="1px solid" borderColor={COLORS.border}>
+      <ColorWheel value={value} onChange={onChange} />
+      <Flex direction="column" gap="10px" flex="1" minW="190px">
+        <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle}>
+          Preview · {label}
+        </Text>
+        <Flex align="center" gap="10px">
+          <Flex direction="column" align="center" gap="4px">
+            <Swatch color={original} size="40px" />
+            <Text fontFamily={FONT} fontSize="11px" color={COLORS.subtle}>
+              Before
+            </Text>
+          </Flex>
+          <Text fontFamily={FONT} fontSize="16px" color={COLORS.subtle} pb="18px">
+            {'\u2192'}
+          </Text>
+          <Flex direction="column" align="center" gap="4px">
+            <Swatch color={value} size="40px" />
+            <Text fontFamily={FONT} fontSize="11px" fontWeight="600" color={COLORS.heading}>
+              New
+            </Text>
+          </Flex>
+          <Box
+            as="input"
+            value={text}
+            aria-label={`${label} color code`}
+            maxLength={7}
+            onPointerDown={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              const next = event.target.value.toUpperCase()
+              setText(next)
+              if (/^#[0-9A-F]{6}$/.test(next)) onChange(next)
+            }}
+            ml="auto"
+            w="92px"
+            h="32px"
+            px="8px"
+            borderRadius="8px"
+            border="1px solid"
+            borderColor={COLORS.border}
+            bg={COLORS.surface}
+            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+            fontSize="13px"
+            color={COLORS.heading}
+          />
+        </Flex>
+        <Text fontFamily={FONT} fontSize="11.5px" color={COLORS.subtle}>
+          Lots already colored {label} show the new color on the map as you pick.
+        </Text>
+        <Flex gap="6px">
+          <Box {...button.primary} onClick={onUse}>
+            Use this color
+          </Box>
+          <Box {...button.secondary} onClick={onCancel}>
+            Cancel
+          </Box>
+        </Flex>
+      </Flex>
+    </Flex>
+  )
+}
+
+/**
+ * The legend-matching prompt, over the map where the click has to land. While
+ * picking: which swatch to click now, big enough to notice, a strip of every
+ * status (done ones ticked with their new colour), and a colour wheel for
+ * choosing the current one by hand. Once every status is done: a confirmation
+ * listing each colour before and after \u2014 nothing is saved until it is accepted,
+ * and a status can be picked again from it.
+ */
+function LegendPickBanner({ picking, palette, saved, onSkip, onDone, onPreview, onUse, onRepick, onApply, onCancel }) {
+  const confirming = picking.length === 0
+  const current = MAP_LOT_FILL.find((option) => option.value === picking[0])
+  // The status open on the colour wheel, with its colour from before the wheel moved it.
+  const [manual, setManual] = useState(null) // null | { status, original }
+  const manualOpen = Boolean(current && manual?.status === current.value)
+  const base = {
+    as: 'button',
+    type: 'button',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '6px',
+    h: '32px',
+    px: '14px',
+    borderRadius: '8px',
+    fontFamily: FONT,
+    fontSize: '13px',
+    fontWeight: '700',
+    cursor: 'pointer',
+  }
+  const button = {
+    primary: { ...base, bg: COLORS.brandGreen, color: '#FFFFFF', _hover: { bg: '#00541F' } },
+    secondary: { ...base, bg: COLORS.surface, color: COLORS.heading, border: '1px solid', borderColor: COLORS.border, _hover: { bg: COLORS.hoverBg } },
+  }
+  const changed = MAP_LOT_FILL.filter(({ value }) => palette[value] !== saved[value]).length
+  function closeManual(restore) {
+    if (restore && manual) onPreview(manual.status, manual.original)
+    setManual(null)
+  }
+
+  return (
+    <Flex
+      role="status"
+      aria-live="polite"
+      position="absolute"
+      top="12px"
+      left="50%"
+      transform="translateX(-50%)"
+      zIndex={2}
+      direction="column"
+      gap="10px"
+      w="min(600px, calc(100% - 24px))"
+      maxH="calc(100% - 24px)"
+      overflowY="auto"
+      p="14px 16px"
+      bg={COLORS.surface}
+      color={COLORS.heading}
+      border="1px solid"
+      borderColor={COLORS.border}
+      borderRadius="12px"
+      boxShadow="0 8px 24px rgba(0, 0, 0, 0.16)"
+      // The banner's own clicks are not pans of the map underneath.
+      onPointerDown={(event) => event.stopPropagation()}
+      css={
+        confirming || manualOpen
+          ? undefined
+          : { animation: 'legendPulse 1.6s ease-in-out infinite', '@keyframes legendPulse': { '0%, 100%': { boxShadow: '0 8px 24px rgba(0,0,0,0.16)' }, '50%': { boxShadow: '0 8px 32px rgba(0,0,0,0.3)' } } }
+      }
+    >
+      <Flex align="center" gap="10px">
+        <Flex align="center" justify="center" boxSize="34px" borderRadius="999px" bg={COLORS.hoverBg} color={COLORS.brandGreen} flexShrink={0}>
+          <Icon as={confirming ? LuCheck : LuPipette} boxSize="18px" />
+        </Flex>
+        <Box flex="1" minW={0}>
+          <Text fontFamily={FONT} fontSize="11px" fontWeight="600" letterSpacing="0.06em" textTransform="uppercase" color={COLORS.subtle}>
+            {confirming ? 'Custom \u00b7 review' : `Custom`}
+          </Text>
+          <Text fontFamily={FONT} fontSize="17px" fontWeight="700" lineHeight="1.3">
+            {confirming ? (
+              'Use these legend colors?'
+            ) : (
+              <>
+                {manualOpen ? 'Choose the ' : 'Click the '}
+                <Box as="span" px="6px" borderRadius="4px" bg="#1D4ED8" color="#FFFFFF">
+                  {current?.label.toUpperCase()}
+                </Box>
+                {manualOpen ? ' color on the wheel' : ' swatch in the map\u2019s legend'}
+              </>
+            )}
+          </Text>
+        </Box>
+      </Flex>
+
+      {confirming ? (
+        <>
+          <Flex direction="column" gap="4px">
+            {MAP_LOT_FILL.map(({ value, label }) => {
+              const differs = palette[value] !== saved[value]
+              return (
+                <Flex
+                  key={value}
+                  as="button"
+                  type="button"
+                  align="center"
+                  gap="10px"
+                  px="10px"
+                  py="6px"
+                  borderRadius="8px"
+                  textAlign="left"
+                  bg={differs ? COLORS.hoverBg : 'transparent'}
+                  cursor="pointer"
+                  _hover={{ bg: COLORS.statusBg }}
+                  title={`Pick ${label} again`}
+                  onClick={() => onRepick(value)}
+                >
+                  <Text fontFamily={FONT} fontSize="13px" fontWeight="600" w="72px">
+                    {label}
+                  </Text>
+                  <Swatch color={saved[value]} size="18px" />
+                  <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
+                    {'\u2192'}
+                  </Text>
+                  <Swatch color={palette[value]} size="18px" />
+                  <Text fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" fontSize="12px" color={COLORS.subtle}>
+                    {palette[value]}
+                  </Text>
+                  <Text ml="auto" fontFamily={FONT} fontSize="11px" color={differs ? COLORS.brandGreen : COLORS.subtle} fontWeight="600">
+                    {differs ? 'changed' : 'unchanged'}
+                  </Text>
+                </Flex>
+              )
+            })}
+          </Flex>
+          <Flex gap="6px" justify="flex-end" flexWrap="wrap">
+            <Box {...button.secondary} onClick={onCancel}>
+              Cancel
+            </Box>
+            <Box {...button.primary} onClick={onApply}>
+              <Icon as={LuCheck} boxSize="14px" />
+              {changed ? `Use these colors (${changed} changed)` : 'Use these colors'}
+            </Box>
+          </Flex>
+        </>
+      ) : (
+        <>
+          <Flex align="center" gap="6px" flexWrap="wrap">
+            {MAP_LOT_FILL.map(({ value, label }) => {
+              const done = !picking.includes(value)
+              const now = value === picking[0]
+              return (
+                <Flex
+                  key={value}
+                  align="center"
+                  gap="5px"
+                  h="26px"
+                  px="8px"
+                  borderRadius="999px"
+                  bg={now ? '#1D4ED8' : COLORS.hoverBg}
+                  color={now ? '#FFFFFF' : COLORS.heading}
+                  opacity={done || now ? 1 : 0.7}
+                  fontFamily={FONT}
+                  fontSize="12px"
+                  fontWeight={now ? '700' : '600'}
+                >
+                  <Swatch color={palette[value]} />
+                  {label}
+                  {done ? <Icon as={LuCheck} boxSize="12px" /> : null}
+                </Flex>
+              )
+            })}
+          </Flex>
+          {manualOpen ? (
+            <ManualColorPanel
+              key={current.value}
+              label={current.label}
+              value={palette[current.value]}
+              original={manual.original}
+              button={button}
+              onChange={(hex) => onPreview(current.value, hex)}
+              onUse={() => {
+                const status = current.value
+                setManual(null)
+                onUse(status, palette[status])
+              }}
+              onCancel={() => closeManual(true)}
+            />
+          ) : null}
+          <Flex gap="6px" justify="flex-end" flexWrap="wrap">
+            {manualOpen ? null : (
+              <Box {...button.secondary} mr="auto" onClick={() => setManual({ status: current.value, original: palette[current.value] })}>
+                <Icon as={LuPalette} boxSize="14px" />
+                Pick manually
+              </Box>
+            )}
+            <Box
+              {...button.secondary}
+              onClick={() => {
+                closeManual(true)
+                onSkip()
+              }}
+            >
+              Skip
+            </Box>
+            <Box
+              {...button.primary}
+              onClick={() => {
+                closeManual(true)
+                onDone()
+              }}
+            >
+              Done
+            </Box>
+          </Flex>
+        </>
+      )}
+    </Flex>
+  )
+}
+
+/**
+ * "Which lot is this?" — shown after an area is colored by clicking, where there
+ * is no annotation to name it. Linking it to a row of the lot table is what lets
+ * Save Update change that lot's status; skipping leaves it a map-only color.
+ */
+function LotLinkPanel({ paint, lots, error, linkedIds, palette, onLink, onUnlink, onClose }) {
+  const [filter, setFilter] = useState('')
+  const inputRef = useRef(null)
+  useEffect(() => inputRef.current?.focus(), [])
+  const key = filter.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const shown = (lots ?? []).filter((lot) => !key || lot.key.includes(key)).slice(0, 60)
+  const status = FILL_BY_STATUS[paint.status]?.label ?? paint.status
+  return (
+    <Box mt="10px" p="10px" border="1px solid" borderColor={COLORS.activeBg} borderRadius="10px" bg={COLORS.surface}>
+      <Flex align="center" gap="8px" flexWrap="wrap" mb="8px">
+        <Box boxSize="12px" borderRadius="3px" bg={palette[paint.status]} border="1px solid rgba(0,0,0,0.25)" />
+        <Text fontFamily={FONT} fontSize="13px" fontWeight="600" color={COLORS.heading}>
+          {paint.lot ? `Colored ${status} · linked to ${paint.lot.lotNo}` : `Colored ${status} — which lot is this?`}
+        </Text>
+        <Flex ml="auto" gap="6px">
+          {/* Every clicked lot has to be linked before saving, so there is no skipping — only closing once linked. */}
+          {paint.lot ? (
+            <>
+              <Box as="button" type="button" fontFamily={FONT} fontSize="12px" color={COLORS.subtle} cursor="pointer" _hover={{ textDecoration: 'underline' }} onClick={onUnlink}>
+                Unlink
+              </Box>
+              <Box as="button" type="button" fontFamily={FONT} fontSize="12px" color={COLORS.subtle} cursor="pointer" _hover={{ textDecoration: 'underline' }} onClick={onClose}>
+                Close
+              </Box>
+            </>
+          ) : null}
+        </Flex>
+      </Flex>
+      {error ? (
+        <Text role="alert" fontFamily={FONT} fontSize="12px" color="#B91C1C">
+          The lots could not be loaded: {error}
+        </Text>
+      ) : !lots ? (
+        <Flex align="center" gap="8px">
+          <Spinner size="xs" />
+          <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+            Loading lots…
+          </Text>
+        </Flex>
+      ) : (
+        <>
+          <Box
+            as="input"
+            ref={inputRef}
+            type="search"
+            value={filter}
+            placeholder="Type the lot number, e.g. C L6 or B2 L14"
+            aria-label="Find the lot"
+            onChange={(event) => setFilter(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && shown.length === 1) onLink(shown[0])
+              if (event.key === 'Escape' && paint.lot) onClose()
+            }}
+            w="100%"
+            h="32px"
+            px="10px"
+            mb="6px"
+            borderRadius="8px"
+            border="1px solid"
+            borderColor={COLORS.border}
+            fontFamily={FONT}
+            fontSize="13px"
+          />
+          <Flex direction="column" gap="2px" maxH="168px" overflowY="auto">
+            {shown.map((lot) => {
+              const chosen = paint.lot?.id === lot.id
+              const taken = !chosen && linkedIds.has(lot.id)
+              return (
+                <Flex
+                  key={lot.id}
+                  as="button"
+                  type="button"
+                  align="center"
+                  gap="8px"
+                  px="8px"
+                  py="5px"
+                  borderRadius="6px"
+                  textAlign="left"
+                  bg={chosen ? COLORS.statusBg : 'transparent'}
+                  cursor="pointer"
+                  _hover={{ bg: COLORS.hoverBg }}
+                  onClick={() => onLink(lot)}
+                >
+                  <Text fontFamily={FONT} fontSize="12.5px" fontWeight="600" color={COLORS.heading}>
+                    {lot.lotNo}
+                  </Text>
+                  <Text fontFamily={FONT} fontSize="11.5px" color={COLORS.subtle} truncate>
+                    {[lot.phase !== null && lot.phase !== '' ? `Phase ${lot.phase}` : '', lot.category, lot.status].filter(Boolean).join(' · ')}
+                  </Text>
+                  {taken ? (
+                    <Text ml="auto" fontFamily={FONT} fontSize="11px" color="#B45309" flexShrink={0}>
+                      already linked
+                    </Text>
+                  ) : null}
+                </Flex>
+              )
+            })}
+            {shown.length ? null : (
+              <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+                No lot matches “{filter}”.
+              </Text>
+            )}
+          </Flex>
+        </>
+      )}
+    </Box>
   )
 }
 
@@ -900,9 +2015,41 @@ function SaveReviewDialog({ review, saving, error, controlStyle, onCancel, onCon
  * The colouring controls: which status a click paints, and what to do with the
  * result — download it, or review and save it as the slot's map and the lots' statuses.
  */
-function PaintToolbar({ brush, onBrush, count, ready, loadError, message, saving, controlStyle, onReset, onDownload, onSaveUpdate }) {
-  const chip = (value, label, swatch) => {
-    const chosen = brush === value
+function PaintToolbar({
+  brush,
+  onBrush,
+  reserveType,
+  onReserveType,
+  palette,
+  // Matching the map legend is under way (the banner on the map leads it).
+  matching,
+  onMatchLegend,
+  onDefaultPalette,
+  tolerance,
+  onTolerance,
+  // 'polygon' | 'lines' for a map with annotations; null hides the choice.
+  shapeMode,
+  onShapeMode,
+  count,
+  ready,
+  loadError,
+  message,
+  saving,
+  controlStyle,
+  onReset,
+  showOriginal,
+  onToggleOriginal,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
+  onDownload,
+  onSaveUpdate,
+  onSkipColoring,
+  // Clicked lots not yet linked to a lot in the table; Save Update waits for them.
+  unlinked = 0,
+}) {
+  const chip = (value, label, swatch, chosen = brush === value, onPick = onBrush) => {
     return (
       <Flex
         key={value}
@@ -922,7 +2069,7 @@ function PaintToolbar({ brush, onBrush, count, ready, loadError, message, saving
         color={COLORS.heading}
         cursor="pointer"
         aria-pressed={chosen}
-        onClick={() => onBrush(value)}
+        onClick={() => onPick(value)}
         _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
       >
         {swatch}
@@ -930,6 +2077,12 @@ function PaintToolbar({ brush, onBrush, count, ready, loadError, message, saving
       </Flex>
     )
   }
+  const baseId = useId().replace(/[^a-zA-Z0-9]/g, '')
+  const toleranceId = `${baseId}-tolerance`
+  const moreId = `${baseId}-more`
+  const [moreOpen, setMoreOpen] = useState(false)
+  // Settings behind More options that are off their default.
+  const changedCount = tolerance !== TOLERANCE_DEFAULT ? 1 : 0
   const busy = !ready || saving
   const action = (props) => ({
     ...controlStyle,
@@ -940,39 +2093,179 @@ function PaintToolbar({ brush, onBrush, count, ready, loadError, message, saving
     onClick: busy || count === 0 ? undefined : props.onClick,
   })
 
-  const hint = loadError
-    ? loadError
-    : !ready
-      ? 'Preparing the map for coloring…'
-      : `Pick a status, then click a lot on the map or in the list. Only its fill changes — the text, lines, and trees stay as they are. Original puts a lot back. ${count} lot${count === 1 ? '' : 's'} colored — nothing is stored until you press Save update and confirm.`
-
   return (
     <Box mt="10px" p="10px" border="1px solid" borderColor={COLORS.border} borderRadius="10px" bg={COLORS.canvas}>
       <Flex align="center" gap="6px" flexWrap="wrap">
         <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
           Color as
         </Text>
-        {MAP_LOT_FILL.map(({ value, label, color }) =>
-          chip(value, label, <Box boxSize="12px" borderRadius="3px" bg={color} border="1px solid rgba(0,0,0,0.25)" />),
+        {MAP_LOT_FILL.map(({ value, label }) =>
+          chip(value, label, <Box boxSize="12px" borderRadius="3px" bg={palette[value]} border="1px solid rgba(0,0,0,0.25)" />),
         )}
         {chip(ORIGINAL, 'Original', <Icon as={LuEraser} boxSize="13px" />)}
       </Flex>
+      {/*
+        * Which colours the statuses paint: the default legend, or the colours of
+        * the legend printed on this map, read by clicking each of its swatches.
+        */}
+      <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Legend colors">
+        <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+          Legend colors
+        </Text>
+        {chip('palette-default', 'Default', null, !matching && isDefaultPalette(palette), onDefaultPalette)}
+        {chip(
+          'palette-legend',
+          'Custom',
+          <Icon as={LuPipette} boxSize="13px" />,
+          matching || !isDefaultPalette(palette),
+          onMatchLegend,
+        )}
+      </Flex>
+      {brush === 'reserved' ? (
+        <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Reserved for">
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            Reserved for
+          </Text>
+          {RESERVE_TYPES.map(({ value, label }) =>
+            chip(value, value ? `${label} Reserved` : label, null, reserveType === value, onReserveType),
+          )}
+        </Flex>
+      ) : null}
+      {/*
+        * The finer settings — annotated-lot shapes and tolerance — sit behind
+        * More options so the everyday controls stay short. The toggle says when
+        * one of them is off its default, so a hidden change is not forgotten.
+        */}
+      <Flex mt="8px" align="center" gap="6px" flexWrap="wrap">
+        <Flex
+          as="button"
+          type="button"
+          align="center"
+          gap="6px"
+          h="30px"
+          px="10px"
+          borderRadius="999px"
+          border="1px solid"
+          borderColor={moreOpen ? COLORS.heading : COLORS.border}
+          bg={moreOpen ? COLORS.hoverBg : COLORS.surface}
+          fontFamily={FONT}
+          fontSize="12px"
+          fontWeight="600"
+          color={COLORS.heading}
+          cursor="pointer"
+          aria-expanded={moreOpen}
+          aria-controls={moreId}
+          onClick={() => setMoreOpen((open) => !open)}
+          _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+        >
+          <Icon as={LuSlidersHorizontal} boxSize="13px" />
+          More options
+          {changedCount && !moreOpen ? (
+            <Text as="span" fontWeight="500" color={COLORS.subtle}>
+              · {changedCount} changed
+            </Text>
+          ) : null}
+          <Icon as={LuChevronDown} boxSize="13px" transform={moreOpen ? 'rotate(180deg)' : undefined} transition="transform 120ms ease" />
+        </Flex>
+      </Flex>
+      <Box id={moreId} hidden={!moreOpen} mt="8px" pl="10px" borderLeft="2px solid" borderColor={COLORS.border}>
+      {shapeMode ? (
+        <Flex align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Annotated lots">
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            Annotated lots (optional)
+          </Text>
+          {chip('polygon', 'Follow polygon', <Icon as={LuShapes} boxSize="13px" />, shapeMode === 'polygon', onShapeMode)}
+          {chip('lines', 'Follow lot lines', null, shapeMode === 'lines', onShapeMode)}
+        </Flex>
+      ) : null}
+      {/*
+        * How far a lot's colour reaches. Default is what colouring has always
+        * used; tighter keeps to colours very close to the fill, looser takes in
+        * faded or unevenly printed fills. Painted lots follow it at once.
+        */}
+      <Flex mt={shapeMode ? '8px' : 0} align="center" gap="8px" flexWrap="wrap">
+        <Text as="label" htmlFor={toleranceId} fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+          Tolerance
+        </Text>
+        <input
+          id={toleranceId}
+          type="range"
+          min={Math.round(TOLERANCE_MIN * 100)}
+          max={Math.round(TOLERANCE_MAX * 100)}
+          step={10}
+          value={Math.round(tolerance * 100)}
+          aria-valuetext={`${Math.round(tolerance * 100)}%${tolerance === TOLERANCE_DEFAULT ? ', default' : ''}`}
+          onChange={(event) => onTolerance(Number(event.target.value) / 100)}
+          style={{ width: '180px', accentColor: COLORS.brandGreen, cursor: 'pointer' }}
+        />
+        <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.heading} minW="92px">
+          {Math.round(tolerance * 100)}%{tolerance === TOLERANCE_DEFAULT ? ' · Default' : ''}
+        </Text>
+        {tolerance !== TOLERANCE_DEFAULT ? chip('tolerance-default', 'Use default', null, false, () => onTolerance(TOLERANCE_DEFAULT)) : null}
+      </Flex>
+      </Box>
       <Flex mt="10px" gap="8px" flexWrap="wrap" align="center">
+        {/* Undo and redo only need a step to go to — they work with no lot coloured too. */}
+        {[
+          { label: 'Undo', icon: LuUndo2, onClick: onUndo, enabled: canUndo, keys: 'Ctrl+Z' },
+          { label: 'Redo', icon: LuRedo2, onClick: onRedo, enabled: canRedo, keys: 'Ctrl+Y' },
+        ].map(({ label, icon, onClick, enabled, keys }) => {
+          const off = !ready || saving || !enabled
+          return (
+            <Flex
+              key={label}
+              {...controlStyle}
+              opacity={off ? 0.55 : 1}
+              cursor={off ? 'not-allowed' : 'pointer'}
+              aria-disabled={off}
+              title={`${label} (${keys})`}
+              onClick={off ? undefined : onClick}
+            >
+              <Icon as={icon} boxSize="14px" />
+              {label}
+            </Flex>
+          )
+        })}
+        {/* Compare with the map before any colouring; press again for the colours. */}
+        <Flex
+          {...action({ onClick: onToggleOriginal })}
+          aria-pressed={showOriginal}
+          title={showOriginal ? 'Show the new colors again' : 'Show the map as it was, before coloring'}
+          bg={showOriginal ? COLORS.hoverBg : controlStyle.bg}
+          borderColor={showOriginal ? COLORS.heading : controlStyle.borderColor}
+        >
+          <Icon as={showOriginal ? LuEye : LuEyeOff} boxSize="14px" />
+          {showOriginal ? 'Show colors' : 'Show original'}
+        </Flex>
         <Flex {...action({ onClick: onReset })}>Reset colors</Flex>
         <Flex {...action({ onClick: onDownload })}>
           <Icon as={LuDownload} boxSize="14px" />
           Download image
         </Flex>
+        {onSkipColoring ? (
+          <Flex
+            {...controlStyle}
+            opacity={saving ? 0.55 : 1}
+            cursor={saving ? 'not-allowed' : 'pointer'}
+            aria-disabled={saving}
+            onClick={saving ? undefined : onSkipColoring}
+          >
+            Skip map coloring
+          </Flex>
+        ) : null}
         {onSaveUpdate ? (
           <Flex
             {...action({ onClick: onSaveUpdate })}
+            {...(unlinked
+              ? { opacity: 0.55, cursor: 'not-allowed', 'aria-disabled': true, onClick: undefined, title: 'Pick a lot for every clicked area first' }
+              : {})}
             bg={COLORS.brandGreen}
             borderColor={COLORS.brandGreen}
             color="#FFFFFF"
             _hover={{ bg: '#00541F' }}
           >
             {saving ? <Spinner size="xs" /> : <Icon as={LuSave} boxSize="14px" />}
-            {saving ? 'Checking…' : 'Save update…'}
+            {saving ? 'Checking…' : 'Save Update'}
           </Flex>
         ) : null}
       </Flex>
@@ -983,14 +2276,14 @@ function PaintToolbar({ brush, onBrush, count, ready, loadError, message, saving
         color={message || loadError ? '#B91C1C' : COLORS.subtle}
         role={message || loadError ? 'alert' : undefined}
       >
-        {message || hint}
+        {message}
       </Text>
     </Box>
   )
 }
 
 /** The two sizes side by side, and what was done about a mismatch. */
-function SizeReport({ annotated, natural, fit, matches, reshaped }) {
+function SizeReport({ annotated, natural, fit, matches, reshaped, frameIssue }) {
   const row = (icon, label, value) => (
     <Flex align="center" gap="8px" py="3px">
       <Icon as={icon} boxSize="14px" color={COLORS.subtle} />
@@ -1008,7 +2301,17 @@ function SizeReport({ annotated, natural, fit, matches, reshaped }) {
     <Box p="10px" borderRadius="10px" border="1px solid" borderColor={COLORS.border}>
       {row(LuImage, 'Image', size(natural))}
       {row(LuShapes, 'COCO', annotated.width ? size(annotated) : 'not stated')}
-      {matches ? (
+      {frameIssue ? (
+        <Flex mt="6px" gap="6px" align="flex-start">
+          <Icon as={LuTriangleAlert} boxSize="14px" color="#B45309" mt="2px" flexShrink={0} />
+          <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+            The sizes match, but the picture inside this SVG is drawn at {frameIssue.picture.width} ×{' '}
+            {frameIssue.picture.height} — short of its {frameIssue.frame.width} × {frameIssue.frame.height} frame, a
+            rounding in the export. The annotations drift from the lots, more toward the right and bottom. Use “Fit map
+            to its frame” to stretch the picture to fill it and store the corrected map.
+          </Text>
+        </Flex>
+      ) : matches ? (
         <Text mt="6px" fontFamily={FONT} fontSize="12px" color={COLORS.brandGreen}>
           Sizes match.
         </Text>

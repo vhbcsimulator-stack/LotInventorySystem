@@ -27,12 +27,22 @@ export async function countRows(table, build = (query) => query) {
 /** Every row of `table`, paged past PostgREST's 1000-row response cap. */
 export async function fetchAllRows(table, columns, build = (query) => query) {
   const PAGE = 1000
-  const rows = []
-  for (let from = 0; ; from += PAGE) {
-    const { data } = unwrap(await build(supabase.from(table).select(columns)).range(from, from + PAGE - 1))
-    rows.push(...data)
-    if (data.length < PAGE) return rows
+  // `id` breaks ties so pages fetched side by side never overlap or skip a row.
+  const pageOf = (from, options) =>
+    build(supabase.from(table).select(columns, options)).order('id').range(from, from + PAGE - 1)
+
+  // The first page brings the total, so the rest can be asked for all at once
+  // rather than one round trip after another.
+  const first = unwrap(await pageOf(0, { count: 'exact' }))
+  if (first.data.length < PAGE) return first.data
+  const pages = Math.max(Math.ceil(first.count / PAGE), 2)
+  const rest = await Promise.all(Array.from({ length: pages - 1 }, (_, index) => pageOf((index + 1) * PAGE)))
+  const rows = first.data.concat(...rest.map((response) => unwrap(response).data))
+  // Rows added since the count was taken: keep paging until a page comes back short.
+  for (let from = pages * PAGE; rows.length === from; from += PAGE) {
+    rows.push(...unwrap(await pageOf(from)).data)
   }
+  return rows
 }
 
 /**

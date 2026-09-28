@@ -10,8 +10,8 @@ import { COLORS } from '@/theme/colors'
  */
 export default function AppSkeleton() {
   return (
-    <SkeletonPage label="Loading…" h="100vh">
-      <Flex h="100vh" bg={COLORS.canvas} overflow="hidden">
+    <SkeletonPage label="Loading…" h="100dvh">
+      <Flex h="100dvh" bg={COLORS.canvas} overflow="hidden">
         <Flex
           direction="column"
           w="260px"
@@ -20,7 +20,7 @@ export default function AppSkeleton() {
           bg={COLORS.surface}
           borderRight="1px solid"
           borderColor={COLORS.border}
-          display={{ base: 'none', md: 'flex' }}
+          display={{ base: 'none', lg: 'flex' }}
         >
           <Flex direction="column" align="center" gap="10px" px="24px" pt="24px" pb="8px">
             <Skeleton h="56px" w="56px" rounded="14px" />
@@ -39,21 +39,21 @@ export default function AppSkeleton() {
             align="center"
             justify="space-between"
             h="64px"
-            px="24px"
+            px={{ base: '12px', sm: '16px', lg: '24px' }}
             flexShrink={0}
             bg={COLORS.surface}
             borderBottom="1px solid"
             borderColor={COLORS.border}
           >
-            <Skeleton h="18px" w="180px" rounded="8px" />
+            <Skeleton h="18px" w={{ base: '110px', sm: '180px' }} rounded="8px" />
             <Flex align="center" gap="12px">
               <Skeleton h="20px" w="20px" rounded="6px" />
               <Skeleton h="32px" w="32px" rounded="full" />
-              <Skeleton h="12px" w="110px" />
+              <Skeleton h="12px" w="110px" display={{ base: 'none', sm: 'block' }} />
             </Flex>
           </Flex>
 
-          <Box flex="1" minH={0} p="20px" overflow="hidden">
+          <Box flex="1" minH={0} p={{ base: '12px', sm: '16px', lg: '20px' }} overflow="hidden">
             <DashboardSkeleton />
           </Box>
         </Flex>

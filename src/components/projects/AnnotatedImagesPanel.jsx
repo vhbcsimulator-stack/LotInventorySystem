@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState } from 'react'
-import { Box, CloseButton, Dialog, Flex, Icon, NativeSelect, Portal, Text } from '@chakra-ui/react'
-import { LuExpand, LuImagePlus, LuPencil, LuScanEye, LuShapes, LuTrash2, LuUpload, LuX } from 'react-icons/lu'
-import EmptyState from '@/components/EmptyState'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Box, CloseButton, Dialog, Flex, Icon, Menu, NativeSelect, Portal, Text } from '@chakra-ui/react'
+import { LuChevronDown, LuMousePointerClick, LuPaintbrush, LuScanEye, LuShapes, LuTrash2, LuTriangleAlert, LuUpload, LuX } from 'react-icons/lu'
 import AnnotatedImagePreview from '@/components/projects/AnnotatedImagePreview'
 import useApiQuery from '@/hooks/useApiQuery'
 import {
@@ -17,6 +16,8 @@ import {
 import { SOURCE } from '@/data/api'
 import { fetchLotsByIdentifier, updateLotStatuses } from '@/data/projectsData'
 import { COLORS } from '@/theme/colors'
+import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
+import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -32,61 +33,43 @@ function slotLabel(slot, slots) {
   return phase ? `Phase ${phase}` : slot === 'commercial' ? 'Commercial' : 'Whole Map'
 }
 
+/** Stands in for an annotations row when coloring a map that has none. */
+const FREEHAND = 'freehand'
+
+/** Shown before and while coloring without a COCO JSON. */
+const FREEHAND_WARNING =
+  'Coloring without a COCO JSON is less accurate: each lot is found only by its color where you click, so a lot with faded or uneven fill, ' +
+  'lettering across its border, or a gap in its outline may be colored only partly or spill into its neighbor. Check every lot before saving. '
+
 /**
- * Upload, update, and delete the annotations of one project — a COCO JSON per
- * phase describing its lot polygons, with an optional image to show them on.
+ * The lot-outline actions of the map tab in view: Color lots, which opens the
+ * annotated preview ready to paint, and a menu to upload, preview or delete the
+ * COCO JSON describing that map's lot polygons.
  *
- * `ActionButton` and `onOpenFullscreen` come from ProjectMapView, so this tab
- * looks and behaves like the map tabs beside it.
+ * The annotations belong to a slot — the tab's value — so each map tab carries
+ * its own. Color lots on a map with none offers a choice: upload the COCO JSON
+ * first (coloring opens once it is saved), or color by clicking alone, with a
+ * warning that it is less accurate and that each colored lot must be linked.
+ *
+ * `ActionButton` comes from ProjectMapView, so these sit beside its own buttons.
  */
-/**
- * The row's picture, falling back to the project's own map for the slot when the
- * stored link no longer loads — a row can outlive the image it points at, and a
- * map that is still there reads better than a broken thumbnail. This is the same
- * picture Preview resolves, so the two agree.
- */
-function Thumbnail({ url, projectCode, slot, alt }) {
-  const [src, setSrc] = useState(url)
-  const [failed, setFailed] = useState(false)
-  // A new link (after a replace) is worth trying again.
-  const [lastUrl, setLastUrl] = useState(url)
-  if (lastUrl !== url) {
-    setLastUrl(url)
-    setSrc(url)
-    setFailed(false)
-  }
-
-  async function onError() {
-    if (failed) return
-    setFailed(true)
-    const fallback = await fetchMapImageUrl({ projectCode, slot })
-    if (fallback && fallback !== src) setSrc(fallback)
-  }
-
-  const box = { w: '88px', h: '60px', borderRadius: '8px', bg: COLORS.canvas, flexShrink: 0 }
-  if (failed && src === url) {
-    // Nothing to show it with: the map tab has no picture for this slot either.
-    return (
-      <Flex align="center" justify="center" {...box}>
-        <Icon as={LuShapes} boxSize="18px" color={COLORS.subtle} />
-      </Flex>
-    )
-  }
-  return <Box as="img" src={src} alt={alt} objectFit="cover" onError={onError} {...box} />
-}
-
 export default function AnnotatedImagesPanel({
   projectCode,
   projectName,
   projectId,
-  // The map tabs, as [{ value, label }] — what a slot can be and what it is called.
+  // The map tab in view, and every map tab as [{ value, label }].
+  slot,
   slots = [],
+  // Whether the tab in view has a map picture to color at all.
+  hasMap = true,
   ActionButton,
-  onOpenFullscreen,
+  // Asked to move to another tab — when coloring starts on a map other than this one.
+  onSelectSlot,
+  startColoring = false,
 }) {
   const query = useMemo(() => ({ projectCode }), [projectCode])
   const { data, loading, reload } = useApiQuery(fetchAnnotatedImages, query)
-  const [editing, setEditing] = useState(null) // null | { image } — image null when adding
+  const [editing, setEditing] = useState(null) // null | { image, slot } — image null when adding
   const [confirming, setConfirming] = useState(null)
   // { image, url } — the url is the project's own map, resolved when it opens.
   const [previewing, setPreviewing] = useState(null)
@@ -94,21 +77,21 @@ export default function AnnotatedImagesPanel({
   const [uploadError, setUploadError] = useState('')
   const [busy, setBusy] = useState('') // '' | 'save' | 'delete'
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
+  // Asking how to color a map that has no lot outlines.
+  const [choosing, setChoosing] = useState(false)
+  const autoColorRun = useRef(false)
+  // A slot whose coloring opens as soon as its just-uploaded annotations load.
+  const colorAfterUpload = useRef(null)
 
-  const images = data?.images ?? []
+  const images = useMemo(() => data?.images ?? [], [data])
+  const current = images.find((image) => image.slot === slot) ?? null
   /*
    * Uploading is offered whenever there is a database to upload to. The table
    * itself may still be missing — the migration not yet run — which reads as
-   * UNAVAILABLE; hiding the button then would leave the tab with no way forward,
-   * whereas saving says exactly which migration to run.
+   * UNAVAILABLE; hiding the button then would leave no way forward, whereas
+   * saving says exactly which migration to run.
    */
   const canEdit = data?.source !== SOURCE.NOT_CONFIGURED && Boolean(projectCode)
-
-  const openUpload = () => {
-    setError('')
-    setEditing({ image: null })
-  }
 
   /*
    * The preview draws the map that `uploads` holds for this slot, not a copy —
@@ -116,17 +99,76 @@ export default function AnnotatedImagesPanel({
    * picture that is actually in use. The row's own link stands in for a slot with
    * no map of its own, or while the lookup is in flight.
    */
-  async function openPreview(image) {
+  async function openPreview(image, startPainting = false, showAnnotations = false) {
     setFitError('')
-    setPreviewing({ image, url: image.url })
+    setPreviewing({ image, url: image.url, startPainting, showAnnotations })
     const url = await fetchMapImageUrl({ projectCode, slot: image.slot })
-    if (url) setPreviewing((current) => (current?.image.id === image.id ? { image, url } : current))
+    if (url) setPreviewing((open) => (open?.image.id === image.id ? { ...open, url } : open))
+  }
+
+  /** For effects: the preview opens once its map is resolved, not before. */
+  function openColoringWhenReady(image) {
+    fetchMapImageUrl({ projectCode, slot: image.slot }).then((url) => {
+      setFitError('')
+      setPreviewing({ image, url: url || image.url, startPainting: true })
+    })
+  }
+
+  // Opened from the command palette: this tab's map if it has outlines, else the first that does.
+  useEffect(() => {
+    if (!startColoring || autoColorRun.current || loading || !data) return
+    autoColorRun.current = true
+    const image = images.find((entry) => entry.slot === slot) ?? images.find((entry) => entry.slot === 'whole') ?? images[0]
+    if (!image) return
+    if (image.slot !== slot) onSelectSlot?.(image.slot)
+    openColoringWhenReady(image)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, images, loading, projectCode, slot, startColoring])
+
+  useEffect(() => {
+    if (!colorAfterUpload.current) return
+    const image = images.find((entry) => entry.slot === colorAfterUpload.current)
+    if (!image?.coco) return
+    colorAfterUpload.current = null
+    openColoringWhenReady(image)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [images])
+
+  if (loading && !data) return null
+
+  function colorLots() {
+    if (current?.coco) {
+      openPreview(current, true)
+      return
+    }
+    // No outlines for this map yet: upload them first, or color without them.
+    setError('')
+    setChoosing(true)
+  }
+
+  function uploadThenColor() {
+    setChoosing(false)
+    setEditing({ image: null, slot, thenColor: true })
+  }
+
+  /*
+   * Coloring with no COCO JSON: the slot's own map, painted lot by lot where it
+   * is clicked and linked to its lot by hand. There is no annotations row to update.
+   */
+  async function colorFreehand() {
+    setChoosing(false)
+    const url = await fetchMapImageUrl({ projectCode, slot })
+    if (!url) {
+      setError(`The ${label} tab has no map to color yet — use Add map first.`)
+      return
+    }
+    setFitError('')
+    setPreviewing({ image: { id: FREEHAND, slot, coco: null, url }, url, startPainting: true, freehand: true })
   }
 
   async function save({ slot, file, cocoFile }) {
     setBusy('save')
     setError('')
-    setNotice('')
     try {
       const existing = editing?.image ?? images.find((image) => image.slot === slot) ?? null
       const coco = await readCocoJson(cocoFile)
@@ -139,18 +181,19 @@ export default function AnnotatedImagesPanel({
       const synced = file
         ? null
         : await syncMapImage({ projectCode, projectId, slot, slotName: name, coco: coco ?? existing?.coco })
-      await saveAnnotatedImage({ projectCode, slot, file, coco, existing, imageUrl: synced?.url ?? '' })
+      await saveAnnotatedImage({ projectCode, projectId, slot, file, coco, existing, imageUrl: synced?.url ?? '' })
+      if (editing?.thenColor) colorAfterUpload.current = slot
       setEditing(null)
-      setNotice(
-        synced?.resized
-          ? `Annotations saved, and the ${name} map was resized to ${synced.size.width} × ${synced.size.height} to match.`
-          : existing
-            ? 'Annotations updated.'
-            : 'Annotations uploaded.',
-      )
+      const message = synced?.resized
+        ? `Annotations saved, and the ${name} map was resized to ${synced.size.width} × ${synced.size.height} to match.`
+        : existing
+          ? 'Annotations updated.'
+          : 'Annotations uploaded.'
+      notifySaved(existing ? 'Annotations updated' : 'Annotations uploaded', message)
       reload()
     } catch (err) {
       setError(err.message)
+      notifyFailed('Could not save the annotations', err)
     } finally {
       setBusy('')
     }
@@ -166,7 +209,7 @@ export default function AnnotatedImagesPanel({
    * The lots a slot's annotations can be matched to: one phase's for a phase
    * map, every lot for the whole map or the commercial strip.
    */
-  const loadLots = (image) => fetchLotsByIdentifier(projectCode, { phase: parseSlot(image.slot).phase })
+  const loadLots = (image) => fetchLotsByIdentifier(projectCode, parseSlot(image.slot))
 
   /*
    * Save a reviewed colouring: store the recoloured map as this slot's map in
@@ -181,21 +224,23 @@ export default function AnnotatedImagesPanel({
   async function saveColoredUpdate(image, { file, changes }) {
     setBusy('upload')
     setUploadError('')
-    setNotice('')
     try {
       const url = await uploadMapImage({ projectCode, projectId, slot: image.slot, file })
-      if (url) await saveAnnotatedImage({ projectCode, slot: image.slot, existing: image, imageUrl: url })
+      // Freehand coloring has no annotations row to point at the new map.
+      if (url && image.id !== FREEHAND) await saveAnnotatedImage({ projectCode, slot: image.slot, existing: image, imageUrl: url })
       const { updated, failed } = await updateLotStatuses(changes, projectCode)
       const name = slotLabel(image.slot, slots)
-      setNotice(
+      const message =
         `The colored map was saved — the ${name} map tab now shows it` +
-          (updated ? `, and ${updated} lot status${updated === 1 ? ' was' : 'es were'} updated in the table.` : '.'),
-      )
-      if (url) setPreviewing((current) => (current?.image.id === image.id ? { image: { ...current.image, url }, url } : current))
+        (updated ? `, and ${updated} lot status${updated === 1 ? ' was' : 'es were'} updated in the table.` : '.')
+      if (failed.length) notifyWarning('Map saved, some lots not updated', `${failed.length} lot${failed.length === 1 ? '' : 's'} kept the old status.`)
+      else notifySaved('Map colors saved', message)
+      if (url) setPreviewing((open) => (open?.image.id === image.id ? { ...open, image: { ...open.image, url }, url, startPainting: false } : open))
       reload()
       return { failed }
     } catch (err) {
       setUploadError(err.message)
+      notifyFailed('Could not save the colored map', err)
       throw err
     } finally {
       setBusy('')
@@ -205,7 +250,6 @@ export default function AnnotatedImagesPanel({
   async function refit(image, size) {
     setBusy('fit')
     setFitError('')
-    setNotice('')
     try {
       const synced = await syncMapImage({
         projectCode,
@@ -215,11 +259,12 @@ export default function AnnotatedImagesPanel({
         coco: image.coco,
       })
       await saveAnnotatedImage({ projectCode, slot: image.slot, existing: image, imageUrl: synced.url })
-      setNotice(`The map was resized to ${size.width} × ${size.height} in the uploads table and now matches.`)
+      notifySaved('Map resized', `Now ${size.width} × ${size.height}, matching the annotations.`)
       setPreviewing(null)
       reload()
     } catch (err) {
       setFitError(err.message)
+      notifyFailed('Could not resize the map', err)
     } finally {
       setBusy('')
     }
@@ -228,148 +273,110 @@ export default function AnnotatedImagesPanel({
   async function remove(image) {
     setBusy('delete')
     setError('')
-    setNotice('')
     try {
       await deleteAnnotatedImage(image)
-      setNotice('Annotated image deleted.')
+      notifySaved('Annotated image deleted')
       reload()
     } catch (err) {
       setError(err.message)
+      notifyFailed('Could not delete the annotated image', err)
     } finally {
       setConfirming(null)
       setBusy('')
     }
   }
 
-  return (
-    <Box>
-      <Flex align="center" justify="space-between" gap="12px" mb="12px" flexWrap="wrap">
-        {/*
-          * While images exist the button lives up here; with none it moves into
-          * the empty state below, where there is nothing else to look at.
-          */}
-        {canEdit && images.length ? (
-          <ActionButton tone="primary" icon={LuImagePlus} disabled={Boolean(busy)} onClick={openUpload}>
-            Upload COCO JSON
-          </ActionButton>
-        ) : null}
-      </Flex>
+  const label = slotLabel(slot, slots)
+  const hasOutlines = Boolean(current?.coco)
+  // Someone who cannot upload has nothing to do on a map without outlines.
+  if (!canEdit && !hasOutlines) return null
 
-      {notice ? (
-        <Text role="status" mb="12px" fontFamily={FONT} fontSize="13px" color={COLORS.brandGreen}>
-          {notice}
-        </Text>
-      ) : null}
+  const menuItem = { gap: '8px', fontSize: '13px' }
+
+  return (
+    <>
+      <ActionButton
+        icon={LuPaintbrush}
+        disabled={Boolean(busy)}
+        title={hasOutlines ? `Color the lots on the ${label} map` : `The ${label} map has no lot outlines yet — upload them, or color without them`}
+        onClick={colorLots}
+      >
+        Color lots
+      </ActionButton>
+
+      <Menu.Root
+        positioning={{ placement: 'bottom-end' }}
+        onSelect={({ value }) => {
+          setError('')
+          if (value === 'upload') setEditing({ image: current, slot })
+          // Previewing outlines is for looking at them, so they show from the start.
+          else if (value === 'preview') openPreview(current, false, true)
+          else if (value === 'delete') setConfirming(current)
+        }}
+      >
+        {/* Styled as ActionButton, which cannot take the trigger's ref. */}
+        <Menu.Trigger
+          display="flex"
+          alignItems="center"
+          gap="6px"
+          h="34px"
+          px="12px"
+          borderRadius="8px"
+          border="1px solid"
+          borderColor={COLORS.border}
+          bg={COLORS.surface}
+          color={COLORS.heading}
+          fontFamily={FONT}
+          fontWeight="600"
+          fontSize="13px"
+          cursor="pointer"
+          flexShrink={0}
+          disabled={Boolean(busy)}
+          _hover={{ bg: COLORS.hoverBg }}
+          _disabled={{ opacity: 0.55, cursor: 'not-allowed' }}
+          _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+        >
+          <Icon as={LuShapes} boxSize="14px" />
+          {hasOutlines ? `Lot outlines (${current.annotations})` : 'Lot outlines'}
+          <Icon as={LuChevronDown} boxSize="14px" />
+        </Menu.Trigger>
+        <Portal>
+          <Menu.Positioner>
+            <Menu.Content minW="200px">
+              {hasOutlines ? (
+                <Menu.Item value="preview" {...menuItem}>
+                  <Icon as={LuScanEye} boxSize="14px" />
+                  Preview outlines
+                </Menu.Item>
+              ) : null}
+              {canEdit ? (
+                <Menu.Item value="upload" {...menuItem}>
+                  <Icon as={LuUpload} boxSize="14px" />
+                  {current ? 'Replace COCO JSON' : 'Upload COCO JSON'}
+                </Menu.Item>
+              ) : null}
+              {canEdit && current ? (
+                <Menu.Item value="delete" {...menuItem} color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+                  <Icon as={LuTrash2} boxSize="14px" />
+                  Delete outlines
+                </Menu.Item>
+              ) : null}
+            </Menu.Content>
+          </Menu.Positioner>
+        </Portal>
+      </Menu.Root>
+
       {error && !editing ? (
-        <Text role="alert" mb="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
+        <Text role="alert" w="100%" fontFamily={FONT} fontSize="13px" color="#B91C1C">
           {error}
         </Text>
       ) : null}
 
-      {images.length ? (
-        <Flex direction="column" gap="12px" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
-          {images.map((image) => (
-            <Flex
-              key={image.id}
-              align="center"
-              gap="12px"
-              p="10px"
-              flexWrap="wrap"
-              border="1px solid"
-              borderColor={COLORS.border}
-              borderRadius="10px"
-            >
-              {image.url ? (
-                <Thumbnail
-                  url={image.url}
-                  projectCode={projectCode}
-                  slot={image.slot}
-                  alt={`${projectName || projectCode} — ${slotLabel(image.slot, slots)} annotated map`}
-                />
-              ) : (
-                // Annotations with no picture attached yet.
-                <Flex
-                  align="center"
-                  justify="center"
-                  w="88px"
-                  h="60px"
-                  borderRadius="8px"
-                  bg={COLORS.canvas}
-                  flexShrink={0}
-                >
-                  <Icon as={LuShapes} boxSize="18px" color={COLORS.subtle} />
-                </Flex>
-              )}
-              <Box flex="1" minW="160px">
-                <Text fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
-                  {slotLabel(image.slot, slots)}
-                </Text>
-                <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
-                  {`${image.annotations} annotation${image.annotations === 1 ? '' : 's'}`}
-                  {image.url ? '' : ' · no image'}
-                  {image.updatedAt ? ` · updated ${image.updatedAt.slice(0, 10)}` : ''}
-                </Text>
-              </Box>
-              <Flex align="center" gap="8px" flexWrap="wrap">
-                {image.coco ? (
-                  <ActionButton icon={LuScanEye} onClick={() => openPreview(image)}>
-                    Preview
-                  </ActionButton>
-                ) : null}
-                {image.url ? (
-                  <ActionButton icon={LuExpand} onClick={() => onOpenFullscreen?.(image, slotLabel(image.slot, slots))}>
-                    Open full size
-                  </ActionButton>
-                ) : null}
-                {canEdit ? (
-                  <>
-                    <ActionButton
-                      icon={LuPencil}
-                      disabled={Boolean(busy)}
-                      onClick={() => {
-                        setError('')
-                        setEditing({ image })
-                      }}
-                    >
-                      Update
-                    </ActionButton>
-                    <ActionButton icon={LuTrash2} disabled={Boolean(busy)} onClick={() => setConfirming(image)}>
-                      Delete
-                    </ActionButton>
-                  </>
-                ) : null}
-              </Flex>
-            </Flex>
-          ))}
-        </Flex>
-      ) : (
-        <EmptyState
-          icon={LuShapes}
-          title="No annotated images yet"
-          hint={
-            // A database that cannot be read says why, rather than looking like
-            // nothing has been uploaded.
-            data?.message
-              ? data.message
-              : canEdit
-                ? `Upload the COCO JSON of ${projectName || projectCode}'s lot polygons — the map on its tab is used as the picture.`
-                : 'Annotated images load once the database is connected.'
-          }
-        >
-          {canEdit ? (
-            <Box mt="6px">
-              <ActionButton tone="primary" icon={LuImagePlus} disabled={Boolean(busy)} onClick={openUpload}>
-                Upload COCO JSON
-              </ActionButton>
-            </Box>
-          ) : null}
-        </EmptyState>
-      )}
-
       {previewing ? (
         <AnnotatedImagePreview
           open
-          title={`${projectName || projectCode} — ${slotLabel(previewing.image.slot, slots)}`}
+          title={`${projectName || projectCode} — ${slotLabel(previewing.image.slot, slots)}${previewing.freehand ? ' (no outlines)' : ''}`}
+          warning={previewing.freehand ? FREEHAND_WARNING : ''}
           url={previewing.url}
           coco={previewing.image.coco}
           fitting={busy === 'fit'}
@@ -377,8 +384,11 @@ export default function AnnotatedImagesPanel({
           onFitImage={(size) => refit(previewing.image, size)}
           loadLots={canEdit ? () => loadLots(previewing.image) : undefined}
           onSaveUpdate={canEdit ? (update) => saveColoredUpdate(previewing.image, update) : undefined}
+          allowMapOnlySave={canEdit}
           saving={busy === 'upload'}
           saveError={uploadError}
+          startPainting={Boolean(previewing.startPainting)}
+          showAnnotations={Boolean(previewing.showAnnotations)}
           onClose={() => {
             setPreviewing(null)
             setFitError('')
@@ -387,11 +397,23 @@ export default function AnnotatedImagesPanel({
         />
       ) : null}
 
+      {choosing ? (
+        <ColorChoiceDialog
+          label={label}
+          hasMap={hasMap}
+          ActionButton={ActionButton}
+          onUpload={uploadThenColor}
+          onFreehand={colorFreehand}
+          onClose={() => setChoosing(false)}
+        />
+      ) : null}
+
       {editing ? (
         <AnnotatedImageDialog
           image={editing.image}
+          initialSlot={editing.slot}
+          thenColor={Boolean(editing.thenColor)}
           slots={slots}
-          taken={images.map((image) => image.slot)}
           busy={busy === 'save'}
           error={error}
           ActionButton={ActionButton}
@@ -412,27 +434,29 @@ export default function AnnotatedImagesPanel({
           onConfirm={() => remove(confirming)}
         />
       ) : null}
-    </Box>
+    </>
   )
 }
 
 /**
  * A file field a file can be dropped on, or clicked to browse.
  *
- * `accept` is passed to the file input, and `matches` decides what a drop is
- * allowed to be — a drop is not filtered by the browser the way the picker is,
- * so a .png dragged onto the JSON field has to be turned away here, with a
- * reason, rather than silently taken.
+ * `kind` is an upload rule (lib/uploadRules) that sets the picker's filter and
+ * decides what a drop is allowed to be — a drop is not filtered by the browser
+ * the way the picker is, so a .png dragged onto the JSON field has to be turned
+ * away here, with a reason, rather than silently taken.
  */
-function FileDropZone({ label, hint, accept, matches, file, disabled, onChange }) {
+function FileDropZone({ label, hint, kind, file, disabled, onChange }) {
   const input = useRef(null)
   const [over, setOver] = useState(false)
   const [rejected, setRejected] = useState('')
+  const accept = acceptFor(kind)
 
   function take(chosen) {
     if (!chosen) return
-    if (matches && !matches(chosen)) {
-      setRejected(`"${chosen.name}" is not the right kind of file here.`)
+    const problem = uploadProblem(kind, chosen)
+    if (problem) {
+      setRejected(problem)
       return
     }
     setRejected('')
@@ -526,31 +550,20 @@ function FileDropZone({ label, hint, accept, matches, file, disabled, onChange }
   )
 }
 
-const isJson = (file) => file.type === 'application/json' || /\.json$/i.test(file.name)
-const isImage = (file) => file.type.startsWith('image/')
-
 /**
- * Upload or update one annotated image. Adding needs the image itself; updating
- * can change the image, the COCO JSON, or both, so either file may be left empty
- * and whatever is stored survives.
+ * Upload or update the COCO JSON for a map slot. The map tab supplies its image.
  *
  * The slot cannot be changed while updating: it is what identifies the row, and
  * moving annotations to another map is an upload onto that map.
  */
-function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, onClose, onSave }) {
+function AnnotatedImageDialog({ image, initialSlot, thenColor, slots, busy, error, ActionButton, onClose, onSave }) {
   // The map tabs are the choice — the same list, in the same words, as the tabs
   // across the top, so the annotations land on a map that actually exists.
   const options = slots.length ? slots : [{ value: 'whole', label: 'Whole Map' }]
   const updating = Boolean(image)
-  const [slot, setSlot] = useState(image?.slot ?? options[0].value)
-  const [file, setFile] = useState(null)
+  const [slot, setSlot] = useState(image?.slot ?? initialSlot ?? options[0].value)
   const [cocoFile, setCocoFile] = useState(null)
-
-  // Uploading onto a slot that already has annotations replaces them — worth
-  // saying so beforehand rather than after.
-  const replaces = !updating && taken.includes(slot)
-  const canSave = !busy && Boolean(slot) && (updating ? Boolean(file || cocoFile) : Boolean(cocoFile))
-  const slotName = options.find((option) => option.value === slot)?.label ?? slot
+  const canSave = !busy && Boolean(slot) && Boolean(cocoFile)
 
   const label = (children) => (
     <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
@@ -566,11 +579,12 @@ function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, 
       }}
       placement="center"
       size="sm"
+      scrollBehavior="inside"
     >
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title
                 fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -582,6 +596,11 @@ function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, 
             </Dialog.Header>
             <Dialog.Body py="18px">
               <Flex direction="column" gap="14px">
+                {thenColor ? (
+                  <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
+                    This map has no lot outlines yet. Upload its COCO JSON and coloring opens once it is saved.
+                  </Text>
+                ) : null}
                 <Box>
                   {label('Map')}
                   <NativeSelect.Root>
@@ -597,9 +616,8 @@ function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, 
                 </Box>
                 <FileDropZone
                   label={updating ? 'New COCO JSON (optional)' : 'COCO JSON'}
-                  hint=".json exported from the annotation tool"
-                  accept="application/json,.json"
-                  matches={isJson}
+                  hint={`${describeUpload('coco')}, exported from the annotation tool`}
+                  kind="coco"
                   file={cocoFile}
                   disabled={busy}
                   onChange={setCocoFile}
@@ -611,7 +629,7 @@ function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, 
                 ) : null}
               </Flex>
             </Dialog.Body>
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <ActionButton onClick={onClose} disabled={busy}>
                 Cancel
               </ActionButton>
@@ -619,13 +637,81 @@ function AnnotatedImageDialog({ image, slots, taken, busy, error, ActionButton, 
                 tone="primary"
                 loading={busy}
                 disabled={!canSave}
-                onClick={() => onSave({ slot, file, cocoFile })}
+                onClick={() => onSave({ slot, file: null, cocoFile })}
               >
                 {updating ? 'Save changes' : 'Upload'}
               </ActionButton>
             </Dialog.Footer>
             <Dialog.CloseTrigger asChild top="14px" right="14px">
               <CloseButton size="sm" disabled={busy} />
+            </Dialog.CloseTrigger>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
+    </Dialog.Root>
+  )
+}
+
+/**
+ * Color lots on a map with no COCO JSON: upload the outlines first (the
+ * accurate way, and the only one that updates lot statuses), or color by
+ * clicking alone, after a plain warning about what that gives up.
+ */
+function ColorChoiceDialog({ label, hasMap, ActionButton, onUpload, onFreehand, onClose }) {
+  const option = { direction: 'column', gap: '4px', p: '12px', borderRadius: '10px', border: '1px solid', borderColor: COLORS.border }
+  return (
+    // No focus hand-back on close: the dialog it opens next would take that as focus leaving it, and close.
+    <Dialog.Root open onOpenChange={({ open: next }) => (next ? null : onClose())} placement="center" size="sm" restoreFocus={false}>
+      <Portal>
+        <Dialog.Backdrop />
+        <Dialog.Positioner px="16px">
+          <Dialog.Content borderRadius="16px">
+            <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
+              <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
+                Color lots
+              </Dialog.Title>
+            </Dialog.Header>
+            <Dialog.Body py="18px">
+              <Text mb="12px" fontFamily={FONT} fontSize="13px" color={COLORS.heading}>
+                The <b>{label}</b> map has no lot outlines (COCO JSON) yet. How do you want to color it?
+              </Text>
+              <Flex direction="column" gap="10px">
+                <Flex {...option}>
+                  <Flex align="center" justify="space-between" gap="8px" flexWrap="wrap">
+                    <Text fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
+                      Upload COCO JSON first · Recommended
+                    </Text>
+                    <ActionButton tone="primary" icon={LuUpload} onClick={onUpload}>
+                      Upload
+                    </ActionButton>
+                  </Flex>
+                  <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+                    Each lot is colored exactly inside its outline, and saving also updates the lot statuses in the table.
+                  </Text>
+                </Flex>
+                <Flex {...option} borderColor="#F5C77E" bg="#FFF7E6">
+                  <Flex align="center" justify="space-between" gap="8px" flexWrap="wrap">
+                    <Text fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
+                      Color without COCO JSON
+                    </Text>
+                    <ActionButton icon={LuMousePointerClick} disabled={!hasMap} onClick={onFreehand}>
+                      Color anyway
+                    </ActionButton>
+                  </Flex>
+                  <Flex gap="6px" align="flex-start">
+                    <Icon as={LuTriangleAlert} boxSize="14px" color="#B45309" mt="2px" flexShrink={0} />
+                    <Text fontFamily={FONT} fontSize="12px" color="#7C2D12">
+                      {hasMap ? FREEHAND_WARNING : 'This tab has no map image yet — add one first.'}
+                    </Text>
+                  </Flex>
+                </Flex>
+              </Flex>
+            </Dialog.Body>
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px">
+              <ActionButton onClick={onClose}>Cancel</ActionButton>
+            </Dialog.Footer>
+            <Dialog.CloseTrigger asChild top="14px" right="14px">
+              <CloseButton size="sm" />
             </Dialog.CloseTrigger>
           </Dialog.Content>
         </Dialog.Positioner>

@@ -7,14 +7,30 @@
  */
 import { SOURCE, num, text } from './api'
 import { supabase, unwrap } from './supabase'
+import { checkUpload } from '@/lib/uploadRules'
+import { isSvgFile, prepareSvgFile } from '@/lib/svgMaps'
 
-function toMap(row) {
+const MVLC_SECTIONS = [
+  { phase: 1, section: 'A' }, { phase: 1, section: 'B' }, { phase: 1, section: 'C' }, { phase: 1, section: 'East' },
+  { phase: 2, section: 'A' }, { phase: 2, section: 'B' }, { phase: 2, section: 'East' },
+  { phase: 3, section: null },
+]
+
+const isMvlc = (projectCode) => /^mvlc$/i.test(projectCode ?? '')
+const sectionFor = (phase, section, projectCode) =>
+  section || (isMvlc(projectCode) && (phase === 1 || phase === 2) ? 'East' : null)
+
+export const mapTabValue = ({ phase, section, commercial }) =>
+  commercial ? 'commercial' : phase === null ? 'whole' : `phase-${phase}${section ? `-${section.toLowerCase()}` : ''}`
+
+function toMap(row, projectCode) {
   const phase = typeof row.Phase === 'number' ? row.Phase : num(row.Phase, NaN)
   return {
     id: row.id,
     url: text(row.image_URL),
     name: text(row.name),
     phase: Number.isFinite(phase) ? phase : null,
+    section: text(row.type).toLowerCase() === 'commercial' ? null : sectionFor(phase, text(row.map_section) || null, projectCode),
     commercial: text(row.type).toLowerCase() === 'commercial',
     projectId: row.project_id ?? null,
     phaseId: row.phase_id ?? null,
@@ -37,7 +53,9 @@ function pathInBucket(map, bucketName) {
 }
 
 /** Maps occupying the same slot (whole / phase N / commercial phase N) as `target`. */
-export const sameSlot = (map, target) => map.commercial === target.commercial && map.phase === target.phase
+export const sameSlot = (map, target) =>
+  map.commercial === target.commercial && map.phase === target.phase &&
+  (map.commercial || (map.section ?? null) === (target.section ?? null))
 
 /**
  * MSCC is a condominium: its maps are floor plans, so its tabs read "Floor N"
@@ -47,7 +65,7 @@ export const sameSlot = (map, target) => map.commercial === target.commercial &&
 export const usesFloors = (projectCode) => /^mscc/i.test(projectCode ?? '')
 
 /**
- * The project's maps grouped into tabs: Whole Map (phase projects only), one
+ * The project's maps grouped into tabs: Whole Map (once one is uploaded), one
  * tab per phase or floor, and Commercial where the project has commercial maps
  * — as [{ value, label, maps }] — plus the flat `maps` list.
  * Never throws: failures resolve empty and report why via `source`.
@@ -61,13 +79,13 @@ export async function fetchProjectMaps({ projectCode } = {}) {
     const { data } = unwrap(
       await supabase
         .from('uploads')
-        .select('id, name, project, project_id, phase_id, Phase, type, image_URL, storage_path, uploaded_at')
+        .select('id, name, project, project_id, phase_id, Phase, map_section, type, image_URL, storage_path, uploaded_at')
         .eq('kind', 'map')
         .eq('current', true)
         .ilike('project', `${projectCode}%`)
         .order('uploaded_at', { ascending: false }),
     )
-    const maps = data.map(toMap).filter((map) => map.url)
+    const maps = data.map((row) => toMap(row, projectCode)).filter((map) => map.url)
     return { tabs: buildTabs(maps, projectCode), maps, source: SOURCE.DATABASE }
   } catch (err) {
     console.error('[project maps] falling back to no maps:', err)
@@ -77,29 +95,29 @@ export async function fetchProjectMaps({ projectCode } = {}) {
 
 function buildTabs(maps, projectCode) {
   const unit = usesFloors(projectCode) ? 'Floor' : 'Phase'
-  const withCaption = (map) => ({ ...map, caption: map.phase === null ? '' : `${unit} ${map.phase}` })
+  const withCaption = (map) => ({ ...map, caption: map.phase === null ? '' : `${unit} ${map.phase}${map.section || ''}` })
   const phases = [...new Set(maps.filter((map) => !map.commercial && map.phase !== null).map((map) => map.phase))].sort(
     (a, b) => a - b,
   )
 
   const commercial = maps.filter((map) => map.commercial).sort((a, b) => (a.phase ?? 0) - (b.phase ?? 0))
+  const whole = maps.filter((map) => !map.commercial && map.phase === null).map(withCaption)
 
   return [
-    // A condominium has no whole-site map; a phased subdivision always shows the tab.
-    ...(unit === 'Phase'
-      ? [
-          {
-            value: 'whole',
-            label: 'Whole Map',
-            maps: maps.filter((map) => !map.commercial && map.phase === null).map(withCaption),
-          },
-        ]
-      : []),
-    ...phases.map((phase) => ({
+    /*
+     * Only once a whole-site map is uploaded — a condominium never has one.
+     * "Add map" still offers Whole Map, and uploading one brings the tab in.
+     */
+    ...(unit === 'Phase' && whole.length ? [{ value: 'whole', label: 'Whole Map', maps: whole }] : []),
+    ...(isMvlc(projectCode) ? MVLC_SECTIONS.map(({ phase, section }) => ({
+      value: mapTabValue({ phase, section, commercial: false }),
+      label: `Phase ${phase}${section || ''}`,
+      maps: maps.filter((map) => !map.commercial && map.phase === phase && map.section === section).map(withCaption),
+    })) : phases.map((phase) => ({
       value: `phase-${phase}`,
       label: `${unit} ${phase}`,
       maps: maps.filter((map) => !map.commercial && map.phase === phase).map(withCaption),
-    })),
+    }))),
     /*
      * Only where commercial maps exist, exactly as the phase tabs above work.
      * A project that sells no commercial lots (ERHD) then has no empty tab to
@@ -110,18 +128,18 @@ function buildTabs(maps, projectCode) {
 }
 
 /**
- * The map rows the project already has for one slot, read from the database
- * rather than taken from the caller's list — the list a page is holding can be
- * out of date, or miss a row whose `current` flag or `Phase` does not line up
- * with the tab it was shown under, and a save that went by the list alone then
- * added a second row for a map that was already there. Newest first.
+ * Every map row the project has, read from the database rather than taken from
+ * the caller's list — the list a page is holding can be out of date, or miss a
+ * row whose `current` flag or `Phase` does not line up with the tab it was shown
+ * under, and a save that went by the list alone then added a second row for a
+ * map that was already there. Newest first; [] when it cannot be read.
  */
-async function slotRows({ projectCode, target }) {
+async function projectRows(projectCode) {
   try {
     const { data } = unwrap(
       await supabase
         .from('uploads')
-        .select('id, name, project, project_id, phase_id, Phase, type, image_URL, storage_path, uploaded_at')
+        .select('id, name, project, project_id, phase_id, Phase, map_section, type, image_URL, storage_path, uploaded_at')
         .eq('kind', 'map')
         .ilike('project', `${projectCode}%`)
         .order('uploaded_at', { ascending: false }),
@@ -132,17 +150,64 @@ async function slotRows({ projectCode, target }) {
      * on newer rows and null on older ones. toMap settles both, and sameSlot
      * then compares the same values the map tabs themselves are built from.
      */
-    return data.map(toMap).filter((map) => sameSlot(map, target))
+    return data.map((row) => toMap(row, projectCode))
   } catch (err) {
     console.error('[project maps] could not look up the slot before saving:', err)
     return []
   }
 }
 
+/** A file's extension, lower-cased, with .jpeg read as .jpg. */
+const extensionOf = (name) => (/\.([a-z0-9]+)$/i.exec(name ?? '')?.[1] ?? '').toLowerCase().replace(/^jpeg$/, 'jpg')
+
+/**
+ * `path` for a new picture of `file`'s type: the same path when the type
+ * matches, else the same folder and name with the new extension.
+ */
+export function withExtensionOf(path, file) {
+  const next = extensionOf(file.name)
+  if (!next || extensionOf(path) === next) return path
+  return `${path.replace(/\.[^./]+$/, '')}.${next}`
+}
+
+/**
+ * The project's top folder in its bucket — "<owner>/<CODE>". Maps saved from
+ * different accounts can sit under different owners; the project's folder is
+ * the one most of its maps use, and on a tie the oldest map's. Every save
+ * writes there, so no account opens a folder of its own. Null when the project
+ * has no stored map to go by.
+ */
+function projectFolder(maps, bucketName) {
+  const folders = new Map() // folder → { count, oldest id }
+  for (const map of maps) {
+    const parts = pathInBucket(map, bucketName).split('/')
+    if (parts.length < 4) continue
+    const folder = parts.slice(0, 2).join('/')
+    const seen = folders.get(folder) ?? { count: 0, oldest: Infinity }
+    folders.set(folder, { count: seen.count + 1, oldest: Math.min(seen.oldest, Number(map.id) || Infinity) })
+  }
+  let best = null
+  for (const [folder, { count, oldest }] of folders) {
+    if (!best || count > best.count || (count === best.count && oldest < best.oldest)) best = { folder, count, oldest }
+  }
+  return best?.folder ?? null
+}
+
+/**
+ * Where a replacement goes: the path it replaces, moved into the project's
+ * folder when it sat under another one — same sub-folder and name, with the
+ * extension following the new picture's type.
+ */
+function replacementPath(previousPath, folder, file) {
+  const parts = previousPath.split('/')
+  const moved = folder && parts.length >= 4 ? `${folder}/${parts.slice(2).join('/')}` : previousPath
+  return withExtensionOf(moved, file)
+}
+
 /** Storage folder for a slot, matching how existing uploads are laid out. */
-function folderFor({ phase, commercial }) {
+function folderFor({ phase, section, commercial }) {
   if (commercial) return phase === null ? 'commercial' : `phase-${phase}-commercial`
-  return phase === null ? 'default' : `phase-${phase}`
+  return phase === null ? 'default' : `phase-${phase}${section ? `-${section.toLowerCase()}` : ''}`
 }
 
 /**
@@ -163,10 +228,14 @@ function folderFor({ phase, commercial }) {
 export async function saveProjectMap({ projectCode, projectId, target, file, existing = [], replaceId = null }) {
   if (!supabase) throw new Error('No database connected — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
   if (!projectCode) throw new Error('Choose a project first.')
-  if (!file?.type?.startsWith('image/')) throw new Error('Choose an image file (PNG, JPG or WebP).')
+  await checkUpload('map', file)
+  // An SVG stays a vector; it is stored only once scripts and outside links are stripped.
+  if (isSvgFile(file)) file = await prepareSvgFile(file)
   if (target.phase !== null && !(Number.isInteger(target.phase) && target.phase > 0)) {
     throw new Error('Phase must be a whole number.')
   }
+  const section = target.commercial ? null : sectionFor(target.phase, target.section ?? null, projectCode)
+  target = { ...target, section }
 
   const { data: auth } = await supabase.auth.getUser()
   const user = auth?.user
@@ -174,20 +243,14 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
 
   const bucketName = projectCode.toLowerCase()
   const bucket = supabase.storage.from(bucketName)
-  const safeName = file.name.replace(/[^\w.-]+/g, '_')
-  const random = Math.random().toString(36).slice(2, 13)
-  const storagePath = `${user.id}/${projectCode}/${folderFor(target)}/${Date.now()}_${random}_${safeName}`
-
-  const { error: uploadError } = await bucket.upload(storagePath, file, { contentType: file.type })
-  if (uploadError) throw new Error(`Image upload to the "${bucketName}" bucket failed: ${uploadError.message}`)
-  const imageUrl = bucket.getPublicUrl(storagePath).data.publicUrl
 
   /*
-   * What the slot really holds, asked of the database itself — see slotRows.
+   * What the slot really holds, asked of the database itself — see projectRows.
    * The caller's `existing` only fills in gaps, so that a row the page knows
    * about is still reused if the lookup could not run.
    */
-  const stored = await slotRows({ projectCode, target })
+  const everyMap = await projectRows(projectCode)
+  const stored = everyMap.filter((map) => sameSlot(map, target))
   const fromCaller = existing.filter((map) => sameSlot(map, target))
   const inSlot = [...stored, ...fromCaller.filter((map) => !stored.some((row) => row.id === map.id))]
 
@@ -202,6 +265,38 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
   const superseded = [...inSlot, ...(replacing && !inSlot.some((map) => map.id === replacing.id) ? [replacing] : [])]
   const reference = replacing?.projectId ? replacing : (inSlot[0] ?? existing[0])
 
+  /*
+   * Where the picture goes. A replacement takes the place of the file it
+   * replaces — same folder, same name — so updating a map adds no folder or
+   * file to the bucket. Only a change of type (a JPG replaced by an SVG) changes
+   * the name's extension, still in the same folder: the extension is how a map
+   * is known to be an SVG. A map for an empty slot follows the folders the
+   * project's other maps already use.
+   */
+  const folder = projectFolder(everyMap.length ? everyMap : [...inSlot, ...existing], bucketName) ?? `${user.id}/${projectCode}`
+  const previousPath = replacing ? pathInBucket(replacing, bucketName) : ''
+  const overwrite = Boolean(previousPath)
+  // A map left under another account's folder moves into the project's; the old file is dropped below.
+  let storagePath = previousPath ? replacementPath(previousPath, folder, file) : ''
+  if (!storagePath) {
+    const safeName = file.name.replace(/[^\w.-]+/g, '_')
+    const random = Math.random().toString(36).slice(2, 13)
+    storagePath = `${folder}/${folderFor(target)}/${Date.now()}_${random}_${safeName}`
+  }
+  // The path can stay the same, so the link carries a version: browsers and the
+  // storage CDN then load the new picture rather than a cached copy of the old.
+  const imageUrl = `${bucket.getPublicUrl(storagePath).data.publicUrl}?v=${Date.now()}`
+
+  const upload = async () => {
+    const { error } = await bucket.upload(storagePath, file, { contentType: file.type, upsert: overwrite, cacheControl: '60' })
+    if (!error) return
+    // A request the browser could not complete: most often a file over the bucket's size limit, or the connection.
+    const hint = /failed to fetch/i.test(error.message)
+      ? ` — the ${(file.size / 1048576).toFixed(1)} MB file may be over the bucket's size limit, or the connection dropped.`
+      : ''
+    throw new Error(`Image upload to the "${bucketName}" bucket failed: ${error.message}${hint}`)
+  }
+
   const fields = {
     project_id: reference?.projectId ?? projectId ?? null,
     phase_id: replacing?.phaseId ?? inSlot[0]?.phaseId ?? null,
@@ -214,26 +309,46 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
     project: reference?.projectLabel || projectCode,
     image_URL: imageUrl,
     Phase: target.phase,
+    map_section: target.section,
     type: target.commercial ? 'commercial' : target.phase === null ? null : 'residential',
     uploaded_at: new Date().toISOString(),
   }
 
-  const { data: saved, error: saveError } = replacing
-    ? await supabase.from('uploads').update(fields).eq('id', replacing.id).select('id')
-    : await supabase.from('uploads').insert(fields).select('id')
-  if (saveError) {
-    // Nothing points at the new file, so it does not stay in the bucket.
-    await bucket.remove([storagePath])
-    throw new Error(saveError.message)
-  }
-  if (!saved?.length) {
-    await bucket.remove([storagePath])
-    // Naming the row makes a policy that forbids the update readable from the UI.
-    throw new Error(
+  // Naming the row makes a policy that forbids the update readable from the UI.
+  const refused = () =>
+    new Error(
       replacing
         ? `The database did not accept the change to map #${replacing.id} — you may not be allowed to edit this row.`
         : 'The database did not accept the new map — you may need to sign in.',
     )
+
+  let saved
+  if (replacing) {
+    /*
+     * Overwriting a file cannot be undone, so the row goes first: if the
+     * database refuses the change, the old picture is never touched. Should the
+     * upload then fail, the row is put back as it was.
+     */
+    const { data: before } = await supabase.from('uploads').select(Object.keys(fields).join(', ')).eq('id', replacing.id).maybeSingle()
+    const { data, error } = await supabase.from('uploads').update(fields).eq('id', replacing.id).select('id')
+    if (error) throw new Error(error.message)
+    if (!data?.length) throw refused()
+    try {
+      await upload()
+    } catch (err) {
+      if (before) await supabase.from('uploads').update(before).eq('id', replacing.id)
+      throw err
+    }
+    saved = data
+  } else {
+    await upload()
+    const { data, error } = await supabase.from('uploads').insert(fields).select('id')
+    // Nothing points at the new file, so it does not stay in the bucket.
+    if (error || !data?.length) {
+      await bucket.remove([storagePath])
+      throw error ? new Error(error.message) : refused()
+    }
+    saved = data
   }
 
   const result = { id: saved[0].id, url: imageUrl, storagePath }
@@ -292,3 +407,6 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
 
   return result
 }
+
+/** The tables fetchProjectMaps reads, so its Refresh button knows what to check. */
+fetchProjectMaps.tables = () => ['uploads']

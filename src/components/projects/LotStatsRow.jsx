@@ -1,35 +1,39 @@
-import { Box, Flex, Icon, SimpleGrid, Text } from '@chakra-ui/react'
-import { LuBadgeCheck, LuCalendarClock, LuCircleCheck, LuGrid2X2 } from 'react-icons/lu'
+import { useState } from 'react'
+import { Box, Flex, Grid, NativeSelect, Text } from '@chakra-ui/react'
 import { Card } from '@/components/ui-kit/Card'
-import { COLORS, LOT_STATUS } from '@/theme/colors'
+import { COLORS } from '@/theme/colors'
 import { formatNumber, formatPct } from '@/utils/format'
 import { DEFAULT_LOT_TERMS } from '@/data/projectsData'
 
-function StatCard({ label, icon, iconColor, value, suffix, suffixColor, barPct, barColor, barLabel }) {
+function StatCard({ label, value, suffix, suffixColor, barPct, barColor, barLabel, primary = false }) {
   const width = Math.min(100, Math.max(0, barPct))
 
   return (
-    <Card p="18px">
-      <Flex align="flex-start" justify="space-between" gap="12px">
-        <Text
-          maxW="14ch"
-          fontFamily="Inter, system-ui, sans-serif"
-          fontWeight="500"
-          fontSize="13px"
-          lineHeight="18px"
-          color={COLORS.subtle}
-        >
-          {label}
-        </Text>
-        <Icon as={icon} boxSize="18px" color={iconColor} flexShrink={0} />
-      </Flex>
+    <Card
+      p={primary ? { base: '20px', md: '24px' } : '18px'}
+      h="full"
+      minH={primary ? { '2xl': '100%' } : undefined}
+      display="flex"
+      flexDirection="column"
+      justifyContent={primary ? 'center' : undefined}
+    >
+      <Text
+        maxW="14ch"
+        fontFamily="Inter, system-ui, sans-serif"
+        fontWeight="500"
+        fontSize="13px"
+        lineHeight="18px"
+        color={COLORS.subtle}
+      >
+        {label}
+      </Text>
 
       <Flex mt="12px" align="baseline" gap="8px" flexWrap="wrap">
         <Text
           fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif"
           fontWeight="700"
-          fontSize="26px"
-          lineHeight="32px"
+          fontSize={primary ? { base: '34px', md: '42px' } : '26px'}
+          lineHeight={primary ? { base: '40px', md: '48px' } : '32px'}
           letterSpacing="-0.6px"
           color={COLORS.heading}
         >
@@ -63,9 +67,11 @@ function StatCard({ label, icon, iconColor, value, suffix, suffixColor, barPct, 
 }
 
 const STATUS_CARDS = [
-  { key: 'available', label: 'Available Inventory', icon: LuCircleCheck },
-  { key: 'reserved', label: 'Active Reservations', icon: LuCalendarClock },
-  { key: 'sold', label: 'Closed & Sold', icon: LuBadgeCheck },
+  { key: 'available', label: 'Available Inventory' },
+  { key: 'reserved', label: 'Active Reservations' },
+  { key: 'rsv-p', label: 'Pending Reservations' },
+  { key: 'hold', label: 'On Hold' },
+  { key: 'sold', label: 'Closed & Sold' },
 ]
 
 /**
@@ -74,42 +80,84 @@ const STATUS_CARDS = [
  * number printed beside it.
  */
 export default function LotStatsRow({ stats, terms = DEFAULT_LOT_TERMS }) {
-  const { totalLots } = stats
+  const phases = Object.keys(stats.byPhase ?? {})
+  const [phase, setPhase] = useState('')
+  // A project switch can replace the options while this component stays mounted.
+  const selectedPhase = phases.includes(phase) ? phase : ''
+  const selectedStats = (selectedPhase && stats.byPhase?.[selectedPhase]) || stats
+  const { totalLots, byStatus = {} } = selectedStats
   const noun = `${terms.item.toLowerCase()}s`
   const share = (count) => (totalLots ? (count / totalLots) * 100 : 0)
 
   return (
-    <SimpleGrid columns={{ base: 1, sm: 2, xl: 4 }} gap="16px">
-      <StatCard
-        label={`Total ${terms.item}s`}
-        icon={LuGrid2X2}
-        iconColor={COLORS.subtle}
-        value={totalLots}
-        suffix="Units Master"
-        suffixColor={COLORS.subtle}
-        barPct={totalLots ? 100 : 0}
-        barColor={COLORS.heading}
-        barLabel={`${totalLots} ${noun} in total`}
-      />
-      {STATUS_CARDS.map((card) => {
-        const status = LOT_STATUS[card.key]
-        const count = stats[card.key]
-        const pct = share(count)
-        return (
-          <StatCard
-            key={card.key}
-            label={card.label}
-            icon={card.icon}
-            iconColor={status.fg}
-            value={count}
-            suffix={formatPct(pct)}
-            suffixColor={status.fg}
-            barPct={pct}
-            barColor={status.dot}
-            barLabel={`${count} ${status.label.toLowerCase()} ${noun}, ${formatPct(pct)} of total`}
-          />
-        )
-      })}
-    </SimpleGrid>
+    <Box>
+      {terms.group && phases.length ? (
+        <Flex justify="flex-end" mb="10px">
+          <NativeSelect.Root size="sm" w="auto" minW="170px">
+            <NativeSelect.Field
+              aria-label={`Filter inventory summary by ${terms.group.toLowerCase()}`}
+              value={selectedPhase}
+              onChange={(event) => setPhase(event.target.value)}
+              h="38px"
+              pl="12px"
+              bg={COLORS.surface}
+              border="1px solid"
+              borderColor={COLORS.border}
+              borderRadius="8px"
+              fontFamily="Inter, system-ui, sans-serif"
+              fontWeight="500"
+              fontSize="13px"
+              color={COLORS.heading}
+              _focusVisible={{ borderColor: COLORS.activeBg, outline: 'none' }}
+            >
+              <option value="">All {terms.group}s</option>
+              {phases.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </NativeSelect.Field>
+            <NativeSelect.Indicator color={COLORS.subtle} />
+          </NativeSelect.Root>
+        </Flex>
+      ) : null}
+      <Grid templateColumns={{ base: '1fr', '2xl': 'repeat(4, 1fr)' }} gap="16px">
+      <Box>
+        <StatCard
+          primary
+          label={`Total ${terms.item}s`}
+          value={totalLots}
+          suffix="Units Master"
+          suffixColor={COLORS.subtle}
+          barPct={totalLots ? 100 : 0}
+          barColor={COLORS.brandGreen}
+          barLabel={`${totalLots} ${noun} in total`}
+        />
+      </Box>
+      <Grid
+        gridColumn={{ '2xl': 'span 3' }}
+        templateColumns={{ base: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)', '2xl': 'repeat(6, 1fr)' }}
+        gap="16px"
+      >
+        {STATUS_CARDS.map((card, index) => {
+          const count = byStatus[card.key] ?? 0
+          const pct = share(count)
+          return (
+            <Box key={card.key} gridColumn={{ '2xl': index < 3 ? 'span 2' : 'span 3' }}>
+              <StatCard
+                label={card.label}
+                value={count}
+                suffix={formatPct(pct)}
+                suffixColor={COLORS.brandGreen}
+                barPct={pct}
+                barColor={COLORS.brandGreen}
+                barLabel={`${count} ${card.label.toLowerCase()} ${noun}, ${formatPct(pct)} of total`}
+              />
+            </Box>
+          )
+        })}
+      </Grid>
+      </Grid>
+    </Box>
   )
 }

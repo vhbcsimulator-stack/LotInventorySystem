@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Flex, Icon, Text } from '@chakra-ui/react'
-import { LuDownload, LuPlus, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
+import { LuBuilding2, LuDownload, LuHammer, LuImages, LuPercent, LuPlus, LuSparkles, LuStar, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
 import ProjectsSkeleton from '@/components/skeletons/ProjectsSkeleton'
 import CategoryPricesDialog from '@/components/projects/CategoryPricesDialog'
+import DiscountsDialog from '@/components/projects/DiscountsDialog'
 import {
   LotDeleteDialog,
   LotDetailsDialog,
@@ -14,7 +15,11 @@ import useDebouncedValue from '@/hooks/useDebouncedValue'
 import useProjectLots from '@/hooks/useProjectLots'
 import ProjectHeader from '@/components/projects/ProjectHeader'
 import ProjectMapView from '@/components/projects/ProjectMapView'
-import DevGalleryView from '@/components/projects/DevGalleryView'
+import LotMapColorPrompt from '@/components/projects/LotMapColorPrompt'
+import { fillForStatus } from '@/components/projects/lotStatusPlan'
+import { DevGalleryDialog } from '@/components/projects/DevGalleryView'
+import FutureProjectsDialog from '@/components/projects/FutureProjectsDialog'
+import { FeaturedProjectsDialog } from '@/components/projects/FeaturedProjectsView'
 import LotImportDialog from '@/components/projects/LotImportDialog'
 import LotStatsRow from '@/components/projects/LotStatsRow'
 import LotFilters from '@/components/projects/LotFilters'
@@ -23,19 +28,40 @@ import SourceNotice from '@/components/SourceNotice'
 import { SUPABASE_ENV, uiStatus } from '@/data/supabase'
 import { DEFAULT_PROJECT_CODE, DEFAULT_SORT, LOT_STATUS_OPTIONS, updateLotStatus } from '@/data/projectsData'
 import { exportLotsCsv } from '@/data/lotImportData'
+import { notifyFailed, notifySaved } from '@/lib/notify'
 import { COLORS } from '@/theme/colors'
 
 const EMPTY_FILTERS = { status: '', phase: '', category: '' }
 
 const PROJECT_ACTIONS = [
-  { value: 'update-prices', label: 'Update category prices', icon: LuTags },
-  { value: 'add-lot', label: 'Add lot', icon: LuPlus },
-  { value: 'import-lots', label: 'Import lots (CSV)', icon: LuUpload },
-  { value: 'export-lots', label: 'Export lots', icon: LuDownload },
+  { value: 'featured-project', label: 'Featured project', icon: LuStar, category: 'Content & media' },
+  { value: 'project-dev', label: 'Project development', icon: LuHammer, category: 'Content & media' },
+  { value: 'future-dev', label: 'Future development', icon: LuSparkles, category: 'Content & media' },
+  { value: 'future-projects', label: 'Future projects', icon: LuBuilding2, category: 'Content & media' },
+  { value: 'flyers', label: 'Flyer pictures', icon: LuImages, category: 'Content & media' },
+  { value: 'update-prices', label: 'Update category prices', icon: LuTags, category: 'Pricing' },
+  { value: 'update-discount', label: 'Update discount', icon: LuPercent, category: 'Pricing' },
+  { value: 'add-lot', label: 'Add lot', icon: LuPlus, category: 'Lots & data' },
+  { value: 'import-lots', label: 'Import lots (CSV)', icon: LuUpload, category: 'Lots & data' },
+  { value: 'export-lots', label: 'Export lots', icon: LuDownload, category: 'Lots & data' },
 ]
 
-export default function ProjectsPage({ initialView = 'table', initialProjectCode = DEFAULT_PROJECT_CODE }) {
-  const [view, setView] = useState(initialView)
+/**
+ * `initialAction` is a Project Actions value — 'add-lot', 'update-discount' and
+ * the rest — run once the rows land, so quick access can open the page with that
+ * dialog already up.
+ */
+export default function ProjectsPage({
+  initialView = 'table',
+  initialProjectCode = DEFAULT_PROJECT_CODE,
+  initialAction = '',
+  initialMapTab = '',
+  initialMapAction = '',
+}) {
+  // Whether `initialAction` has already run, so it fires once and not again.
+  const actionRun = useRef(false)
+  const initialGallery = ['project-dev', 'future-dev', 'flyers'].includes(initialView) ? initialView : ''
+  const [view, setView] = useState(initialView === 'featured' || initialView === 'future-projects' || initialGallery ? 'table' : initialView)
   const [projectCode, setProjectCode] = useState(initialProjectCode)
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState(EMPTY_FILTERS)
@@ -62,7 +88,7 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
     [projectCode, debouncedSearch, filters, sort, page, pageSize],
   )
 
-  const { data: fetched, loading, reload } = useProjectLots(query)
+  const { data: fetched, loading, reload, refresh } = useProjectLots(query)
 
   /*
    * Status edits show immediately. Each edit remembers the payload it was made
@@ -72,7 +98,13 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
   const [savingIds, setSavingIds] = useState(() => new Set())
   const [statusError, setStatusError] = useState('')
   const [pricesOpen, setPricesOpen] = useState(false)
+  const [discountsOpen, setDiscountsOpen] = useState(false)
+  const [featuredOpen, setFeaturedOpen] = useState(initialView === 'featured')
+  const [galleryOpen, setGalleryOpen] = useState(initialGallery)
+  const [futureProjectsOpen, setFutureProjectsOpen] = useState(initialView === 'future-projects')
   const [pricesNotice, setPricesNotice] = useState('')
+  // { lot, status } while the maps are offered the lot's new color, else null.
+  const [mapPrompt, setMapPrompt] = useState(null)
   const [importOpen, setImportOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   // { type: 'details' | 'add' | 'update' | 'delete', lot } for the open lot dialog, or null (lot is null for 'add').
@@ -105,8 +137,32 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
   }
 
   function handleStatusChange(lot, status) {
-    if (status === lot.rawStatus) return
+    if (status === lot.rawStatus || mapPrompt) return
+    /*
+     * A change the map would show in another color waits for the map: nothing is
+     * written until the recolored map is approved, and the status is saved with
+     * it. The row stays busy meanwhile. Lots on no annotated map save at once.
+     */
+    const fill = fillForStatus(status)
+    if (fill && fill !== fillForStatus(lot.rawStatus)) {
+      setStatusError('')
+      setSavingIds((prev) => new Set(prev).add(lot.id))
+      setMapPrompt({ lot, status })
+      return
+    }
     saveStatus(lot, status)
+  }
+
+  /** Close the map prompt and free its row; the prompt reports the outcome in a toast. */
+  function finishMapPrompt() {
+    const id = mapPrompt?.lot.id
+    setMapPrompt(null)
+    setSavingIds((prev) => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    reload()
   }
 
   async function saveStatus(lot, status) {
@@ -115,9 +171,11 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
     setSavingIds((prev) => new Set(prev).add(lot.id))
     try {
       await updateLotStatus(lot.id, status, fetched.project.code)
+      notifySaved('Status updated', `${lot.identifier} is now ${LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status}.`)
       reload()
     } catch (err) {
       console.error('[projects] could not update lot status:', err)
+      notifyFailed(`Could not change ${lot.identifier}`, err)
       setStatusError(`Could not change ${lot.identifier} to "${status}": ${err.message}`)
       // Put the old status back.
       setStatusEdits((prev) => {
@@ -264,10 +322,9 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
   }
 
   /** After an update or delete: close the dialog, say what happened, and re-read the table. */
-  function handleLotChanged(message) {
+  function handleLotChanged() {
     setLotDialog(null)
     setSelectedIds(new Set())
-    setPricesNotice(message)
     reload()
   }
 
@@ -295,9 +352,6 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
       link.remove()
       setTimeout(() => URL.revokeObjectURL(url), 1000)
 
-      const filtered = Boolean(query.search || query.status || query.phase || query.category)
-      const item = data.terms.item.toLowerCase()
-      setPricesNotice(`Exported ${count} ${item}${count === 1 ? '' : 's'}${filtered ? ' matching the current filters' : ''}.`)
     } catch (err) {
       console.error('[projects] could not export lots:', err)
       setStatusError(`Could not export ${data.terms.item.toLowerCase()}s: ${err.message}`)
@@ -305,6 +359,49 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
       setExporting(false)
     }
   }
+
+  /** Run a Project Actions item, whether picked from the menu or from search. */
+  function runAction(action) {
+    if (action === 'featured-project') setFeaturedOpen(true)
+    if (['project-dev', 'future-dev', 'flyers'].includes(action)) setGalleryOpen(action)
+    if (action === 'future-projects') setFutureProjectsOpen(true)
+    if (action === 'update-prices') {
+      setPricesNotice('')
+      setPricesOpen(true)
+    }
+    if (action === 'update-discount') {
+      setPricesNotice('')
+      setDiscountsOpen(true)
+    }
+    if (action === 'import-lots') {
+      setPricesNotice('')
+      setImportOpen(true)
+    }
+    if (action === 'export-lots') handleExport()
+    if (action === 'add-lot') {
+      setPricesNotice('')
+      // Lots live in a per-project table (LOT_TABLES); without one there is nowhere to save.
+      if (!data.hasLotTable) {
+        setStatusError(`Lots can't be added to ${data.project.name || 'this project'} yet — it has no lot table set up.`)
+        return
+      }
+      setStatusError('')
+      setLotDialog({ type: 'add', lot: null })
+    }
+  }
+
+  /*
+   * Quick access can open the page on one of those actions. It waits for the
+   * rows, since an action reads what was loaded, and runs once — closing the
+   * dialog leaves it closed.
+   */
+  useEffect(() => {
+    if (!initialAction || actionRun.current || !data) return
+    actionRun.current = true
+    runAction(initialAction)
+    // runAction is redefined each render; the ref above is what keeps this to once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialAction, data])
 
   // The skeleton table shows the page size in view, so no rows shift on arrival.
   if (loading && !data) return <ProjectsSkeleton rows={pageSize} />
@@ -320,27 +417,7 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
         project={data.project}
         projects={data.projects}
         onProjectChange={handleProjectChange}
-        onAction={(action) => {
-          if (action === 'update-prices') {
-            setPricesNotice('')
-            setPricesOpen(true)
-          }
-          if (action === 'import-lots') {
-            setPricesNotice('')
-            setImportOpen(true)
-          }
-          if (action === 'export-lots') handleExport()
-          if (action === 'add-lot') {
-            setPricesNotice('')
-            // Lots live in a per-project table (LOT_TABLES); without one there is nowhere to save.
-            if (!data.hasLotTable) {
-              setStatusError(`Lots can't be added to ${data.project.name || 'this project'} yet — it has no lot table set up.`)
-              return
-            }
-            setStatusError('')
-            setLotDialog({ type: 'add', lot: null })
-          }
-        }}
+        onAction={runAction}
         view={view}
         onViewChange={handleViewChange}
         // The lot actions follow the project's wording (MSCC: "Add unit", "Export units").
@@ -355,16 +432,40 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
 
       <SourceNotice source={data.source} envVar={SUPABASE_ENV} />
 
+      <FeaturedProjectsDialog
+        open={featuredOpen}
+        projects={data.projects}
+        initialProjectCode={data.project.code}
+        onClose={() => setFeaturedOpen(false)}
+      />
+
+      <DevGalleryDialog
+        open={Boolean(galleryOpen)}
+        gallery={galleryOpen}
+        projectCode={data.project.code}
+        projectName={data.project.name}
+        onClose={() => setGalleryOpen('')}
+      />
+
+      <FutureProjectsDialog
+        open={futureProjectsOpen}
+        projects={data.projects}
+        onClose={() => setFutureProjectsOpen(false)}
+      />
+
       <LotImportDialog
         open={importOpen}
         projectCode={data.project.code}
         projectName={data.project.name}
+        onReserveTypeSaved={(reserveType) => {
+          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType } } : prev))
+          reload()
+        }}
         terms={data.terms}
         onClose={() => setImportOpen(false)}
-        onImported={(message) => {
+        onImported={() => {
           setImportOpen(false)
           setSelectedIds(new Set())
-          setPricesNotice(message)
           reload()
         }}
       />
@@ -374,20 +475,25 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
         open={pricesOpen}
         project={data.project}
         onClose={() => setPricesOpen(false)}
-        onSaved={(repriced) => {
-          setPricesNotice(
-            `Prices saved for ${data.project.name}.` +
-              (data.hasLotTable ? ` ${repriced} lot${repriced === 1 ? '' : 's'} re-priced.` : ''),
-          )
-          reload()
-        }}
+        onSaved={reload}
       />
 
+      <DiscountsDialog
+        key={`discounts-${data.project.code}`}
+        open={discountsOpen}
+        project={data.project}
+        onClose={() => setDiscountsOpen(false)}
+      />
 
       <LotDetailsDialog
         lot={lotDialog?.type === 'details' ? lotDialog.lot : null}
         terms={data.terms}
         projectName={data.project.name}
+        projectCode={data.project.code}
+        onReserveTypeSaved={(reserveType) => {
+          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType } } : prev))
+          reload()
+        }}
         onClose={() => setLotDialog(null)}
       />
       {lotDialog?.type === 'update' || lotDialog?.type === 'add' ? (
@@ -408,9 +514,9 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
           projectCode={data.project.code}
           terms={data.terms}
           onClose={() => setBulkDelete(false)}
-          onDeleted={(message) => {
+          onDeleted={() => {
             setBulkDelete(false)
-            handleLotChanged(message)
+            handleLotChanged()
           }}
         />
       ) : null}
@@ -425,6 +531,25 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
         />
       ) : null}
 
+      <LotMapColorPrompt
+        projectCode={data.project.code}
+        projectId={data.project.id}
+        projectName={data.project.name}
+        request={mapPrompt}
+        onDone={finishMapPrompt}
+        onSkipColoring={() => {
+          const { lot, status } = mapPrompt
+          setMapPrompt(null)
+          saveStatus(lot, status)
+        }}
+        onNoMaps={() => {
+          // No map shows this lot, so there is nothing to approve: save it now.
+          const { lot, status } = mapPrompt
+          finishMapPrompt()
+          saveStatus(lot, status)
+        }}
+      />
+
       {pricesNotice ? (
         <Text role="status" fontFamily="Inter, system-ui, sans-serif" fontSize="13px" color={COLORS.brandGreen}>
           {pricesNotice}
@@ -437,7 +562,7 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
         </Text>
       ) : null}
 
-      <LotStatsRow stats={data.stats} terms={data.terms} />
+      <LotStatsRow key={data.project.code} stats={data.stats} terms={data.terms} />
 
       {/*
         * The tab panel. `key` is the tab, so switching tabs remounts this and the
@@ -450,13 +575,8 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
           projectCode={data.project.code}
           projectName={data.project.name}
           projectId={data.project.id}
-        />
-      ) : view === 'project-dev' || view === 'future-dev' || view === 'flyers' ? (
-        <DevGalleryView
-          key={view}
-          gallery={view}
-          projectCode={data.project.code}
-          projectName={data.project.name}
+          initialTab={initialMapTab}
+          initialAction={initialMapAction}
         />
       ) : (
         <>
@@ -469,6 +589,7 @@ export default function ProjectsPage({ initialView = 'table', initialProjectCode
             onReset={handleReset}
             sort={sort}
             onSortDirToggle={handleSortDirToggle}
+            onRefresh={refresh}
             terms={data.terms}
           />
 

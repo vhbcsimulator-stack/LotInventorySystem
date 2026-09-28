@@ -1,6 +1,7 @@
 import { Box, Flex, Icon, Input, NativeSelect, Text } from '@chakra-ui/react'
 import { LuArrowDown, LuArrowUp, LuRotateCcw, LuSearch, LuX } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
+import RefreshButton from '@/components/ui-kit/RefreshButton'
 import { DEFAULT_LOT_TERMS, SORTABLE_FIELDS } from '@/data/projectsData'
 import { COLORS, LOT_STATUS } from '@/theme/colors'
 
@@ -63,8 +64,8 @@ function Chip({ label, onRemove }) {
 /**
  * Search, filter, and sort controls for the lots table. Phase and category
  * options come from the database via `facets`; statuses are the fixed set the
- * API understands. The phase list is `facets.phaseFilters`, which also carries
- * the per-category entries such as "Phase 1 Commercial".
+ * API understands. The phase list mirrors the distinct values displayed in the
+ * Phase column; category choices remain in the separate category filter.
  */
 export default function LotFilters({
   search,
@@ -75,12 +76,13 @@ export default function LotFilters({
   onReset,
   sort,
   onSortDirToggle,
+  // Re-checks the lots (table and stats) against Supabase; omitted hides the button.
+  onRefresh,
   // What the project calls its lots and their grouping; `group` null hides that filter.
   terms = DEFAULT_LOT_TERMS,
 }) {
   const statusOptions = Object.entries(LOT_STATUS).map(([value, meta]) => ({ value, label: meta.label }))
-  // `phaseFilters` adds the category entries ("Phase 1 Commercial"); `phases` is
-  // the plain list, still used by the add/update form.
+  // Phase filter choices match the values displayed in the system's Phase column.
   const phaseOptions = (facets.phaseFilters ?? facets.phases).map((phase) => ({ value: phase, label: phase }))
   const categoryOptions = facets.categories.map((category) => ({ value: category, label: category }))
 
@@ -184,6 +186,8 @@ export default function LotFilters({
             Reset
           </Text>
         </Flex>
+
+        {onRefresh ? <RefreshButton onRefresh={onRefresh} label={`Refresh ${terms.item.toLowerCase()}s`} size="40px" /> : null}
       </Flex>
 
       <Flex mt="14px" align="center" justify="space-between" gap="12px" flexWrap="wrap">

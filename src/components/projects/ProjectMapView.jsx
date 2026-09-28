@@ -15,12 +15,16 @@ import { LuExpand, LuImagePlus, LuMap, LuRefreshCw, LuZoomIn, LuZoomOut } from '
 import { Card } from '@/components/ui-kit/Card'
 import { MapViewSkeleton } from '@/components/skeletons/ProjectViewSkeletons'
 import SegmentedControl from '@/components/ui-kit/SegmentedControl'
+import RefreshButton from '@/components/ui-kit/RefreshButton'
 import { Reveal } from '@/components/ui-kit/Reveal'
 import AnnotatedImagesPanel from '@/components/projects/AnnotatedImagesPanel'
 import EmptyState from '@/components/EmptyState'
 import useApiQuery from '@/hooks/useApiQuery'
-import { fetchProjectMaps, saveProjectMap, usesFloors } from '@/data/projectMapsData'
+import { fetchProjectMaps, mapTabValue, saveProjectMap, usesFloors } from '@/data/projectMapsData'
+import { refreshTables } from '@/data/queryClient'
 import { COLORS } from '@/theme/colors'
+import { notifyFailed, notifySaved } from '@/lib/notify'
+import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -58,9 +62,6 @@ function ActionButton({ icon, children, tone = 'neutral', loading, ...rest }) {
   )
 }
 
-/** The tab value for annotated images; not a map slot, so it is kept apart. */
-const ANNOTATED = 'annotated'
-
 const ZOOM_MIN = 1
 const ZOOM_MAX = 4
 const ZOOM_STEP = 0.25
@@ -97,12 +98,12 @@ export function ZoomableImage({ src, alt, height, fill = false }) {
   /** Zoom to `nextZoom`, keeping the point (px, py) — relative to the frame centre — fixed. */
   function zoomAt(nextZoom, px = 0, py = 0) {
     setView((prev) => {
-      const z = clampZoom(nextZoom)
+      const z = clampZoom(typeof nextZoom === 'function' ? nextZoom(prev.zoom) : nextZoom)
       const ratio = z / prev.zoom
       return clampPan({ zoom: z, x: px - (px - prev.x) * ratio, y: py - (py - prev.y) * ratio })
     })
   }
-  const change = (delta) => zoomAt(zoom + delta)
+  const change = (delta) => zoomAt((current) => current + delta)
 
   // Ctrl + wheel zooms toward the cursor. React's onWheel is passive, so the
   // browser's own page zoom can only be blocked with a native listener.
@@ -268,21 +269,25 @@ export function FullscreenImageDialog({ open, src, alt, title, onClose }) {
 /** The slot a tab stands for, used as the Add dialog's default. */
 function slotForTab(tabValue, floors) {
   if (tabValue === 'commercial') return { kind: 'commercial', phase: '' }
-  const phase = /^phase-(\d+)$/.exec(tabValue ?? '')?.[1]
-  if (phase) return { kind: 'phase', phase }
+  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(tabValue ?? '')
+  if (match) return { kind: 'phase', phase: match[1], section: match[2] ? match[2].toUpperCase() === 'EAST' ? 'East' : match[2].toUpperCase() : '' }
   // A condominium has no whole-site map, so its default slot is still a floor.
   return floors ? { kind: 'phase', phase: '' } : { kind: 'whole', phase: '' }
 }
 
-function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave }) {
+function AddMapDialog({ open, initialSlot, floors, mvlc, busy, error, onClose, onSave }) {
   const [kind, setKind] = useState(initialSlot.kind)
   const [phase, setPhase] = useState(initialSlot.phase)
+  const [section, setSection] = useState(initialSlot.section || 'A')
   const [file, setFile] = useState(null)
+  const [fileError, setFileError] = useState('')
 
   const unit = floors ? 'Floor' : 'Phase'
   const needsPhase = kind === 'phase'
   const phaseNumber = phase.trim() === '' ? null : Number(phase)
-  const canSave = file && !busy && (!needsPhase || (Number.isInteger(phaseNumber) && phaseNumber > 0))
+  const allowed = phaseNumber === 1 ? ['A', 'B', 'C', 'East'] : phaseNumber === 2 ? ['A', 'B', 'East'] : []
+  const mapSection = mvlc && needsPhase && allowed.length ? (allowed.includes(section) ? section : allowed[0]) : null
+  const canSave = file && !busy && (!needsPhase || (Number.isInteger(phaseNumber) && phaseNumber > 0 && (!mvlc || phaseNumber <= 3)))
 
   const label = (children) => (
     <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
@@ -298,11 +303,12 @@ function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave 
       }}
       placement="center"
       size="sm"
+      scrollBehavior="inside"
     >
       <Portal>
         <Dialog.Backdrop />
         <Dialog.Positioner px="16px">
-          <Dialog.Content borderRadius="16px">
+          <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
                 Add map
@@ -324,28 +330,50 @@ function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave 
                 {kind !== 'whole' ? (
                   <Box>
                     {label(needsPhase ? `${unit} number` : `${unit} number (optional)`)}
-                    <Input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={phase}
-                      onChange={(event) => setPhase(event.target.value)}
-                      placeholder="e.g. 1"
-                    />
+                    {mvlc && needsPhase ? (
+                      <NativeSelect.Root>
+                        <NativeSelect.Field value={phase} onChange={(event) => setPhase(event.target.value)}>
+                          <option value="">Select phase</option>
+                          <option value="1">Phase 1</option>
+                          <option value="2">Phase 2</option>
+                          <option value="3">Phase 3</option>
+                        </NativeSelect.Field>
+                        <NativeSelect.Indicator />
+                      </NativeSelect.Root>
+                    ) : (
+                      <Input type="number" min={1} step={1} value={phase} onChange={(event) => setPhase(event.target.value)} placeholder="e.g. 1" />
+                    )}
+                  </Box>
+                ) : null}
+                {mvlc && needsPhase && allowed.length ? (
+                  <Box>
+                    {label('Section')}
+                    <NativeSelect.Root>
+                      <NativeSelect.Field value={mapSection} onChange={(event) => setSection(event.target.value)}>
+                        {allowed.map((value) => <option key={value} value={value}>{value}</option>)}
+                      </NativeSelect.Field>
+                      <NativeSelect.Indicator />
+                    </NativeSelect.Root>
                   </Box>
                 ) : null}
                 <Box>
                   {label('Image')}
                   <Input
                     type="file"
-                    accept="image/*"
+                    accept={acceptFor('map')}
                     pt="6px"
-                    onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                    onChange={(event) => {
+                      const next = event.target.files?.[0] ?? null
+                      const problem = next ? uploadProblem('map', next) : ''
+                      setFileError(problem)
+                      setFile(problem ? null : next)
+                      if (problem) event.target.value = ''
+                    }}
                   />
+                  <Text mt="4px" fontFamily={FONT} fontSize="12px" color={fileError ? '#B91C1C' : COLORS.subtle} role={fileError ? 'alert' : undefined}>
+                    {fileError || describeUpload('map')}
+                  </Text>
                 </Box>
-                <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
-                  If this slot already has a map, the new image becomes the current one and the old one is kept as history.
-                </Text>
                 {error ? (
                   <Text role="alert" fontFamily={FONT} fontSize="13px" color="#B91C1C">
                     {error}
@@ -353,7 +381,7 @@ function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave 
                 ) : null}
               </Flex>
             </Dialog.Body>
-            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <ActionButton onClick={onClose} disabled={busy}>
                 Cancel
               </ActionButton>
@@ -361,7 +389,7 @@ function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave 
                 tone="primary"
                 loading={busy}
                 disabled={!canSave}
-                onClick={() => onSave({ phase: phaseNumber, commercial: kind === 'commercial' }, file)}
+                onClick={() => onSave({ phase: kind === 'whole' ? null : phaseNumber, section: mapSection, commercial: kind === 'commercial' }, file)}
               >
                 Save map
               </ActionButton>
@@ -382,15 +410,14 @@ function AddMapDialog({ open, initialSlot, floors, busy, error, onClose, onSave 
  * commercial maps, chosen by tab and read from the Supabase `uploads` table.
  * Maps can be added to any slot, and each image can be replaced.
  */
-export default function ProjectMapView({ projectCode, projectName, projectId }) {
-  const [tab, setTab] = useState('')
+export default function ProjectMapView({ projectCode, projectName, projectId, initialTab = '', initialAction = '' }) {
+  const [tab, setTab] = useState(initialTab)
   // The first map only reveals with the panel around it; later tabs reveal themselves.
   const [tabSwitched, setTabSwitched] = useState(false)
   const floors = usesFloors(projectCode)
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState('') // '' | 'add' | <map id being replaced>
   const [error, setError] = useState('')
-  const [notice, setNotice] = useState('')
   const [fullscreen, setFullscreen] = useState(null) // the map shown in the fullscreen modal
   const replaceInput = useRef(null)
   const replaceTarget = useRef(null)
@@ -398,30 +425,25 @@ export default function ProjectMapView({ projectCode, projectName, projectId }) 
   const query = useMemo(() => ({ projectCode }), [projectCode])
   const { data, loading, reload } = useApiQuery(fetchProjectMaps, query)
 
-  /*
-   * The Annotated tab always sits at the end, whether or not the project has any
-   * annotated images yet — it is where they are uploaded, so it cannot appear
-   * only once one exists the way the map tabs do.
-   */
-  const tabs = [...(data?.tabs ?? []), { value: ANNOTATED, label: 'Annotated', maps: [] }]
-  // A floor tab can disappear when the project changes; fall back to the first tab.
+  const tabs = data?.tabs ?? []
+  // A floor tab can disappear when the project changes (and the old Annotated
+  // tab is gone); fall back to the first tab.
   const active = tabs.find((option) => option.value === tab) ?? tabs[0]
-  const onAnnotated = active?.value === ANNOTATED
   const canEdit = data?.source === 'database' && Boolean(projectCode)
 
   async function save(target, file, mode, replaceId = null) {
     setBusy(mode)
     setError('')
-    setNotice('')
     try {
       await saveProjectMap({ projectCode, projectId, target, file, existing: data?.maps ?? [], replaceId })
       setAdding(false)
-      setNotice(mode === 'add' ? 'Map added.' : 'Map image replaced.')
+      notifySaved(mode === 'add' ? 'Map added' : 'Map image replaced')
       // Jump to the tab the map landed in.
-      setTab(target.commercial ? 'commercial' : target.phase === null ? 'whole' : `phase-${target.phase}`)
+      setTab(mapTabValue(target))
       reload()
     } catch (err) {
       setError(err.message)
+      notifyFailed(mode === 'add' ? 'Could not add the map' : 'Could not replace the map image', err)
     } finally {
       setBusy('')
     }
@@ -438,7 +460,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId }) 
     event.target.value = ''
     const map = replaceTarget.current
     // The map's own id goes with it: replacing rewrites that row, never adds one.
-    if (file && map) save({ phase: map.phase, commercial: map.commercial }, file, map.id, map.id)
+    if (file && map) save({ phase: map.phase, section: map.section, commercial: map.commercial }, file, map.id, map.id)
   }
 
   if (loading && !data) return <MapViewSkeleton />
@@ -461,9 +483,36 @@ export default function ProjectMapView({ projectCode, projectName, projectId }) 
         {/*
           * Shown on every map tab, filled or not: a slot that already has a map
           * still needs a way to add another one for a different phase, and
-          * uploading into an occupied slot keeps the old image as history.
+          * uploading into an occupied slot replaces its map in place — the same
+          * row, and the same file in the bucket.
           */}
-        {canEdit && !onAnnotated ? (
+        <Flex align="center" gap="8px" flexWrap="wrap">
+        {/*
+          * One button for the maps and the annotated images beside them: the
+          * outlines are drawn over these maps, so they refresh together.
+          */}
+        <RefreshButton onRefresh={() => refreshTables(['uploads', 'annotated_images'])} label="Refresh maps" size="34px" />
+        {/*
+          * The lot outlines of the map in view, and Color lots for painting
+          * statuses onto it; `slots` names each map as its tab does.
+          */}
+        {active ? (
+          <AnnotatedImagesPanel
+            projectCode={projectCode}
+            projectName={projectName}
+            projectId={projectId}
+            slot={active.value}
+            hasMap={active.maps.length > 0}
+            slots={tabs.map(({ value, label }) => ({ value, label }))}
+            startColoring={initialAction === 'color-lots'}
+            onSelectSlot={(next) => {
+              setTabSwitched(true)
+              setTab(next)
+            }}
+            ActionButton={ActionButton}
+          />
+        ) : null}
+        {canEdit ? (
           <ActionButton
             tone="primary"
             icon={LuImagePlus}
@@ -476,48 +525,37 @@ export default function ProjectMapView({ projectCode, projectName, projectId }) 
             Add map
           </ActionButton>
         ) : null}
-        <input ref={replaceInput} type="file" accept="image/*" hidden onChange={handleReplaceFile} />
+        </Flex>
+        <input ref={replaceInput} type="file" accept={acceptFor('map')} hidden onChange={handleReplaceFile} />
       </Flex>
 
-      {notice && !onAnnotated ? (
-        <Text role="status" mb="12px" fontFamily={FONT} fontSize="13px" color={COLORS.brandGreen}>
-          {notice}
-        </Text>
-      ) : null}
-      {error && !adding && !onAnnotated ? (
+      {error && !adding ? (
         <Text role="alert" mb="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
           {error}
         </Text>
       ) : null}
 
       {/* Each map tab reveals as it arrives; `key` replays it on every switch. */}
-      <Reveal key={onAnnotated ? ANNOTATED : (active?.value ?? 'none')} animate={tabSwitched}>
-      {onAnnotated ? (
-        /*
-         * `slots` is the map tabs themselves, so annotations are filed under the
-         * same names the tabs use: Whole Map, Phase 1, Floor 3, Commercial.
-         */
-        <AnnotatedImagesPanel
-          projectCode={projectCode}
-          projectName={projectName}
-          projectId={projectId}
-          slots={tabs.filter((option) => option.value !== ANNOTATED).map(({ value, label }) => ({ value, label }))}
-          ActionButton={ActionButton}
-          onOpenFullscreen={(image, label) =>
-            setFullscreen({ url: image.url, name: `${projectName || projectCode} — ${label} (annotated)` })
-          }
-        />
-      ) : active && active.maps.length > 0 ? (
+      <Reveal key={active?.value ?? 'none'} animate={tabSwitched}>
+      {active && active.maps.length > 0 ? (
         <Flex direction="column" gap="18px" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
           {active.maps.map((map) => (
             <Box key={map.id}>
               <Flex align="center" justify="space-between" gap="12px" mb="8px" flexWrap="wrap">
                 <Text fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading} truncate minW={0} flex="1">
-                  {active.maps.length > 1 && map.caption ? `${map.caption} · ` : ''}
-                  {map.name}
+                  {/* The file name is not shown; a caption only tells several maps apart. */}
+                  {active.maps.length > 1 ? map.caption : ''}
                 </Text>
-                <Flex align="center" gap="8px">
-                  <ActionButton icon={LuExpand} onClick={() => setFullscreen(map)}>
+                <Flex align="center" gap="8px" flexWrap="wrap">
+                  <ActionButton
+                    icon={LuExpand}
+                    onClick={() =>
+                      setFullscreen({
+                        ...map,
+                        name: `${projectName || projectCode} — ${active.label}${active.maps.length > 1 && map.caption ? ` · ${map.caption}` : ''}`,
+                      })
+                    }
+                  >
                     Open full size
                   </ActionButton>
                   {canEdit ? (
@@ -565,6 +603,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId }) 
           open
           initialSlot={slotForTab(active?.value, floors)}
           floors={floors}
+          mvlc={/^mvlc$/i.test(projectCode ?? '')}
           busy={busy === 'add'}
           error={error}
           onClose={() => {
