@@ -394,7 +394,12 @@ async function fetchSummary(table, terms) {
         .map((row) => [`${row.phase}|${text(row.map_section)}`, { phase: row.phase, section: text(row.map_section) || null }]),
     ).values(),
   ].sort((a, b) => a.phase - b.phase || text(a.section).localeCompare(text(b.section)))
-  const categories = [...new Set(rows.map((row) => row.category).filter(Boolean))].sort()
+  const stored = [...new Set(rows.map((row) => row.category).filter(Boolean))]
+  // "Commercial" (every commercial grade) is offered whenever any commercial lot
+  // exists, even if none is graded plain commercial.
+  const categories = [
+    ...new Set([...stored, ...(stored.some((category) => category.includes('commercial')) ? ['commercial'] : [])]),
+  ].sort()
   const stats = countRows(rows)
   stats.byPhase = Object.fromEntries(
     phases.map(({ phase, section }) => [
@@ -440,7 +445,11 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
     if (tracksSections && section) filtered = filtered.eq('map_section', section)
     if (tracksSections && phase !== null && !section) filtered = filtered.is('map_section', null)
     if (category) filtered = filtered.eq('category', category)
-    if (categoryByLabel[query.category]) filtered = filtered.eq('category', categoryByLabel[query.category])
+    // "Commercial" means every commercial grade — Corner and Prime too — as a
+    // search for "commercial" finds; the other categories match exactly.
+    const pickedCategory = categoryByLabel[query.category]
+    if (pickedCategory === 'commercial') filtered = filtered.ilike('category', '%commercial%')
+    else if (pickedCategory) filtered = filtered.eq('category', pickedCategory)
     return filtered
   }
 
