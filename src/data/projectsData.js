@@ -261,6 +261,27 @@ export const DEFAULT_SORT = { by: 'phase', dir: 'asc' }
 
 const byLotNo = (a, b) => a.lotNo.localeCompare(b.lotNo, undefined, { numeric: true, sensitivity: 'base' })
 
+/**
+ * The block and lot of a "B12 L5A" / "B23-B L1" / "C L1" identifier, as
+ * { block: 'B12' | 'B23-B' | 'C', lot: '5A' }; nulls for any other form.
+ */
+export function parseBlockLot(lotNo) {
+  const matched = /^(B\d+(?:-[A-Z])?|C)\s*L\s*(\d+[A-Z]?)$/i.exec(text(lotNo).trim())
+  return matched ? { block: matched[1].toUpperCase(), lot: matched[2].toUpperCase() } : { block: null, lot: null }
+}
+
+/** The More filters Block / Lot choice — both picked from lists, so matched exactly. */
+function matchesBlockLot(lotNo, block, lot) {
+  if (!block && !lot) return true
+  const parsed = parseBlockLot(lotNo)
+  if (block && parsed.block !== block.toUpperCase()) return false
+  return !lot || parsed.lot === lot.toUpperCase()
+}
+
+const naturally = (a, b) => a.localeCompare(b, undefined, { numeric: true })
+// Blocks in natural order (B2 before B10), commercial C last.
+const byBlock = (a, b) => (a === 'C' ? 1 : b === 'C' ? -1 : naturally(a, b))
+
 /** Ascending comparators; ties always fall back to phase, then natural lot number. */
 const SORTERS = {
   phase: (a, b) => (a.phaseNo ?? Infinity) - (b.phaseNo ?? Infinity),
@@ -288,7 +309,7 @@ export const EMPTY_PROJECT_LOTS = {
   // Project-wide counts. Unlike `lots`/`total`, these ignore the table filters.
   stats: { totalLots: 0, available: 0, reserved: 0, sold: 0, byStatus: {}, byPhase: {} },
   // Filter options come from the database, never a hardcoded list.
-  facets: { phases: [], phaseFilters: [], categories: [] },
+  facets: { phases: [], phaseFilters: [], categories: [], blockLotsByPhase: {} },
   // [{ id, identifier, phase, category, areaSqm, pricePerSqm, tcp, vatInclusive, status, rawStatus }]
   lots: [],
   total: 0, // lots matching the current filters, across every page
@@ -368,7 +389,7 @@ async function fetchProjects() {
 async function fetchSummary(table, terms) {
   const tracksSections = table === LOT_TABLES.MVLC
   const rows = await cached(['lot-summary', table], () =>
-    fetchAllRows(table, `phase, category, status${tracksSections ? ', map_section' : ''}`),
+    fetchAllRows(table, `lot_no, phase, category, status${tracksSections ? ', map_section' : ''}`),
   )
 
   /*
@@ -400,6 +421,30 @@ async function fetchSummary(table, terms) {
   const categories = [
     ...new Set([...stored, ...(stored.some((category) => category.includes('commercial')) ? ['commercial'] : [])]),
   ].sort()
+  // Blocks for More filters, in natural order (B2 before B10) with commercial C last.
+  /*
+   * For More filters: each phase filter's blocks and each block's lots, as
+   * { 'Phase 1': { B1: ['1', '2', '5A'], C: ['1'] } }, so the choices only ever
+   * name lots that exist in the phase picked.
+   */
+  const blockLots = {}
+  rows.forEach((row) => {
+    const { block, lot } = parseBlockLot(row.lot_no)
+    if (!block || row.phase === null) return
+    const phase = phaseLabel(row.phase, terms, text(row.map_section) || null)
+    const inPhase = (blockLots[phase] ??= {})
+    ;(inPhase[block] ??= new Set()).add(lot)
+  })
+  const blockLotsByPhase = Object.fromEntries(
+    Object.entries(blockLots).map(([phase, blocks]) => [
+      phase,
+      Object.fromEntries(
+        Object.keys(blocks)
+          .sort(byBlock)
+          .map((block) => [block, [...blocks[block]].sort(naturally)]),
+      ),
+    ]),
+  )
   const stats = countRows(rows)
   stats.byPhase = Object.fromEntries(
     phases.map(({ phase, section }) => [
@@ -416,6 +461,8 @@ async function fetchSummary(table, terms) {
       // Keep this identical to the distinct values displayed in the Phase column.
       phaseFilters: terms.group ? phases.map(({ phase, section }) => phaseLabel(phase, terms, section)) : [],
       categories: categories.map(categoryLabel),
+      // Empty for a project whose identifiers are not block-and-lot, which hides the filter.
+      blockLotsByPhase: terms.group ? blockLotsByPhase : {},
     },
     categoryByLabel: Object.fromEntries(categories.map((category) => [categoryLabel(category), category])),
   }
@@ -536,8 +583,9 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
       .replace(/(phase|tower)\s+(\d+)/g, '$1#$2')
       .replace(/,/g, '')
   const words = normalize(query.search).split(/\s+/).filter(Boolean)
+  const inBlockLot = lots.filter((lot) => matchesBlockLot(lot.lotNo, query.block, query.lot))
   const matches = words.length
-    ? lots.filter((lot) => {
+    ? inBlockLot.filter((lot) => {
         const haystack = normalize(
           [
             lot.identifier,
@@ -555,7 +603,7 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
             : haystack.includes(word),
         )
       })
-    : lots
+    : inBlockLot
 
   const primary = SORTERS[query.sortBy] ?? SORTERS[DEFAULT_SORT.by]
   const direction = query.sortDir === 'desc' ? -1 : 1

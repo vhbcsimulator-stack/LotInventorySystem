@@ -31,7 +31,7 @@ import { exportLotsCsv } from '@/data/lotImportData'
 import { notifyFailed, notifySaved } from '@/lib/notify'
 import { COLORS } from '@/theme/colors'
 
-const EMPTY_FILTERS = { status: '', phase: '', category: '' }
+const EMPTY_FILTERS = { status: '', phase: '', category: '', block: '', lot: '' }
 
 const PROJECT_ACTIONS = [
   { value: 'featured-project', label: 'Featured project', icon: LuStar, category: 'Content & media' },
@@ -80,12 +80,14 @@ export default function ProjectsPage({
       status: filters.status,
       phase: filters.phase,
       category: filters.category,
+      block: filters.block,
+      lot: filters.lot,
       sortBy: sort.by,
       sortDir: sort.dir,
       page,
       pageSize,
     }),
-    [projectCode, debouncedSearch, filters, sort, page, pageSize],
+    [projectCode, debouncedSearch, filters.status, filters.phase, filters.category, filters.block, filters.lot, sort, page, pageSize],
   )
 
   const { data: fetched, loading, reload, refresh } = useProjectLots(query)
@@ -217,7 +219,13 @@ export default function ProjectsPage({
   }
 
   function handleFilterChange(patch) {
-    setFilters((prev) => ({ ...prev, ...patch }))
+    /*
+     * Block and Lot list only what the chosen phase (and block) holds, so a new
+     * phase clears both and a new block clears the lot, rather than leave a pick
+     * that no longer exists and an empty table.
+     */
+    const cleared = 'phase' in patch ? { block: '', lot: '' } : 'block' in patch ? { lot: '' } : {}
+    setFilters((prev) => ({ ...prev, ...cleared, ...patch }))
     resetPaging()
   }
 
@@ -407,7 +415,7 @@ export default function ProjectsPage({
   if (loading && !data) return <ProjectsSkeleton rows={pageSize} />
 
   // Reflects what the database was actually asked, not the half-typed input.
-  const hasFilters = Boolean(debouncedSearch || filters.status || filters.phase || filters.category)
+  const hasFilters = Boolean(debouncedSearch || filters.status || filters.phase || filters.category || filters.block || filters.lot)
 
   return (
     /* Past the skeleton: the page itself arriving, tabs and table together. */

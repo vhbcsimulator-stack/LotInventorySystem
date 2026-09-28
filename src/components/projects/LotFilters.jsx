@@ -85,6 +85,19 @@ export default function LotFilters({
   // Phase filter choices match the values displayed in the system's Phase column.
   const phaseOptions = (facets.phaseFilters ?? facets.phases).map((phase) => ({ value: phase, label: phase }))
   const categoryOptions = facets.categories.map((category) => ({ value: category, label: category }))
+  /*
+   * Block / Lot appear once a phase is picked, listing
+   * only that phase's blocks — and the lots of the chosen block, or of the whole
+   * phase when no block is chosen. Offered only where identifiers read "B12 L5".
+   */
+  const phaseBlocks = (filters.phase && facets.blockLotsByPhase?.[filters.phase]) || {}
+  const blockOptions = Object.keys(phaseBlocks).map((block) => ({ value: block, label: block === 'C' ? 'C (Commercial)' : block }))
+  const lotOptions = [
+    ...new Set(filters.block ? (phaseBlocks[filters.block] ?? []) : Object.values(phaseBlocks).flat()),
+  ]
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    .map((lot) => ({ value: lot, label: `L${lot}` }))
+  const hasBlocks = blockOptions.length > 0
 
   const trimmed = search.trim()
   const chips = [
@@ -100,6 +113,8 @@ export default function LotFilters({
       label: filters.category,
       clear: () => onFilterChange({ category: '' }),
     },
+    filters.block && { key: 'block', label: `Block ${filters.block}`, clear: () => onFilterChange({ block: '' }) },
+    filters.lot && { key: 'lot', label: `Lot ${filters.lot}`, clear: () => onFilterChange({ lot: '' }) },
   ].filter(Boolean)
 
   const hasActive = chips.length > 0
@@ -164,6 +179,24 @@ export default function LotFilters({
           options={categoryOptions}
           onChange={(category) => onFilterChange({ category })}
         />
+        {hasBlocks ? (
+          <>
+            <FilterSelect
+              name="block"
+              placeholder="All Blocks"
+              value={filters.block}
+              options={blockOptions}
+              onChange={(block) => onFilterChange({ block })}
+            />
+            <FilterSelect
+              name="lot"
+              placeholder={filters.block ? `All lots in ${filters.block}` : 'All Lots'}
+              value={filters.lot}
+              options={lotOptions}
+              onChange={(lot) => onFilterChange({ lot })}
+            />
+          </>
+        ) : null}
 
         <Box w="1px" h="24px" bg={COLORS.border} display={{ base: 'none', md: 'block' }} />
 
