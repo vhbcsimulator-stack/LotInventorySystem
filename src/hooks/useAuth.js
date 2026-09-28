@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { supabase } from '@/data/supabase'
+import { queryClient } from '@/data/queryClient'
 
 /**
  * The Supabase Auth session. supabase-js keeps it in localStorage and refreshes
@@ -35,9 +36,22 @@ export default function useAuth() {
     if (error) throw error
   }, [])
 
+  /**
+   * Always ends the session on this device. When the server cannot revoke it
+   * (expired token, offline), supabase-js keeps the local session on error, so
+   * a local-only sign-out follows. The data cache goes too, so the next person
+   * to sign in never sees this session's rows.
+   */
   const signOut = useCallback(async () => {
-    const { error } = await supabase.auth.signOut()
-    if (error) console.error('[auth] sign out failed:', error)
+    if (supabase) {
+      const { error } = await supabase.auth.signOut()
+      if (error) {
+        console.error('[auth] server sign out failed, signing out on this device only:', error)
+        await supabase.auth.signOut({ scope: 'local' })
+      }
+    }
+    setSession(null)
+    queryClient.clear()
   }, [])
 
   return { session, user: session?.user ?? null, loading, signIn, signOut }

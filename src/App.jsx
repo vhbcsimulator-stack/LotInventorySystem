@@ -4,6 +4,7 @@ import AppSkeleton from '@/components/skeletons/AppSkeleton'
 import { SkeletonKeyframes } from '@/components/ui-kit/Skeleton'
 import { RevealKeyframes } from '@/components/ui-kit/Reveal'
 import { ChartKeyframes } from '@/components/ui-kit/ChartKeyframes'
+import LogoutDialog from '@/components/LogoutDialog'
 import Sidebar from '@/components/Sidebar'
 import TopBar from '@/components/TopBar'
 import useAuth from '@/hooks/useAuth'
@@ -35,6 +36,9 @@ function App() {
      opens Projects & Lots already on its map tab. */
   const [pageProps, setPageProps] = useState({})
   const { user, loading, signIn, signOut } = useAuth()
+  // Logout asks first; `loggingOut` holds the dialog open until the session has ended.
+  const [logoutOpen, setLogoutOpen] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   useEffect(() => {
     const desktop = window.matchMedia('(min-width: 64rem)')
@@ -62,9 +66,7 @@ function App() {
   function handleNavigate(item) {
     setMenuOpen(false)
     if (item.key === 'logout') {
-      signOut()
-      setPageProps({})
-      setActive('dashboard')
+      setLogoutOpen(true)
       return
     }
     setPageProps({})
@@ -78,6 +80,18 @@ function App() {
    * remounts the page and runs it again instead of landing on one that has
    * already handled it.
    */
+  async function handleLogout() {
+    setLoggingOut(true)
+    try {
+      await signOut()
+      setPageProps({})
+      setActive('dashboard')
+    } finally {
+      setLoggingOut(false)
+      setLogoutOpen(false)
+    }
+  }
+
   function handleRunCommand(command) {
     setMenuOpen(false)
     setPageProps({ ...(command.props ?? {}), commandRun: Date.now() })
@@ -92,6 +106,7 @@ function App() {
       <SkeletonKeyframes />
       <RevealKeyframes />
       <ChartKeyframes />
+      <LogoutDialog open={logoutOpen} busy={loggingOut} onCancel={() => setLogoutOpen(false)} onConfirm={handleLogout} />
       <Sidebar activeKey={active} onNavigate={handleNavigate} minH="auto" h="100%" display={{ base: 'none', lg: 'flex' }} />
       <Drawer.Root open={menuOpen} onOpenChange={({ open }) => setMenuOpen(open)} placement="start">
         <Portal>
