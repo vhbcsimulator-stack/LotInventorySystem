@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Box, Flex, Grid, NativeSelect, Text } from '@chakra-ui/react'
+import { Box, Flex, Grid, Text } from '@chakra-ui/react'
 import { Card } from '@/components/ui-kit/Card'
 import { COLORS } from '@/theme/colors'
 import { formatNumber, formatPct } from '@/utils/format'
@@ -78,49 +77,18 @@ const STATUS_CARDS = [
  * Project-wide inventory counts. Shares are computed here from the counts
  * rather than read from the API, so a percentage can never disagree with the
  * number printed beside it.
+ *
+ * `phase` is the lot table's Phase filter, so one dropdown narrows both the
+ * table and these cards; empty (or a phase this project lacks) shows every lot.
  */
-export default function LotStatsRow({ stats, terms = DEFAULT_LOT_TERMS }) {
-  const phases = Object.keys(stats.byPhase ?? {})
-  const [phase, setPhase] = useState('')
-  // A project switch can replace the options while this component stays mounted.
-  const selectedPhase = phases.includes(phase) ? phase : ''
-  const selectedStats = (selectedPhase && stats.byPhase?.[selectedPhase]) || stats
+export default function LotStatsRow({ stats, phase = '', terms = DEFAULT_LOT_TERMS }) {
+  const selectedStats = (phase && stats.byPhase?.[phase]) || stats
   const { totalLots, byStatus = {} } = selectedStats
   const noun = `${terms.item.toLowerCase()}s`
   const share = (count) => (totalLots ? (count / totalLots) * 100 : 0)
 
   return (
     <Box>
-      {terms.group && phases.length ? (
-        <Flex justify="flex-end" mb="10px">
-          <NativeSelect.Root size="sm" w="auto" minW="170px">
-            <NativeSelect.Field
-              aria-label={`Filter inventory summary by ${terms.group.toLowerCase()}`}
-              value={selectedPhase}
-              onChange={(event) => setPhase(event.target.value)}
-              h="38px"
-              pl="12px"
-              bg={COLORS.surface}
-              border="1px solid"
-              borderColor={COLORS.border}
-              borderRadius="8px"
-              fontFamily="Inter, system-ui, sans-serif"
-              fontWeight="500"
-              fontSize="13px"
-              color={COLORS.heading}
-              _focusVisible={{ borderColor: COLORS.activeBg, outline: 'none' }}
-            >
-              <option value="">All {terms.group}s</option>
-              {phases.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </NativeSelect.Field>
-            <NativeSelect.Indicator color={COLORS.subtle} />
-          </NativeSelect.Root>
-        </Flex>
-      ) : null}
       <Grid templateColumns={{ base: '1fr', '2xl': 'repeat(4, 1fr)' }} gap="16px">
       <Box>
         <StatCard

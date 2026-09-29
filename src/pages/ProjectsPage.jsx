@@ -570,7 +570,8 @@ export default function ProjectsPage({
         </Text>
       ) : null}
 
-      <LotStatsRow key={data.project.code} stats={data.stats} terms={data.terms} />
+      {/* The Phase filter lives in the lot table's bar, so the map tab shows every lot. */}
+      <LotStatsRow key={data.project.code} stats={data.stats} phase={view === 'map' ? '' : filters.phase} terms={data.terms} />
 
       {/*
         * The tab panel. `key` is the tab, so switching tabs remounts this and the
