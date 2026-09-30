@@ -40,7 +40,7 @@ export function annotationIdsForLot(coco, lot) {
  * as written is tried again without its leading C—among commercial lots only,
  * so "C L1" can never land on a residential lot.
  */
-function lotsForLabel(label, lotsByKey) {
+export function lotsForLabel(label, lotsByKey) {
   const key = lotKey(label)
   const exact = lotsByKey.get(key) ?? []
   if (exact.length) return exact

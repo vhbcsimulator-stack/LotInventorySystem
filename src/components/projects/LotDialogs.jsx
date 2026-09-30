@@ -245,7 +245,7 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
     (terms.group !== DEFAULT_LOT_TERMS.group ||
       phases.length > 0 ||
       Boolean(PRICE_CONFIG[projectCode]?.scopes.some((scope) => scope.phase !== undefined)))
-  // Land projects share one set of categories; MSCC grades units by fit-out. An
+  // Land projects share one set of categories; MSCC grades units by bedrooms. An
   // existing lot keeps an unusual category of its own either way.
   const categoryOptions = [...new Set([...categoriesFor(projectCode), lot?.rawCategory].filter(Boolean))]
 

@@ -1,6 +1,7 @@
 import { Box, Flex, Icon, Menu, NativeSelect, Portal, Text } from '@chakra-ui/react'
 import {
   LuChevronDown,
+  LuCirclePause,
   LuFolderKanban,
   LuMap,
   LuMountain,
@@ -14,7 +15,7 @@ const VIEWS = [
   { value: 'map', label: 'Map', icon: LuMap },
 ]
 
-const ACTION_CATEGORIES = ['Content & media', 'Pricing', 'Lots & data']
+const ACTION_CATEGORIES = ['Content & media', 'Pricing', 'Lots & data', 'Project']
 
 /**
  * Project identity, view switch, and the project-level action menu. Every value
@@ -57,7 +58,27 @@ export default function ProjectHeader({
             >
               {hasProject ? project.name : 'No project loaded'}
             </Text>
-
+            {project.paused ? (
+              <Flex
+                as="span"
+                display="inline-flex"
+                align="center"
+                gap="5px"
+                mt="6px"
+                px="9px"
+                py="3px"
+                borderRadius="full"
+                bg="#FEF3E2"
+                color="#92400E"
+                fontFamily="Inter, system-ui, sans-serif"
+                fontWeight="600"
+                fontSize="12px"
+                title="Paused from Project Actions. Its lots can still be edited."
+              >
+                <Icon as={LuCirclePause} boxSize="13px" />
+                Paused
+              </Flex>
+            ) : null}
 
           </Box>
         </Flex>
@@ -86,6 +107,7 @@ export default function ProjectHeader({
                   <option key={option.code} value={option.code}>
                     {option.name === option.code ? option.code : `${option.code} — ${option.name}`}
                     {option.hasLots ? '' : ' (no lots yet)'}
+                    {option.paused ? ' (paused)' : ''}
                   </option>
                 ))}
               </NativeSelect.Field>

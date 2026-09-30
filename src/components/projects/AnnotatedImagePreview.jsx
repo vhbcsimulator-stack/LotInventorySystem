@@ -25,9 +25,10 @@ import useLotPainter from '@/components/projects/useLotPainter'
 import { TOLERANCE_DEFAULT, TOLERANCE_MAX, TOLERANCE_MIN } from '@/components/projects/lotRecolor'
 import { DEFAULT_PALETTE, hexToHsv, hsvToHex, isDefaultPalette, loadPalette, savePalette } from '@/components/projects/legendPalette'
 import { frameMisfit, isSvgUrl } from '@/lib/svgMaps'
-import { planStatusUpdate } from '@/components/projects/lotStatusPlan'
+import { lotsForLabel, planStatusUpdate } from '@/components/projects/lotStatusPlan'
 import { LOT_STATUS_OPTIONS } from '@/data/projectsData'
-import { COLORS, MAP_LOT_FILL } from '@/theme/colors'
+import { uiStatus } from '@/data/supabase'
+import { COLORS, LOT_STATUS, MAP_LOT_FILL } from '@/theme/colors'
 
 /** The brush that removes a lot's new colour, leaving the map's own. */
 const ORIGINAL = 'original'
@@ -69,8 +70,11 @@ const NONE = []
 
 const FONT = 'Inter, system-ui, sans-serif'
 
-/** Outline colour for an unselected shape, cycled so neighbours stay apart. */
-const SHAPE_COLORS = ['#2563EB', '#0F9D58', '#D97706', '#7C3AED', '#DB2777', '#0891B2']
+/*
+ * Every annotation is outlined in one colour with no fill, so the map's own lot
+ * colours show through untouched.
+ */
+const OUTLINE = '#1D4ED8'
 const SELECTED = '#000'
 
 const ZOOM_MIN = 1
@@ -128,11 +132,87 @@ function toShapes(coco) {
     return {
       id: annotation.id ?? index,
       label: names.get(annotation.category_id) ?? `Annotation ${index + 1}`,
-      color: SHAPE_COLORS[index % SHAPE_COLORS.length],
+      color: OUTLINE,
       rings: rings.length ? rings : boxRing,
       fromBox: !rings.length && Boolean(box),
     }
   })
+}
+
+/**
+ * The lot behind the selected outline — lot number, status, and size — matched
+ * by the outline's label as saving a coloring would match it. An identifier
+ * used in more than one phase lists every lot it can mean.
+ */
+function SelectedLotCard({ shape, lotsByKey, error, canLookUp, onClose }) {
+  const lots = lotsByKey ? lotsForLabel(shape.label, lotsByKey) : []
+  const statusLabel = (status) => LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? (status || '—')
+  const row = (label, value) => (
+    <Flex justify="space-between" gap="16px">
+      <Text color={COLORS.subtle}>{label}</Text>
+      <Text fontWeight="600" color={COLORS.heading} textAlign="right">
+        {value}
+      </Text>
+    </Flex>
+  )
+
+  let body
+  if (!canLookUp) body = <Text color={COLORS.subtle}>Lot details are not available here.</Text>
+  else if (error) body = <Text color="#B91C1C">Could not load the lots: {error}</Text>
+  else if (!lotsByKey) {
+    body = (
+      <Flex align="center" gap="8px" color={COLORS.subtle}>
+        <Spinner size="xs" /> Loading lot…
+      </Flex>
+    )
+  } else if (!lots.length) body = <Text color={COLORS.subtle}>No lot in the table has this identifier.</Text>
+  else {
+    body = lots.map((lot, index) => {
+      const status = LOT_STATUS[uiStatus(lot.status)]
+      return (
+        <Flex key={lot.id} direction="column" gap="4px" pt={index ? '8px' : 0} mt={index ? '8px' : 0} borderTop={index ? '1px solid' : 'none'} borderColor={COLORS.border}>
+          {row('Lot No.', lot.lotNo || '—')}
+          <Flex justify="space-between" align="center" gap="16px">
+            <Text color={COLORS.subtle}>Status</Text>
+            <Flex align="center" gap="6px" px="8px" py="1px" borderRadius="full" bg={status?.bg ?? COLORS.hoverBg} color={status?.fg ?? COLORS.heading} fontWeight="600" fontSize="12px">
+              {status ? <Box boxSize="6px" borderRadius="full" bg={status.dot} /> : null}
+              {statusLabel(lot.status)}
+            </Flex>
+          </Flex>
+          {row('Size', lot.areaSqm ? `${Number(lot.areaSqm.toFixed(2)).toLocaleString('en-PH')} sqm` : '—')}
+        </Flex>
+      )
+    })
+  }
+
+  return (
+    <Box
+      position="absolute"
+      top="10px"
+      left="10px"
+      zIndex={2}
+      w="240px"
+      maxW="calc(100% - 20px)"
+      p="12px"
+      bg={COLORS.surface}
+      border="1px solid"
+      borderColor={COLORS.border}
+      borderRadius="10px"
+      boxShadow="0 4px 14px rgba(0,0,0,0.12)"
+      fontFamily={FONT}
+      fontSize="12.5px"
+      // Clicks on the card must not reach the map and pan or deselect.
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      <Flex align="center" justify="space-between" gap="8px" mb="8px">
+        <Text fontWeight="700" fontSize="13.5px" color={COLORS.heading} truncate>
+          {shape.label}
+        </Text>
+        <CloseButton size="2xs" aria-label="Clear selection" onClick={onClose} />
+      </Flex>
+      {body}
+    </Box>
+  )
 }
 
 /**
@@ -213,15 +293,19 @@ const Shapes = memo(function Shapes({ shapes, selected, strokeWidth, onSelect, p
       )),
     )
   }
-  return shapes.map((shape) =>
+  // Border only: the fill is invisible but still takes clicks, so a lot is picked
+  // anywhere inside it. The selected lot is drawn last, on top, in a heavier black.
+  const ordered = selected === null ? shapes : [...shapes.filter((shape) => shape.id !== selected), ...shapes.filter((shape) => shape.id === selected)]
+  return ordered.map((shape) =>
     shape.rings.map((ring, index) => (
       <polygon
         key={`${shape.id}-${index}`}
         points={ring.map(([x, y]) => `${x},${y}`).join(' ')}
-        fill={shape.id === selected ? SELECTED : shape.color}
-        fillOpacity={shape.id === selected ? 0.3 : 0.12}
+        fill="#000"
+        fillOpacity={0}
         stroke={shape.id === selected ? SELECTED : shape.color}
-        strokeWidth={strokeWidth}
+        strokeWidth={shape.id === selected ? strokeWidth * 1.5 : strokeWidth}
+        strokeLinejoin="round"
         cursor="pointer"
         onClick={() => onSelect(shape.id)}
       />
@@ -258,6 +342,12 @@ export default function AnnotatedImagePreview({
    */
   loadLots,
   onSaveUpdate,
+  /*
+   * Read-only twin of `loadLots` for those who cannot colour: it only lets a
+   * selected outline show its lot's number, status, and size. `loadLots` is
+   * used for that too when given.
+   */
+  lookupLots,
   // Optional escape hatches for the two synchronization directions.
   onSkipColoring,
   allowMapOnlySave = false,
@@ -398,6 +488,7 @@ export default function AnnotatedImagePreview({
   // The paints, with the steps before (past) and undone after (future) them.
   const [paintState, setPaintState] = useState({ url, paints: initialPaints, past: [], future: [] })
   const [paintMessage, setPaintMessage] = useState('')
+  const [discardOpen, setDiscardOpen] = useState(false)
   /*
    * Linking clicked areas to lots. A lot colored by clicking has no annotation
    * to name it, so it is linked by hand to a row of the lot table — which is
@@ -405,27 +496,39 @@ export default function AnnotatedImagePreview({
    * paint being linked; the lot list loads the first time it is needed.
    */
   const canLink = Boolean(loadLots)
+  const fetchLots = loadLots ?? lookupLots
   const [linking, setLinking] = useState(null)
   const [lotOptions, setLotOptions] = useState(null) // null until loaded: [{ id, lotNo, key, phase, category, status }]
+  // The same lots by identifier, for naming a selected outline's lot.
+  const [lotsByKey, setLotsByKey] = useState(null)
   const [lotsError, setLotsError] = useState('')
   const lotsRequested = useRef(false)
   function ensureLots() {
-    if (!canLink || lotsRequested.current) return
+    if (!fetchLots || lotsRequested.current) return
     lotsRequested.current = true
-    loadLots().then(
-      (byKey) =>
+    fetchLots().then(
+      (byKey) => {
+        setLotsByKey(byKey)
         setLotOptions(
           [...byKey.values()]
             .flat()
             .map((lot) => ({ ...lot, key: String(lot.lotNo).toLowerCase().replace(/[^a-z0-9]/g, '') }))
             .sort((a, b) => String(a.lotNo).localeCompare(String(b.lotNo), undefined, { numeric: true })),
-        ),
+        )
+      },
       (err) => {
         lotsRequested.current = false
         setLotsError(err.message)
       },
     )
   }
+  // Selecting an outline shows its lot, so the lots load the first time one is picked.
+  useEffect(() => {
+    if (selected !== null) ensureLots()
+    // ensureLots only reads refs and stable props; the selection is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected])
+  const selectedShape = selected === null || painting ? null : shapes.find((shape) => shape.id === selected) ?? null
   function openLinker(paint) {
     setLotsError('')
     ensureLots()
@@ -562,15 +665,17 @@ export default function AnnotatedImagePreview({
     else paintPoint(x, y)
   }
 
-  const svgFileName = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored.svg`
+  const fileNameBase = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored`
+  const svgFileName = `${fileNameBase}.svg`
+  const pngFileName = `${fileNameBase}.png`
 
   async function saveImage() {
     try {
-      // Downloads as SVG, the same file a save stores, so it keeps its full detail.
-      const href = URL.createObjectURL(await painter.toSvgBlob())
+      // PNG is lossless and uses the painter's full working dimensions, not the scaled preview.
+      const href = URL.createObjectURL(await painter.toPngBlob())
       const link = document.createElement('a')
       link.href = href
-      link.download = svgFileName
+      link.download = pngFileName
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -849,8 +954,8 @@ export default function AnnotatedImagePreview({
       onOpenChange={({ open: next }) => {
         if (next) return
         // Unsaved colours are the one thing closing would silently lose.
-        if (paints.length && !window.confirm(closeConfirm)) return
-        onClose()
+        if (paints.length) setDiscardOpen(true)
+        else onClose()
       }}
       placement="center"
       size="cover"
@@ -946,9 +1051,14 @@ export default function AnnotatedImagePreview({
                       position="relative"
                       w="100%"
                       h="100%"
-                      // Kept on its own compositor layer, so a pan moves pixels
-                      // that are already drawn instead of repainting the map.
-                      willChange="transform"
+                      /*
+                       * On its own compositor layer only while dragging, so a pan
+                       * moves pixels already drawn instead of repainting the map.
+                       * Kept on, the layer stays rasterised at 100% and zooming
+                       * only stretches that bitmap, blurring the map; dropping it
+                       * afterwards lets the browser redraw at the zoom shown.
+                       */
+                      willChange={dragging ? 'transform' : 'auto'}
                       transform={`translate(${view.x}px, ${view.y}px) scale(${view.zoom})`}
                       transformOrigin="center"
                       transition={dragging ? 'none' : 'transform 80ms ease-out'}
@@ -986,7 +1096,8 @@ export default function AnnotatedImagePreview({
                         <Shapes
                           shapes={shapes}
                           selected={selected}
-                          strokeWidth={Math.max(1, (canvas.width || 1) / 500)}
+                          // Thin: about 1.4 units on a 2048-wide map, so outlines trace the lots without covering them.
+                          strokeWidth={Math.max(0.75, (canvas.width || 1) / 1500)}
                           onSelect={painting ? (painter.ready ? paintShapeClick : IGNORE) : select}
                           painting={painting}
                           outlined={showShapes}
@@ -1006,6 +1117,15 @@ export default function AnnotatedImagePreview({
                         onLoad={(event) => setNatural({ width: event.target.naturalWidth, height: event.target.naturalHeight })}
                       />
                     </Box>
+                    {selectedShape ? (
+                      <SelectedLotCard
+                        shape={selectedShape}
+                        lotsByKey={lotsByKey}
+                        error={lotsError}
+                        canLookUp={Boolean(fetchLots)}
+                        onClose={() => setSelected(null)}
+                      />
+                    ) : null}
                     {painting && legendDraft ? (
                       <LegendPickBanner
                         picking={picking}
@@ -1347,6 +1467,84 @@ export default function AnnotatedImagePreview({
         onConfirm={() => confirmSave(true)}
         onSaveMapOnly={allowMapOnlySave && review?.plan?.changes.length ? () => confirmSave(false) : null}
       />
+      <DiscardColorsDialog
+        open={discardOpen}
+        message={closeConfirm}
+        onCancel={() => setDiscardOpen(false)}
+        onDiscard={() => {
+          setDiscardOpen(false)
+          onClose()
+        }}
+      />
+    </Dialog.Root>
+  )
+}
+
+/** In-app replacement for the browser confirm shown when closing with unsaved colors. */
+function DiscardColorsDialog({ open, message, onCancel, onDiscard }) {
+  return (
+    <Dialog.Root open={open} onOpenChange={({ open: next }) => !next && onCancel()} placement="center" size="sm">
+      <Portal>
+        <Dialog.Backdrop />
+        <Dialog.Positioner px="16px">
+          <Dialog.Content bg={COLORS.surface} borderRadius="16px" maxW="440px" overflow="hidden">
+            <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px" pr="56px">
+              <Flex align="center" gap="10px">
+                <Icon as={LuTriangleAlert} boxSize="20px" color="#B45309" flexShrink={0} />
+                <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
+                  Discard unsaved colors?
+                </Dialog.Title>
+              </Flex>
+            </Dialog.Header>
+            <Dialog.CloseTrigger asChild top="14px" right="14px">
+              <CloseButton size="sm" />
+            </Dialog.CloseTrigger>
+            <Dialog.Body py="18px">
+              <Text fontFamily={FONT} fontSize="14px" lineHeight="22px" color={COLORS.muted}>
+                {message}
+              </Text>
+            </Dialog.Body>
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+              <Box
+                as="button"
+                type="button"
+                onClick={onCancel}
+                h="38px"
+                px="16px"
+                borderRadius="8px"
+                border="1px solid"
+                borderColor={COLORS.border}
+                bg={COLORS.surface}
+                fontFamily={FONT}
+                fontWeight="600"
+                fontSize="14px"
+                color={COLORS.heading}
+                cursor="pointer"
+                _hover={{ bg: COLORS.hoverBg }}
+              >
+                Keep editing
+              </Box>
+              <Box
+                as="button"
+                type="button"
+                onClick={onDiscard}
+                h="38px"
+                px="16px"
+                borderRadius="8px"
+                bg="#B91C1C"
+                fontFamily={FONT}
+                fontWeight="600"
+                fontSize="14px"
+                color="#FFFFFF"
+                cursor="pointer"
+                _hover={{ bg: '#991B1B' }}
+              >
+                Discard colors
+              </Box>
+            </Dialog.Footer>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
     </Dialog.Root>
   )
 }

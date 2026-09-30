@@ -7,13 +7,15 @@ import {
   LuLogOut,
   LuMegaphone,
   LuUserPlus,
+  LuUsers,
 } from 'react-icons/lu'
 
 const DEFAULT_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: LuLayoutDashboard },
   { key: 'projects', label: 'Projects & Lots', icon: LuBuilding2 },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
-  // { key: 'brokers', label: 'Add Brokers', icon: LuUserPlus },
+  { key: 'brokers', label: 'Add Brokers', icon: LuUserPlus },
+  { key: 'clients', label: 'Clients', icon: LuUsers },
 ]
 
 const DEFAULT_FOOTER_ITEMS = [
@@ -25,12 +27,6 @@ const DEFAULT_BRAND = {
   tagline: 'Building Leisure Lifestyle Community',
   logo: vhbcLogo,
 }
-
-// const DEFAULT_STATUS = {
-//   title: 'VHBC Realty Master',
-//   subtitle: 'v2.4 Production',
-//   icon: LuBuilding2,
-// }
 
 function NavLink({ item, isActive, onSelect }) {
   const isDanger = item.tone === 'danger'

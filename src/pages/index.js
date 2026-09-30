@@ -3,6 +3,7 @@ import DashboardSkeleton from '@/components/skeletons/DashboardSkeleton'
 import ProjectsSkeleton from '@/components/skeletons/ProjectsSkeleton'
 import AnnouncementsSkeleton from '@/components/skeletons/AnnouncementsSkeleton'
 import BrokersSkeleton from '@/components/skeletons/BrokersSkeleton'
+import ClientsSkeleton from '@/components/skeletons/ClientsSkeleton'
 
 /*
  * Each page is its own chunk, so sign-in does not wait on code for pages not yet
@@ -14,6 +15,7 @@ const loaders = {
   projects: () => import('./ProjectsPage'),
   announcements: () => import('./AnnouncementsPage'),
   brokers: () => import('./BrokersPage'),
+  clients: () => import('./ClientsPage'),
 }
 
 /*
@@ -29,6 +31,7 @@ export const PAGE_FALLBACKS = {
   projects: ProjectsSkeleton,
   announcements: AnnouncementsSkeleton,
   brokers: BrokersSkeleton,
+  clients: ClientsSkeleton,
 }
 
 export function preloadPages() {

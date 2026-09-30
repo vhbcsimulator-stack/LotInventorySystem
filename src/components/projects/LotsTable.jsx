@@ -13,9 +13,20 @@ const FIXED_COLUMNS = 6
 
 const NEUTRAL_STATUS = { fg: COLORS.muted, bg: COLORS.hoverBg, dot: COLORS.subtle }
 
-/** Status pill that is also the picker: dot + word, never color alone. */
+/** Status pill that is also the picker: dot + word, never color alone. Without `onChange` it is a plain pill. */
 function StatusSelect({ lot, saving, onChange }) {
   const meta = LOT_STATUS[lot.status] ?? NEUTRAL_STATUS
+
+  if (!onChange) {
+    return (
+      <Flex display="inline-flex" align="center" gap="6px" h="26px" px="10px" borderRadius="full" bg={meta.bg}>
+        <Box boxSize="6px" borderRadius="full" bg={meta.dot} flexShrink={0} />
+        <Text fontFamily="Inter, system-ui, sans-serif" fontWeight="600" fontSize="12px" color={meta.fg} whiteSpace="nowrap">
+          {LOT_STATUS_OPTIONS.find((option) => option.value === lot.rawStatus)?.label ?? (lot.rawStatus || '—')}
+        </Text>
+      </Flex>
+    )
+  }
 
   return (
     <Flex display="inline-flex" align="center" h="26px" pl="10px" borderRadius="full" bg={meta.bg}>
@@ -55,6 +66,36 @@ function StatusSelect({ lot, saving, onChange }) {
         <NativeSelect.Indicator color={meta.fg} />
       </NativeSelect.Root>
     </Flex>
+  )
+}
+
+/**
+ * The Status cell: the pill, then who sold it or who it is reserved for. The
+ * import preview renders this same cell so it shows exactly what the table will.
+ */
+export function LotStatusCell({ lot, saving, onChange }) {
+  return (
+    <>
+      <StatusSelect lot={lot} saving={saving} onChange={onChange} />
+      {lot.rawStatus === 'sold' && lot.soldBy ? (
+        <Text
+          mt="4px"
+          pl="4px"
+          fontFamily="Inter, system-ui, sans-serif"
+          fontSize="11px"
+          color={COLORS.subtle}
+          whiteSpace="nowrap"
+          title={`Sold by ${lot.soldBy}`}
+        >
+          by {lot.soldBy}
+        </Text>
+      ) : null}
+      {lot.status === 'reserved' && lot.reserveType ? (
+        <Text mt="4px" pl="4px" fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} whiteSpace="nowrap">
+          {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}
+        </Text>
+      ) : null}
+    </>
   )
 }
 
@@ -410,25 +451,7 @@ export default function LotsTable({
                       </>
                     ) : null}
                     <Table.Cell {...cellProps}>
-                      <StatusSelect lot={lot} saving={savingIds?.has(lot.id)} onChange={onStatusChange} />
-                      {lot.rawStatus === 'sold' && lot.soldBy ? (
-                        <Text
-                          mt="4px"
-                          pl="4px"
-                          fontFamily="Inter, system-ui, sans-serif"
-                          fontSize="11px"
-                          color={COLORS.subtle}
-                          whiteSpace="nowrap"
-                          title={`Sold by ${lot.soldBy}`}
-                        >
-                          by {lot.soldBy}
-                        </Text>
-                      ) : null}
-                      {lot.status === 'reserved' && lot.reserveType ? (
-                        <Text mt="4px" pl="4px" fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} whiteSpace="nowrap">
-                          {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}
-                        </Text>
-                      ) : null}
+                      <LotStatusCell lot={lot} saving={savingIds?.has(lot.id)} onChange={onStatusChange} />
                     </Table.Cell>
                     <Table.Cell {...cellProps} pr="20px">
                       <RowActions lot={lot} onDetails={onDetails} onRowAction={onRowAction} />

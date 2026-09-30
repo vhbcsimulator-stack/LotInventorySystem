@@ -36,10 +36,10 @@ export const LOT_CATEGORIES = [
 
 /**
  * Projects that sell something other than land offer their own categories. MSCC
- * sells finished condominium units, so it is graded by fit-out, not by corner.
+ * sells condominium units, so it is graded by bedrooms, not by corner.
  */
 export const CATEGORIES_BY_PROJECT = {
-  MSCC: ['bare', 'semi_furnished', 'fully_furnished'],
+  MSCC: ['1_bedroom', '2_bedroom', '2_bedroom_deluxe'],
 }
 export const categoriesFor = (projectCode) => CATEGORIES_BY_PROJECT[projectCode] ?? LOT_CATEGORIES
 
@@ -212,6 +212,11 @@ export const LOT_TABLES = {
   ERHD: 'erhd_lots',
   GLS: 'gls_lots',
   MSCC: 'mscc_lots',
+  // Created by supabase/migrations/20261011_add_rhn_rhm_lcn_mcvc_projects.sql.
+  RHN: 'rhn_lots',
+  RHM: 'rhm_lots',
+  LCN: 'lcn_lots',
+  MCVC: 'mcvc_lots',
 }
 
 export const DEFAULT_PROJECT_CODE = 'MVLC'
@@ -299,6 +304,8 @@ export const EMPTY_PROJECT_LOTS = {
     code: '',
     location: '',
     grossAreaHectares: 0,
+    // Set with Project Actions → Pause project (20261012_add_project_paused.sql).
+    paused: false,
   },
   // What the selected project calls its lots and their grouping — see LOT_TERMS_BY_PROJECT.
   terms: DEFAULT_LOT_TERMS,
@@ -321,7 +328,8 @@ const phaseLabel = (phase, terms = DEFAULT_LOT_TERMS, section = null) =>
   phase === null || phase === undefined || !terms.group
     ? ''
     : `${terms.group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
-const categoryLabel = (category) =>
+/** A stored category as the table shows it: "2_bedroom_deluxe" -> "2 Bedroom Deluxe". */
+export const categoryLabel = (category) =>
   text(category)
     .split('_')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -372,16 +380,26 @@ function emptyPayload(query, source) {
  * re-created), so the newest row — highest id — represents each code.
  */
 async function fetchProjects() {
-  const data = await cached(['projects'], async () =>
-    unwrap(await supabase.from('projects').select('id, code, name').order('id', { ascending: false })).data,
-  )
+  const data = await cached(['projects'], async () => {
+    const read = (columns) => supabase.from('projects').select(columns).order('id', { ascending: false })
+    // `paused` needs 20261012_add_project_paused.sql; until then every project reads as active.
+    const withPaused = await read('id, code, name, paused')
+    if (withPaused.error && /paused/.test(withPaused.error.message)) return unwrap(await read('id, code, name')).data
+    return unwrap(withPaused).data
+  })
   const byCode = new Map()
   data.forEach((row) => {
     const code = text(row.code).trim()
     if (code && !byCode.has(code)) byCode.set(code, row)
   })
   return [...byCode.values()]
-    .map((row) => ({ id: row.id, code: row.code, name: text(row.name, row.code), hasLots: Boolean(LOT_TABLES[row.code]) }))
+    .map((row) => ({
+      id: row.id,
+      code: row.code,
+      name: text(row.name, row.code),
+      hasLots: Boolean(LOT_TABLES[row.code]),
+      paused: row.paused === true,
+    }))
     .sort((a, b) => a.code.localeCompare(b.code))
 }
 
@@ -512,6 +530,8 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
    */
   const unitColumns = terms.unitFields.map((field) => field.column)
   const attempts = [
+    [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for', 'payment_type', 'contract_type'],
+    [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for', 'payment_type'],
     [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for'],
     [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type'],
     ['sold_by'],
@@ -565,6 +585,10 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
       // 'client' or 'company' for a reserved lot; '' for a default reservation or any other status.
       reserveType: text(lot.reserve_type),
       reservedFor: text(lot.reserved_for),
+      // 'cash', 'installment', or '' when unknown or before 20261008_add_lot_payment_type.sql.
+      paymentType: text(lot.payment_type),
+      // 'cts', 'doas', or '' when unknown or before 20261009_add_lot_contract_type.sql.
+      contractType: text(lot.contract_type),
       // Empty strings for a project without unit columns, or before the migration.
       ...Object.fromEntries(terms.unitFields.map((field) => [field.key, text(lot[field.column])])),
     }
@@ -583,7 +607,10 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
       .replace(/(phase|tower)\s+(\d+)/g, '$1#$2')
       .replace(/,/g, '')
   const words = normalize(query.search).split(/\s+/).filter(Boolean)
-  const inBlockLot = lots.filter((lot) => matchesBlockLot(lot.lotNo, query.block, query.lot))
+  // Floor Level (MSCC) is matched here too, since it is not one of the database filters above.
+  const inBlockLot = lots.filter(
+    (lot) => matchesBlockLot(lot.lotNo, query.block, query.lot) && (!query.floor || lot.floorLevel === query.floor),
+  )
   const matches = words.length
     ? inBlockLot.filter((lot) => {
         const haystack = normalize(
@@ -658,7 +685,7 @@ export async function fetchProjectLots(query = {}) {
       projects,
       terms: lotTermsFor(selected?.code),
       project: selected
-        ? { ...EMPTY_PROJECT_LOTS.project, id: selected.id, name: selected.name, code: selected.code }
+        ? { ...EMPTY_PROJECT_LOTS.project, id: selected.id, name: selected.name, code: selected.code, paused: selected.paused }
         : EMPTY_PROJECT_LOTS.project,
     }
 
@@ -673,6 +700,24 @@ export async function fetchProjectLots(query = {}) {
     console.error('[projects] falling back to an empty table:', err)
     return emptyPayload(query, SOURCE.UNAVAILABLE)
   }
+}
+
+/**
+ * Pause or resume a project. Only a flag: the portal shows it as a Paused badge
+ * (and the broker app can read the same column); lots stay fully editable.
+ * Every row with the code is updated, since the projects table repeats codes.
+ * Throws when Supabase is unset, the column is missing, or no row was changed.
+ */
+export async function setProjectPaused(code, paused) {
+  if (!supabase) throw new Error('No database connected.')
+  const { data, error } = await supabase.from('projects').update({ paused }).eq('code', code).select('id')
+  if (error) {
+    if (/paused/.test(error.message)) {
+      throw new Error('The projects table has no paused column yet — run supabase/migrations/20261012_add_project_paused.sql in the Supabase SQL Editor.')
+    }
+    throw error
+  }
+  if (!data?.length) throw new Error(`The database did not accept the change to ${code} — you may need to sign in.`)
 }
 
 /** Every status the lot tables store, as offered by the status picker. */
@@ -858,7 +903,7 @@ export function isLotIdentifierValid(projectCode, value) {
 }
 
 /**
- * The project's lots by identifier (lotKey → [{ id, lotNo, phase, category, status }]),
+ * The project's lots by identifier (lotKey → [{ id, lotNo, phase, category, status, areaSqm }]),
  * narrowed to one phase when `phase` is given. A key can hold several lots —
  * the same identifier in two phases — which callers must treat as ambiguous.
  */
@@ -871,7 +916,7 @@ export async function fetchLotsByIdentifier(projectCode, { phase = null, section
     else if (tracksSections && phase !== null) filtered = filtered.is('map_section', null)
     return filtered
   }
-  const columns = `id, lot_no, phase, category, status${tracksSections ? ', map_section' : ''}`
+  const columns = `id, lot_no, phase, category, status, size_sqm${tracksSections ? ', map_section' : ''}`
   // reserve_type comes from a later migration; without it every lot reads as the default reservation.
   const rows = await fetchAllRows(table, `${columns}, reserve_type`, narrow).catch((err) => {
     if (!/reserve_type/.test(err.message)) throw err
@@ -889,6 +934,7 @@ export async function fetchLotsByIdentifier(projectCode, { phase = null, section
       category: text(row.category),
       status: text(row.status),
       reserveType: text(row.reserve_type),
+      areaSqm: num(row.size_sqm),
     }
     byKey.set(key, [...(byKey.get(key) ?? []), lot])
   })

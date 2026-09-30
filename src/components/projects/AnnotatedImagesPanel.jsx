@@ -383,6 +383,7 @@ export default function AnnotatedImagesPanel({
           fitError={fitError}
           onFitImage={(size) => refit(previewing.image, size)}
           loadLots={canEdit ? () => loadLots(previewing.image) : undefined}
+          lookupLots={() => loadLots(previewing.image)}
           onSaveUpdate={canEdit ? (update) => saveColoredUpdate(previewing.image, update) : undefined}
           allowMapOnlySave={canEdit}
           saving={busy === 'upload'}

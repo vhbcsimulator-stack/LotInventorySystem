@@ -85,7 +85,7 @@ const SECTIONS = [
       { heading: 'Import lots', steps: [
         'In Projects & Lots, select the correct project, then choose Project Actions → Import lots (CSV).',
         'Download the template from the import dialog and fill in its columns. Use one row per lot or unit.',
-        'The template columns are lot_no, phase, category, size_sqm, price_per_sqm, status, and sold_by. Keep the header row in the file.',
+        'The template columns are lot_no, phase, category, size_sqm, status, client, payment_type, cts_doas, and sold_by. Keep the header row in the file.',
         'Choose or drop a .csv file of up to 5 MB. The preview shows new rows, updates, errors, and missing headers.',
         'Correct errors in the file and upload it again. Select Import only after reviewing the changes.',
       ] },
@@ -108,7 +108,7 @@ const SECTIONS = [
       { heading: 'How values appear', points: [
         'Price / sqm is the unit area rate. TCP is total contract price, calculated as area in square metres multiplied by price per sqm.',
         'Categories include Regular, Regular Corner, Prime, Prime Corner, and commercial variants where the project supports them.',
-        'MSCC uses condominium unit categories such as Bare and Fully Furnished. Its unit table hides the land-style price-per-sqm and TCP columns.',
+        'MSCC uses condominium unit categories: 1 Bedroom, 2 Bedroom, and 2 Bedroom Deluxe. Its unit table hides the land-style price-per-sqm and TCP columns.',
       ] },
     ],
   },

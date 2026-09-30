@@ -86,9 +86,10 @@ const keyOf = (paint) => (paint.shapeId !== undefined ? `s:${paint.shapeId}` : `
  * defaults, or colours read off the map's own legend.
  *
  * Returns { ready, error, isSvg, layers, locatePoint(x, y), sampleColor(x, y),
- * toSvgBlob() — async, the map and its coloured lots as one SVG }. `layers` is what the preview draws over the map (see
- * PaintLayers); locatePoint says whether a point is inside a lot and which
- * point-paint (if any) already covers it.
+ * toSvgBlob(), toPngBlob() }. The SVG is used for stored maps; the PNG is a
+ * lossless download rendered at the painter's full working dimensions. `layers`
+ * is what the preview draws over the map (see PaintLayers); locatePoint says
+ * whether a point is inside a lot and which point-paint (if any) already covers it.
  */
 export default function useLotPainter({
   enabled,
@@ -257,6 +258,36 @@ export default function useLotPainter({
     return blob
   }, [pixels, url, width, height, W, H, painted])
 
+  /** The finished SVG rasterised losslessly at the same full size used to find and colour its lots. */
+  const toPngBlob = useCallback(async () => {
+    const svg = await toSvgBlob()
+    const href = URL.createObjectURL(svg)
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const element = new Image()
+        element.onload = () => resolve(element)
+        element.onerror = () => reject(new Error('The colored map could not be rendered as PNG.'))
+        element.src = href
+      })
+      const canvas = document.createElement('canvas')
+      canvas.width = W
+      canvas.height = H
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('The browser could not create the PNG image.')
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(image, 0, 0, W, H)
+      return await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error('The browser could not encode the colored map as PNG.'))),
+          'image/png',
+        )
+      })
+    } finally {
+      URL.revokeObjectURL(href)
+    }
+  }, [toSvgBlob, W, H])
+
   const ready = enabled && Boolean(pixels)
   return {
     ready,
@@ -266,5 +297,6 @@ export default function useLotPainter({
     locatePoint,
     sampleColor: sample,
     toSvgBlob,
+    toPngBlob,
   }
 }

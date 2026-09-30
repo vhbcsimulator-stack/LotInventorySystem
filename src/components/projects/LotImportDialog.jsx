@@ -2,9 +2,11 @@ import { useRef, useState } from 'react'
 import { Box, CloseButton, Dialog, Flex, Icon, Portal, Spinner, Text } from '@chakra-ui/react'
 import { LuDownload, LuFileSpreadsheet, LuTriangleAlert } from 'react-icons/lu'
 import { CSV_TEMPLATE, commitLotImport, previewLotImport } from '@/data/lotImportData'
-import { DEFAULT_LOT_TERMS } from '@/data/projectsData'
+import { DEFAULT_LOT_TERMS, categoryLabel } from '@/data/projectsData'
+import { uiStatus } from '@/data/supabase'
+import { LotStatusCell } from '@/components/projects/LotsTable'
 import { COLORS } from '@/theme/colors'
-import { formatDate, formatNumber } from '@/utils/format'
+import { formatDate, formatNumber, formatPeso } from '@/utils/format'
 import { notifyFailed, notifySaved } from '@/lib/notify'
 import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
 
@@ -64,7 +66,162 @@ function downloadTemplate() {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-const Cell = (props) => <Box as="td" px="10px" py="6px" whiteSpace="nowrap" {...props} />
+const HEADER_BG = '#EEF3FC'
+
+const Cell = (props) => <Box as="td" px="12px" py="10px" whiteSpace="nowrap" textAlign="center" verticalAlign="middle" {...props} />
+
+// Statuses whose lots carry a client, payment type, and CTS/DOAS.
+const SALE_STATUSES = ['reserved', 'rsv-p', 'sold']
+
+/**
+ * A value the import leaves alone: an existing lot keeps what it has stored, so
+ * the preview says so instead of guessing; a new lot starts without one.
+ */
+function Kept({ isUpdate }) {
+  return (
+    <Text as="span" color={COLORS.subtle} fontStyle={isUpdate ? 'italic' : undefined}>
+      {isUpdate ? 'Unchanged' : '—'}
+    </Text>
+  )
+}
+
+/** One preview value: the value, "Unknown" where one was expected, or a dash. */
+function PreviewValue({ value, unknown = false }) {
+  if (value) return <Cell>{value}</Cell>
+  return <Cell color={COLORS.subtle}>{unknown ? 'Unknown' : '—'}</Cell>
+}
+
+/** A preview row in the shape the unit table renders, so the status cell is the table's own. */
+const asTableLot = (row) => ({
+  identifier: row.lot_no,
+  status: uiStatus(row.status),
+  rawStatus: row.status,
+  soldBy: row.sold_by ?? '',
+  reserveType: row.reserve_type ?? '',
+  reservedFor: row.reserved_for ?? '',
+})
+
+/**
+ * What each row will write, laid out like the unit table: its columns, labels,
+ * and formatting first, then the fields that are saved but only shown in a
+ * lot's details (client, payment, CTS/DOAS, agent, last updated).
+ */
+function PreviewTable({ rows, terms }) {
+  const unitFields = terms.unitFields ?? []
+  const showPricing = terms.pricing !== false
+  const heads = [
+    'Row',
+    'Action',
+    terms.identifier,
+    terms.group,
+    'Category',
+    ...unitFields.map((field) => field.label),
+    terms.area,
+    ...(showPricing ? ['Price / sqm', 'TCP'] : []),
+    'Status',
+    'Client',
+    'Payment',
+    'CTS/DOAS',
+    'Sold By',
+    'Last Updated',
+  ].filter(Boolean)
+
+  return (
+    <Box as="table" w="100%" fontFamily={FONT} fontSize="13px" style={{ borderCollapse: 'collapse' }}>
+      <Box as="thead" position="sticky" top="0" zIndex={1} bg={HEADER_BG}>
+        <tr>
+          {heads.map((head) => (
+            <Box
+              as="th"
+              key={head}
+              textAlign="center"
+              px="12px"
+              py="10px"
+              fontWeight="600"
+              fontSize="11px"
+              letterSpacing="0.6px"
+              textTransform="uppercase"
+              color={COLORS.muted}
+              whiteSpace="nowrap"
+            >
+              {head}
+            </Box>
+          ))}
+        </tr>
+      </Box>
+      <tbody>
+        {rows.map((row) => {
+          const isUpdate = Boolean(row.id)
+          const sale = SALE_STATUSES.includes(row.status)
+          return (
+            <Box as="tr" key={row.rowNumber} borderTop="1px solid" borderColor={COLORS.border}>
+              <Cell color={COLORS.subtle}>{row.rowNumber}</Cell>
+              <Cell fontWeight="600" color={isUpdate ? COLORS.activeBg : COLORS.brandGreen}>
+                {isUpdate ? 'Update' : 'New'}
+              </Cell>
+              <Cell fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontWeight="600" fontSize="14px" color={COLORS.heading}>
+                {row.lot_no}
+              </Cell>
+              {terms.group ? <Cell color={COLORS.muted}>{row.phase_label || '—'}</Cell> : null}
+              <Cell fontWeight="600" color={COLORS.heading}>
+                {categoryLabel(row.category) || '—'}
+              </Cell>
+              {unitFields.map((field) => (
+                <Cell key={field.key} color={COLORS.muted}>
+                  {/* Only the columns the file supplies are written; the rest stay as stored. */}
+                  {row[field.column] !== undefined ? row[field.column] || '—' : <Kept isUpdate={isUpdate} />}
+                </Cell>
+              ))}
+              <Cell>
+                <Text fontWeight="600" fontSize="13.5px" color={COLORS.heading}>
+                  {formatNumber(row.size_sqm)}
+                </Text>
+                <Text fontSize="11px" color={COLORS.subtle}>
+                  sqm
+                </Text>
+              </Cell>
+              {showPricing ? (
+                <>
+                  {/* No category price in the database: an existing lot keeps its stored price. */}
+                  <Cell color={COLORS.muted}>{row.price_per_sqm !== null ? formatPeso(row.price_per_sqm) : <Kept isUpdate={isUpdate} />}</Cell>
+                  <Cell fontWeight="700" color={COLORS.heading}>
+                    {row.total !== null ? formatPeso(row.total) : <Kept isUpdate={isUpdate} />}
+                  </Cell>
+                </>
+              ) : null}
+              <Cell>
+                <LotStatusCell lot={asTableLot(row)} />
+              </Cell>
+              {/* A company hold's DD/MSD label is not a client; it shows under Status, as in the table. */}
+              <PreviewValue value={row.reserve_type === 'company' ? '' : row.reserved_for} />
+              {/* Left out of the write when the file has no such column, so the stored value stays. */}
+              {row.payment_type === undefined ? (
+                <Cell>
+                  <Kept isUpdate={isUpdate} />
+                </Cell>
+              ) : (
+                <PreviewValue value={{ cash: 'Cash', installment: 'Installment' }[row.payment_type]} unknown={sale} />
+              )}
+              {row.contract_type === undefined ? (
+                <Cell>
+                  <Kept isUpdate={isUpdate} />
+                </Cell>
+              ) : (
+                <PreviewValue value={{ cts: 'CTS', doas: 'DOAS' }[row.contract_type]} unknown={sale} />
+              )}
+              {/* A blank agent is not written, so an existing lot keeps the one it has. */}
+              <Cell>{row.sold_by ? row.sold_by : <Kept isUpdate={isUpdate} />}</Cell>
+              {/* Blank when the sheet gave no YEAR/MONTH/RSV DATE, matching what will be stored. */}
+              <Cell color={row.date ? COLORS.heading : COLORS.subtle}>
+                {row.date ? formatDate(row.date, { precision: row.precision || 'day' }) : '—'}
+              </Cell>
+            </Box>
+          )
+        })}
+      </tbody>
+    </Box>
+  )
+}
 
 /**
  * Import lots from a CSV: choose or drop a file, review what will be added,
@@ -213,23 +370,6 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
               />
 
               <Flex mt="10px" align="center" justify="space-between" gap="10px" wrap="wrap">
-                <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle} flex="1" minW="240px">
-                  Columns: <b>lot_no</b>
-                  {terms.group ? (
-                    <>
-                      , <b>phase</b> ({projectCode === 'MVLC' ? 'MVLC code such as MV-1A or MV 1 E' : `${terms.group.toLowerCase()} number`})
-                    </>
-                  ) : null}
-                  , <b>category</b>, <b>size_sqm</b>, and optional status, client, sold_by, and a date (year/month
-                  or a full RSV date). {terms.item}s with the same number{terms.group ? ` and ${terms.group.toLowerCase()}` : ''}{' '}
-                  are updated. Sheets that write the category into the phase column need no category column: P is Prime,
-                  PC Prime Corner, C Regular Corner, and no marker at all (just ERHD) is Regular — e.g. ERHD-PC, ERHD-P,
-                  ERHD-C, ERHD, or MV PH1E-C for commercial. The sales sheets' own headings — LOT, Lot Area, SD/SM/REALTY, RSV
-                  DATE — are read as well. The price per sqm is never taken from the file: every {item} gets its
-                  category&apos;s price from Category prices, and TCP follows from it. For an RSV row, a Client value of
-                  Company creates a Company Reserve, a blank Client creates a Default Reserve, and any other Client value creates a
-                  Client Reserve and is saved as the client name.
-                </Text>
                 <Box
                   as="button"
                   type="button"
@@ -294,43 +434,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
 
                   {preview.rows.length ? (
                     <Box mt="14px" border="1px solid" borderColor={COLORS.border} borderRadius="10px" overflow="auto" maxH="260px">
-                      <Box as="table" w="100%" fontFamily={FONT} fontSize="12.5px" style={{ borderCollapse: 'collapse' }}>
-                        <Box as="thead" position="sticky" top="0" bg={COLORS.canvas}>
-                          <tr>
-                            {['Row', 'Action', terms.item, terms.group, 'Category', 'Area', 'Status', 'Last Updated']
-                              .filter(Boolean)
-                              .map((head) => (
-                              <Box as="th" key={head} textAlign="left" px="10px" py="8px" color={COLORS.subtle} fontWeight="600" whiteSpace="nowrap">
-                                {head}
-                              </Box>
-                            ))}
-                          </tr>
-                        </Box>
-                        <tbody>
-                          {(showAllRows ? preview.rows : preview.rows.slice(0, PREVIEW_ROWS)).map((row) => (
-                            <Box as="tr" key={row.rowNumber} borderTop="1px solid" borderColor={COLORS.border}>
-                              <Cell color={COLORS.subtle}>{row.rowNumber}</Cell>
-                              <Cell fontWeight="600" color={row.id ? COLORS.activeBg : COLORS.brandGreen}>
-                                {row.id ? 'Update' : 'New'}
-                              </Cell>
-                              <Cell>{row.lot_no}</Cell>
-                              {terms.group ? <Cell>{row.phase_label ?? row.phase ?? '—'}</Cell> : null}
-                              <Cell>{row.category}</Cell>
-                              <Cell>{formatNumber(row.size_sqm)} sqm</Cell>
-                              <Cell>
-                                {row.status}
-                                {row.reserve_type === 'company' ? ` · Company Reserve${row.reserved_for ? ` · ${row.reserved_for}` : ''}` : ''}
-                                {row.reserve_type === 'client' ? ` · Client Reserve · ${row.reserved_for}` : ''}
-                                {row.sold_by ? ` · ${row.sold_by}` : ''}
-                              </Cell>
-                              {/* Blank when the sheet gave no YEAR/MONTH, matching what will be stored. */}
-                              <Cell color={row.date ? COLORS.heading : COLORS.subtle}>
-                                {row.date ? formatDate(row.date, { precision: row.precision || 'day' }) : '—'}
-                              </Cell>
-                            </Box>
-                          ))}
-                        </tbody>
-                      </Box>
+                      <PreviewTable rows={showAllRows ? preview.rows : preview.rows.slice(0, PREVIEW_ROWS)} terms={terms} />
                       {preview.rows.length > PREVIEW_ROWS ? (
                         <Box
                           as="button"

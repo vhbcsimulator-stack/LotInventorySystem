@@ -43,6 +43,8 @@ const PROJECT_ACTIONS = [
   { value: 'add-lot', label: 'Add lot', keywords: 'new create' },
   { value: 'import-lots', label: 'Import lots (CSV)', keywords: 'upload csv spreadsheet bulk' },
   { value: 'export-lots', label: 'Export lots', keywords: 'download csv spreadsheet' },
+  { value: 'export-mscc-report', label: 'Export MSCC status sheet', keywords: 'download csv spreadsheet report units towers', only: 'MSCC' },
+  { value: 'pause-project', label: 'Pause or resume project', keywords: 'pause resume hold suspend stop activate' },
 ]
 
 const PAGES = [
@@ -95,7 +97,7 @@ export const COMMANDS = [
         props: { initialProjectCode: code, initialView: 'map', initialMapAction: 'color-lots' },
         keywords: `colour lots recolor repaint statuses annotated map ${code}`,
       },
-      ...PROJECT_ACTIONS.map(({ value, label, keywords }) => ({
+      ...PROJECT_ACTIONS.filter((action) => !action.only || action.only === code).map(({ value, label, keywords }) => ({
         id: `project.${code}.action.${value}`,
         label: `${named(label)} — ${code}`,
         group: 'Actions',

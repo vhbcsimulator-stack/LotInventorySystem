@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Flex, Icon, Text } from '@chakra-ui/react'
-import { LuBuilding2, LuDownload, LuHammer, LuImages, LuPercent, LuPlus, LuSparkles, LuStar, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
+import { LuBuilding2, LuCirclePause, LuCirclePlay, LuDownload, LuFileSpreadsheet, LuHammer, LuImages, LuPercent, LuPlus, LuSparkles, LuStar, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
 import ProjectsSkeleton from '@/components/skeletons/ProjectsSkeleton'
 import CategoryPricesDialog from '@/components/projects/CategoryPricesDialog'
 import DiscountsDialog from '@/components/projects/DiscountsDialog'
@@ -21,17 +21,19 @@ import { DevGalleryDialog } from '@/components/projects/DevGalleryView'
 import FutureProjectsDialog from '@/components/projects/FutureProjectsDialog'
 import { FeaturedProjectsDialog } from '@/components/projects/FeaturedProjectsView'
 import LotImportDialog from '@/components/projects/LotImportDialog'
+import PauseProjectDialog from '@/components/projects/PauseProjectDialog'
 import LotStatsRow from '@/components/projects/LotStatsRow'
 import LotFilters from '@/components/projects/LotFilters'
 import LotsTable from '@/components/projects/LotsTable'
 import SourceNotice from '@/components/SourceNotice'
 import { SUPABASE_ENV, uiStatus } from '@/data/supabase'
 import { DEFAULT_PROJECT_CODE, DEFAULT_SORT, LOT_STATUS_OPTIONS, updateLotStatus } from '@/data/projectsData'
-import { exportLotsCsv } from '@/data/lotImportData'
+import { exportLotsCsv, exportMsccReportCsv } from '@/data/lotImportData'
 import { notifyFailed, notifySaved } from '@/lib/notify'
 import { COLORS } from '@/theme/colors'
 
-const EMPTY_FILTERS = { status: '', phase: '', category: '', block: '', lot: '' }
+// `floor` is MSCC's Floor Level; the land projects never set it.
+const EMPTY_FILTERS = { status: '', phase: '', category: '', block: '', lot: '', floor: '' }
 
 const PROJECT_ACTIONS = [
   { value: 'featured-project', label: 'Featured project', icon: LuStar, category: 'Content & media' },
@@ -44,6 +46,10 @@ const PROJECT_ACTIONS = [
   { value: 'add-lot', label: 'Add lot', icon: LuPlus, category: 'Lots & data' },
   { value: 'import-lots', label: 'Import lots (CSV)', icon: LuUpload, category: 'Lots & data' },
   { value: 'export-lots', label: 'Export lots', icon: LuDownload, category: 'Lots & data' },
+  // MSCC only: the unit status sheet in the sales team's layout.
+  { value: 'export-mscc-report', label: 'Export MSCC status sheet', icon: LuFileSpreadsheet, category: 'Lots & data' },
+  // Reads "Resume project" while the project is paused.
+  { value: 'pause-project', label: 'Pause project', icon: LuCirclePause, category: 'Project' },
 ]
 
 /**
@@ -82,12 +88,13 @@ export default function ProjectsPage({
       category: filters.category,
       block: filters.block,
       lot: filters.lot,
+      floor: filters.floor,
       sortBy: sort.by,
       sortDir: sort.dir,
       page,
       pageSize,
     }),
-    [projectCode, debouncedSearch, filters.status, filters.phase, filters.category, filters.block, filters.lot, sort, page, pageSize],
+    [projectCode, debouncedSearch, filters.status, filters.phase, filters.category, filters.block, filters.lot, filters.floor, sort, page, pageSize],
   )
 
   const { data: fetched, loading, reload, refresh } = useProjectLots(query)
@@ -109,6 +116,7 @@ export default function ProjectsPage({
   const [mapPrompt, setMapPrompt] = useState(null)
   const [importOpen, setImportOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [pauseOpen, setPauseOpen] = useState(false)
   // { type: 'details' | 'add' | 'update' | 'delete', lot } for the open lot dialog, or null (lot is null for 'add').
   const [lotDialog, setLotDialog] = useState(null)
   // True while the selected lots are waiting on a delete confirmation.
@@ -336,14 +344,15 @@ export default function ProjectsPage({
     reload()
   }
 
-  /** Download every lot matching the current search, filters, and sort as a CSV. */
-  async function handleExport() {
+  /** Download every lot matching the current search, filters, and sort as a CSV (or, for
+   * 'mscc-report', as MSCC's unit status sheet). */
+  async function handleExport(format = 'lots') {
     if (exporting) return
     setPricesNotice('')
     setStatusError('')
     setExporting(true)
     try {
-      const { csv, count, fileName } = await exportLotsCsv(query)
+      const { csv, count, fileName } = await (format === 'mscc-report' ? exportMsccReportCsv(query) : exportLotsCsv(query))
       if (!count) {
         setStatusError(`There are no ${data.terms.item.toLowerCase()}s to export.`)
         return
@@ -386,6 +395,8 @@ export default function ProjectsPage({
       setImportOpen(true)
     }
     if (action === 'export-lots') handleExport()
+    if (action === 'export-mscc-report') handleExport('mscc-report')
+    if (action === 'pause-project' && data.project.code) setPauseOpen(true)
     if (action === 'add-lot') {
       setPricesNotice('')
       // Lots live in a per-project table (LOT_TABLES); without one there is nowhere to save.
@@ -415,7 +426,7 @@ export default function ProjectsPage({
   if (loading && !data) return <ProjectsSkeleton rows={pageSize} />
 
   // Reflects what the database was actually asked, not the half-typed input.
-  const hasFilters = Boolean(debouncedSearch || filters.status || filters.phase || filters.category || filters.block || filters.lot)
+  const hasFilters = Boolean(debouncedSearch || filters.status || filters.phase || filters.category || filters.block || filters.lot || filters.floor)
 
   return (
     /* Past the skeleton: the page itself arriving, tabs and table together. */
@@ -429,13 +440,24 @@ export default function ProjectsPage({
         view={view}
         onViewChange={handleViewChange}
         // The lot actions follow the project's wording (MSCC: "Add unit", "Export units").
-        actions={PROJECT_ACTIONS.map((item) => {
+        actions={PROJECT_ACTIONS.filter((item) => item.value !== 'export-mscc-report' || data.project.code === 'MSCC').map((item) => {
           const one = data.terms.item.toLowerCase()
           if (item.value === 'add-lot') return { ...item, label: `Add ${one}` }
           if (item.value === 'import-lots') return { ...item, label: `Import ${one}s (CSV)` }
           if (item.value === 'export-lots') return { ...item, label: `Export ${one}s` }
+          if (item.value === 'pause-project' && data.project.paused) return { ...item, label: 'Resume project', icon: LuCirclePlay }
           return item
         })}
+      />
+
+      <PauseProjectDialog
+        open={pauseOpen}
+        project={data.project}
+        onClose={() => setPauseOpen(false)}
+        onSaved={() => {
+          setPauseOpen(false)
+          reload()
+        }}
       />
 
       <SourceNotice source={data.source} envVar={SUPABASE_ENV} />

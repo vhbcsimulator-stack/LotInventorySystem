@@ -98,6 +98,9 @@ export default function LotFilters({
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     .map((lot) => ({ value: lot, label: `L${lot}` }))
   const hasBlocks = blockOptions.length > 0
+  // Condominium projects (MSCC) also filter by Floor Level, from the form's own choices.
+  const floorField = terms.unitFields?.find((field) => field.key === 'floorLevel')
+  const floorOptions = (floorField?.options ?? []).map((floor) => ({ value: floor, label: floor }))
 
   const trimmed = search.trim()
   const chips = [
@@ -115,6 +118,7 @@ export default function LotFilters({
     },
     filters.block && { key: 'block', label: `Block ${filters.block}`, clear: () => onFilterChange({ block: '' }) },
     filters.lot && { key: 'lot', label: `Lot ${filters.lot}`, clear: () => onFilterChange({ lot: '' }) },
+    filters.floor && { key: 'floor', label: filters.floor, clear: () => onFilterChange({ floor: '' }) },
   ].filter(Boolean)
 
   const hasActive = chips.length > 0
@@ -179,6 +183,15 @@ export default function LotFilters({
           options={categoryOptions}
           onChange={(category) => onFilterChange({ category })}
         />
+        {floorField ? (
+          <FilterSelect
+            name="floor"
+            placeholder="All Floors"
+            value={filters.floor ?? ''}
+            options={floorOptions}
+            onChange={(floor) => onFilterChange({ floor })}
+          />
+        ) : null}
         {hasBlocks ? (
           <>
             <FilterSelect

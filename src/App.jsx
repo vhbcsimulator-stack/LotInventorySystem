@@ -17,6 +17,7 @@ const PAGE_TITLES = {
   projects: 'Projects & Lots',
   announcements: 'Announcements',
   brokers: 'Add Brokers',
+  clients: 'Clients',
 }
 
 /** Name and role for the top bar, from the Supabase user's metadata when present. */
