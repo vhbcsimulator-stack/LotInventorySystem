@@ -1059,8 +1059,10 @@ export default function AnnotatedImagePreview({
     >
       <Portal>
         <Dialog.Backdrop />
-        <Dialog.Positioner px={{ base: '0', md: '16px' }}>
-          <Dialog.Content bg={COLORS.surface} borderRadius={{ base: '0', md: '16px' }} maxH="92dvh" overflow="hidden">
+        {/* "cover" pads the dialog by 40px all round; a thin margin leaves the map that height instead. */}
+        <Dialog.Positioner p={{ base: '0', md: '12px' }}>
+          {/* As wide as "cover", but only as tall as the map and its controls — no empty band below them. */}
+          <Dialog.Content bg={COLORS.surface} borderRadius={{ base: '0', md: '16px' }} h="auto" maxH={{ base: '100dvh', md: 'calc(100dvh - 24px)' }} overflow="hidden">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="16px" pr="56px">
               <Dialog.Title
                 fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -1121,7 +1123,9 @@ export default function AnnotatedImagePreview({
                      * Only the display is scaled down; the stored image keeps its
                      * own size, and zooming in goes back to full detail.
                      */
-                    h={{ base: '320px', md: '460px', lg: '62dvh' }}
+                    // As tall as the dialog allows (the screen less its 12px margins) less its header, padding and the button row below.
+                    h={{ base: '70dvh', md: 'calc(100dvh - 24px - 140px)' }}
+                    minH="320px"
                     display="flex"
                     alignItems="center"
                     justifyContent="center"
