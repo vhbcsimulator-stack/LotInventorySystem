@@ -14,10 +14,10 @@ import {
 const DEFAULT_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: LuLayoutDashboard },
   { key: 'projects', label: 'Projects & Lots', icon: LuBuilding2 },
-  { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
+  { key: 'clients', label: 'Clients', icon: LuUsers },
   { key: 'brokers', label: 'Brokers', icon: LuContactRound },
   { key: 'salesAgents', label: 'Sales Agents', icon: LuBriefcaseBusiness },
-  { key: 'clients', label: 'Clients', icon: LuUsers },
+  { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
 ]
 
 const DEFAULT_FOOTER_ITEMS = [

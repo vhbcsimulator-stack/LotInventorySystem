@@ -70,10 +70,12 @@ const SECTIONS = [
         'Open Project Actions and choose Add lot, or use a row’s update action.',
         'Enter the identifier, phase or tower when applicable, category, area, and status. MSCC units also have unit type, floor level, view, and end-unit fields.',
         'If a lot is sold, record Sold By in the edit form. Save and confirm the success message.',
-        'For a reserved lot, open its details and choose Default, Client Reserved, or Company Reserved under Reserve Type.',
+        'For a reserved lot, open its details and choose Default, Client Reserved, or Company Reserved under Reserve Type. Client Reserved also asks who reserved it (a broker or sales agent, or Other… and a name) and the client.',
+        'Reserve Type changes are not saved as you pick or type. Select the check icon to save them, or the cross icon to discard them and go back to what was saved. For Client Reserved the check icon is enabled once who reserved it and the client are both chosen.',
       ] },
       { heading: 'Status and map colors', points: [
         'The status picker includes Available, Reserved, Reserved (Pending), Hold, and Sold.',
+        'Under the status, a sold lot shows who sold it; a reserved lot shows its reserve type and client only. Who reserved it is in the lot’s details.',
         'A status change that affects an annotated map may open a map-color review. Review and save that update to keep the lot and map in sync.',
         'Delete and bulk delete permanently remove records. Read the confirmation dialog before proceeding.',
       ] },
@@ -119,7 +121,7 @@ const SECTIONS = [
         'Select a project and open Map. Choose Whole Map, a phase or floor, or Commercial when that tab exists.',
         'Choose Add map, select its destination and a JPG, PNG, WebP or SVG image of up to 25 MB, then save. Use Replace image on an existing map to update that slot.',
         'Saving recolored lots always stores the map as SVG: the original map, never re-compressed (a JPG or PNG map is embedded as uploaded), with each colored lot written in as vector shapes, so nothing loses quality and the new colors show in the mobile app too. Scripts and links to outside files are removed from an SVG when it is uploaded.',
-        'Use Open full size to inspect an image. Zoom with the buttons or Ctrl plus mouse wheel, drag to pan, and double-click to reset.',
+        'Use Open full size to inspect an image. Zoom with the buttons or Ctrl plus mouse wheel, drag to pan, and double-click to reset. When the map tab has lot outlines, Open full size shows the map with its outlines (see Lot outlines & coloring); a tab’s other maps and maps without outlines open as the plain image. A spinner shows while the map loads.',
       ] },
       { heading: 'MVLC map sections', points: [
         'MVLC has separate slots for Phase 1A, 1B, 1C, 1East, 2A, 2B, 2East, and Phase 3.',
@@ -127,8 +129,8 @@ const SECTIONS = [
       ] },
       { heading: 'Lot outlines & coloring', steps: [
         'Open the map tab, then Lot outlines → Upload COCO JSON (.json, up to 20 MB) for that map.',
-        'Use Lot outlines → Preview outlines to inspect polygons over the map. The image and annotation dimensions must align for the polygons to land on the correct lots.',
-        'Choose Color lots to open the map ready to paint, then Save Update to write reviewed map-color changes. On a map with no outlines yet, Color lots offers to upload the COCO JSON first (recommended) or to color without it — less accurate. Without it, pick which lot each colored area is (or change it from Clicked lots); Save Update stays disabled until every colored area is linked, and then changes those lots’ statuses too. Replace or delete outlines from the Lot outlines menu.',
+        'To inspect the polygons over the map, use Open full size on the map. Show lot outlines / Hide lot outlines below the map turns on or off, together, the outlines on the map, the Image and COCO size check, the number of lots on the map (one per annotation), and the clickable list of annotations. The image and annotation dimensions must align for the polygons to land on the correct lots; when they do not, the size check stays visible even with outlines hidden.',
+        'Choose Color lots to open the map ready to paint, then Save Update to write reviewed map-color changes. On a map with no outlines yet, Color lots offers to upload the COCO JSON first (recommended) or to color without it — less accurate. Without it, pick which lot each colored area is (or change it from Clicked lots); Save Update stays disabled until every colored area is linked, and then changes those lots’ statuses too. Replace or delete outlines from the Lot outlines menu, which is shown only to users who can edit.',
         'Legend colors: Default uses the standard VHBC colors. Match map legend asks you to click each swatch in the legend printed on the map (SOLD, RESERVED, HOLD, PRIME, OPEN) so painted lots use exactly those colors; Skip keeps a status’s current color. The colors are remembered for that map in this browser.',
         'While coloring, a left click paints a lot. To move the map, hold Space and drag, or drag with the middle mouse button — neither paints.',
         'While coloring, Undo and Redo step back and forward through your changes — Ctrl+Z to undo, Ctrl+Y or Ctrl+Shift+Z to redo (⌘ on a Mac). Reset colors can be undone too. More options holds the annotated-lot shape choice and Tolerance, which sets how far a lot’s color reaches; Default suits most maps.',
