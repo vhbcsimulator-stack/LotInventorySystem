@@ -39,34 +39,122 @@ export function salesKey(value) {
 }
 
 /**
- * Sold lots per agent name across every project's lot table, keyed by
- * salesKey(sold_by). Lots record their agent only as the free-text `sold_by`,
- * so this is how a broker account is credited with a sale. `total` is the lot's
- * TCP at the price table's current rate, the same figure Projects & Lots shows.
- * A table that cannot be read (or has no sold_by column yet) is skipped.
+ * Every sold lot's seller across every project's lot table, as
+ * [{ seller, total }]: `column` is `sold_by` (brokers) or `sales_agent` (sales
+ * agents), holding the account's email (or, for older lots and "Other", a
+ * name). `total` is the lot's TCP, the same figure Projects & Lots shows. A
+ * table that cannot be read (or lacks the column) is skipped.
  */
-async function fetchSalesByAgent() {
+async function fetchSoldLots(column) {
   const perTable = await Promise.all(
     Object.values(LOT_TABLES).map((table) =>
-      fetchAllRows(table, 'id, status, sold_by, total', (query) => query.not('sold_by', 'is', null)).catch((err) => {
+      fetchAllRows(table, `id, status, ${column}, total`, (query) => query.not(column, 'is', null)).catch((err) => {
         console.error(`[brokers] no sales from ${table}:`, err)
         return []
       }),
     ),
   )
-
-  const byAgent = new Map()
-  perTable.flat().forEach((lot) => {
-    if (uiStatus(lot.status) !== 'sold') return
-    const key = salesKey(lot.sold_by)
-    if (!key) return
-    const entry = byAgent.get(key) ?? { lotsSold: 0, totalTcp: 0 }
-    entry.lotsSold += 1
-    entry.totalTcp += num(lot.total)
-    byAgent.set(key, entry)
-  })
-  return byAgent
+  return perTable
+    .flat()
+    .filter((lot) => uiStatus(lot.status) === 'sold')
+    .map((lot) => ({ seller: text(lot[column]).trim(), total: num(lot.total) }))
 }
+
+/**
+ * Lots sold and TCP per account id. A lot goes to the account whose email it
+ * stores; one storing a name (older lots) goes to the account of that name, but
+ * only when exactly one account has it — two "Gerald Delima"s are different
+ * people, so a name alone credits neither.
+ */
+export function creditSales(accounts, lots) {
+  const byEmail = new Map(accounts.filter((account) => account.email).map((account) => [account.email.toLowerCase(), account]))
+  const byName = new Map()
+  accounts.forEach((account) => {
+    const key = salesKey(`${account.firstName} ${account.lastName}`)
+    byName.set(key, [...(byName.get(key) ?? []), account])
+  })
+  const stats = new Map()
+  lots.forEach((lot) => {
+    let account = byEmail.get(lot.seller.toLowerCase())
+    if (!account) {
+      const same = byName.get(salesKey(lot.seller)) ?? []
+      if (same.length === 1) account = same[0]
+    }
+    if (!account) return
+    const entry = stats.get(account.id) ?? { lotsSold: 0, totalTcp: 0 }
+    entry.lotsSold += 1
+    entry.totalTcp += lot.total
+    stats.set(account.id, entry)
+  })
+  return stats
+}
+
+/**
+ * The two kinds of seller the portal keeps, credited with sales the same way.
+ * A broker is also a login for the mobile app (`hasLogin`), made and removed by
+ * the create-broker / delete-broker Edge Functions; a sales agent is only a
+ * record, added and removed here.
+ */
+export const ACCOUNT_KINDS = {
+  broker: {
+    kind: 'broker',
+    table: 'brokers',
+    hasLogin: true,
+    singular: 'broker',
+    plural: 'brokers',
+    title: 'Broker',
+    titlePlural: 'Brokers',
+  },
+  sales_agent: {
+    kind: 'sales_agent',
+    table: 'sales_agents',
+    hasLogin: false,
+    singular: 'sales agent',
+    plural: 'sales agents',
+    title: 'Sales Agent',
+    titlePlural: 'Sales Agents',
+  },
+}
+
+const SALES_AGENTS_MISSING =
+  'The sales_agents table is not set up yet — run supabase/migrations/20261016_create_sales_agents.sql in the Supabase SQL Editor.'
+
+/**
+ * One table's accounts as { id, authUserId, email, name }, A–Z. `authUserId` is a
+ * broker's app login (null for sales agents, who have none). A table that
+ * cannot be read (not made yet) gives none.
+ */
+async function accountNames(table) {
+  try {
+    const { data } = unwrap(await supabase.from(table).select('*'))
+    return data
+      .map((row) => ({
+        id: row.id,
+        authUserId: row.auth_user_id ?? null,
+        email: text(row.email),
+        name: `${text(row.first_name).trim()} ${text(row.last_name).trim()}`.trim(),
+      }))
+      .filter((account) => account.name)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  } catch (err) {
+    console.error(`[${table}] no names:`, err)
+    return []
+  }
+}
+
+/**
+ * Every broker's and sales agent's full name, A–Z, with their id: the choices
+ * for who sold a lot. The name is stored in the lot's `sold_by` as written here,
+ * so the sale is credited to the account. Resolves { brokers, salesAgents,
+ * names }, the first two as [{ id, name }]. Never throws: failures resolve empty.
+ */
+export async function fetchBrokerNames() {
+  if (!supabase) return { brokers: [], salesAgents: [], names: [] }
+  const [brokers, salesAgents] = await Promise.all([accountNames('brokers'), accountNames('sales_agents')])
+  return { brokers, salesAgents, names: [...new Set([...brokers, ...salesAgents].map((account) => account.name))] }
+}
+
+fetchBrokerNames.tables = () => ['brokers', 'sales_agents']
 
 /** Trim every field and lower-case the email, as it is stored. */
 export function cleanBroker({ firstName = '', lastName = '', mobileNumber = '', email = '' }) {
@@ -99,51 +187,96 @@ export function validateBroker(form) {
 }
 
 /**
- * Brokers, newest first, each with `lotsSold` and `totalTcp`: the sold lots
- * whose `sold_by` names them. Never throws: failures resolve empty with a `source`.
+ * One kind's accounts (`query.kind`, 'broker' by default), newest first, each
+ * with `lotsSold` and `totalTcp`: the sold lots whose `sold_by` names them.
+ * Resolves { accounts, source }. Never throws: failures resolve empty with a `source`.
  */
-export async function fetchBrokers() {
-  if (!supabase) return { brokers: [], source: SOURCE.NOT_CONFIGURED }
+export async function fetchAccounts({ kind = 'broker' } = {}) {
+  if (!supabase) return { accounts: [], source: SOURCE.NOT_CONFIGURED }
+  const { table } = ACCOUNT_KINDS[kind]
 
   try {
     const [{ data }, sales] = await Promise.all([
       supabase
-        .from('brokers')
+        .from(table)
         .select('id, first_name, last_name, mobile_number, email, created_at')
         .order('created_at', { ascending: false })
         .then(unwrap),
-      fetchSalesByAgent(),
+      // Brokers are credited by a lot's Sold By; sales agents by its separate sales agent.
+      fetchSoldLots(kind === 'sales_agent' ? 'sales_agent' : 'sold_by'),
     ])
-    const brokers = data.map((row) => {
-      const broker = normalize(row)
-      const stats = sales.get(salesKey(`${broker.firstName} ${broker.lastName}`))
-      return { ...broker, lotsSold: stats?.lotsSold ?? 0, totalTcp: stats?.totalTcp ?? 0 }
-    })
-    return { brokers, source: SOURCE.DATABASE }
+    const people = data.map(normalize)
+    const stats = creditSales(people, sales)
+    const accounts = people.map((account) => ({
+      ...account,
+      lotsSold: stats.get(account.id)?.lotsSold ?? 0,
+      totalTcp: stats.get(account.id)?.totalTcp ?? 0,
+    }))
+    return { accounts, source: SOURCE.DATABASE }
   } catch (err) {
-    console.error('[brokers] falling back to an empty list:', err)
-    return { brokers: [], source: SOURCE.UNAVAILABLE }
+    console.error(`[${table}] falling back to an empty list:`, err)
+    return { accounts: [], source: SOURCE.UNAVAILABLE }
   }
 }
 
+/** The tables fetchAccounts reads, so its Refresh button knows what to check. */
+fetchAccounts.tables = ({ kind = 'broker' } = {}) => [ACCOUNT_KINDS[kind].table, ...Object.values(LOT_TABLES)]
+
+/** Brokers only, as { brokers, source }. */
+export async function fetchBrokers() {
+  const { accounts, source } = await fetchAccounts({ kind: 'broker' })
+  return { brokers: accounts, source }
+}
+
+fetchBrokers.tables = () => fetchAccounts.tables({ kind: 'broker' })
+
 /**
- * Create the broker's app login and their `brokers` row as one step: the
- * function removes the login again if the row cannot be saved. Resolves to
- * { id, authUserId, email, password }, where `password` is the temporary one
- * the function generated. It is returned only here, so show it now. Throws with
- * a readable message on failure.
+ * Add a broker or a sales agent. A broker gets their app login and row as one
+ * step from the create-broker function, which emails the sign-in details and
+ * resolves { id, authUserId, email, password } — `password` is returned only
+ * here, so show it now. A sales agent is just a row, resolving { id, email }.
+ * Throws with a readable message on failure.
  */
-export function createBroker(form) {
-  return invoke('create-broker', cleanBroker(form))
+export async function createAccount(kind, form) {
+  if (ACCOUNT_KINDS[kind].hasLogin) return invoke('create-broker', cleanBroker(form))
+  if (!supabase) throw new Error('No database connected — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
+  const agent = cleanBroker(form)
+  const { data: auth } = await supabase.auth.getUser()
+  const { data, error } = await supabase
+    .from('sales_agents')
+    .insert({
+      first_name: agent.firstName,
+      last_name: agent.lastName,
+      mobile_number: agent.mobileNumber,
+      email: agent.email,
+      user_id: auth?.user?.id ?? null,
+    })
+    .select('id, email')
+    .single()
+  if (error) {
+    if (error.code === '23505') throw new Error(`A sales agent with the email ${agent.email} already exists.`)
+    if (/sales_agents|row-level security/i.test(error.message)) throw new Error(SALES_AGENTS_MISSING)
+    throw new Error(error.message)
+  }
+  return data
 }
 
 /**
- * Remove a broker account for good: their app login first, then their
- * `brokers` row. Throws with a readable message on failure.
+ * Remove a broker or a sales agent for good. A broker's app login goes first
+ * (the delete-broker function), then their row; a sales agent is just a row.
+ * Throws with a readable message on failure.
  */
-export function deleteBroker(id) {
-  return invoke('delete-broker', { id })
+export async function deleteAccount(kind, id) {
+  if (ACCOUNT_KINDS[kind].hasLogin) return invoke('delete-broker', { id })
+  if (!supabase) throw new Error('No database connected.')
+  const { data, error } = await supabase.from('sales_agents').delete().eq('id', id).select('id')
+  if (error) throw new Error(error.message)
+  // Row-level security filters a delete it refuses, so nothing comes back.
+  if (!data?.length) throw new Error(SALES_AGENTS_MISSING)
 }
+
+export const createBroker = (form) => createAccount('broker', form)
+export const deleteBroker = (id) => deleteAccount('broker', id)
 
 /** Call one of the broker Edge Functions, turning its { error } reply into a thrown Error. */
 async function invoke(name, body) {
@@ -159,6 +292,3 @@ async function invoke(name, body) {
   }
   throw new Error(error.message)
 }
-
-/** The tables fetchBrokers reads, so its Refresh button knows what to check. */
-fetchBrokers.tables = () => ['brokers', ...Object.values(LOT_TABLES)]

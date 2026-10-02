@@ -421,6 +421,8 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
   const [fullscreen, setFullscreen] = useState(null) // the map shown in the fullscreen modal
   const replaceInput = useRef(null)
   const replaceTarget = useRef(null)
+  // Opens the tab's lot outlines over its map; see AnnotatedImagesPanel.
+  const outlinesRef = useRef(null)
 
   const query = useMemo(() => ({ projectCode }), [projectCode])
   const { data, loading, reload } = useApiQuery(fetchProjectMaps, query)
@@ -510,6 +512,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
               setTab(next)
             }}
             ActionButton={ActionButton}
+            previewRef={outlinesRef}
           />
         ) : null}
         {canEdit ? (
@@ -539,7 +542,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
       <Reveal key={active?.value ?? 'none'} animate={tabSwitched}>
       {active && active.maps.length > 0 ? (
         <Flex direction="column" gap="18px" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
-          {active.maps.map((map) => (
+          {active.maps.map((map, index) => (
             <Box key={map.id}>
               <Flex align="center" justify="space-between" gap="12px" mb="8px" flexWrap="wrap">
                 <Text fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading} truncate minW={0} flex="1">
@@ -549,12 +552,18 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
                 <Flex align="center" gap="8px" flexWrap="wrap">
                   <ActionButton
                     icon={LuExpand}
-                    onClick={() =>
+                    onClick={() => {
+                      /*
+                       * The tab's lot outlines were drawn against its first map, so
+                       * that one opens with them shown; any other map, or one with
+                       * no outlines, opens as the plain picture.
+                       */
+                      if (index === 0 && outlinesRef.current?.previewOutlines(map.url)) return
                       setFullscreen({
                         ...map,
                         name: `${projectName || projectCode} — ${active.label}${active.maps.length > 1 && map.caption ? ` · ${map.caption}` : ''}`,
                       })
-                    }
+                    }}
                   >
                     Open full size
                   </ActionButton>

@@ -5,8 +5,13 @@
 // admin out, and the service-role key that can create users must never ship to
 // the browser.
 //
+// The broker is emailed their sign-in details through Resend (see
+// _shared/resend.ts for the RESEND_API_KEY and RESEND_FROM secrets) and asked
+// to change the temporary password after signing in.
+//
 // Deploy: supabase functions deploy create-broker
-import { adminClient, CORS, jsonBody, portalUser, publicClient, reply } from '../_shared/portal.ts'
+import { adminClient, CORS, jsonBody, portalUser, reply } from '../_shared/portal.ts'
+import { escapeHtml, sendEmail } from '../_shared/resend.ts'
 
 // Keep this function type-checkable when the project does not include Deno's
 // ambient type declarations. Supabase Edge Functions provide this global at runtime.
@@ -35,6 +40,47 @@ function generatePassword() {
 
 const clean = (value: unknown) => String(value ?? '').trim()
 
+/** The welcome email: the broker's sign-in details, and a request to change the password. */
+function welcomeEmail(firstName: string, email: string, password: string) {
+  const subject = 'Your VHBC broker account'
+  const text = [
+    `Hi ${firstName},`,
+    '',
+    'A broker account was created for you in the VHBC app. Sign in with:',
+    '',
+    `Email: ${email}`,
+    `Temporary password: ${password}`,
+    '',
+    'This password is temporary. After you sign in, please change it in the app',
+    'right away and keep your new password to yourself.',
+    '',
+    "If you weren't expecting this account, reply to this email or contact VHBC.",
+  ].join('\n')
+
+  const name = escapeHtml(firstName)
+  const html = `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background:#f4f6f8;font-family:Inter,Segoe UI,Arial,sans-serif;color:#1f2937">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:28px">
+      <tr><td>
+        <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to VHBC, ${name}</h1>
+        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A broker account was created for you in the VHBC app. Sign in with:</p>
+        <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;background:#f3f4f6;border-radius:8px;padding:14px;font-size:14px">
+          <tr><td style="padding:4px 0;color:#6b7280;width:150px">Email</td><td style="padding:4px 0;font-weight:600">${escapeHtml(email)}</td></tr>
+          <tr><td style="padding:4px 0;color:#6b7280">Temporary password</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(password)}</td></tr>
+        </table>
+        <p style="margin:16px 0 0;padding:12px 14px;background:#fffbeb;font-size:14px;line-height:22px">
+          <strong>This password is temporary.</strong> After you sign in, please change it in the app
+          right away and keep your new password to yourself.
+        </p>
+        <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#6b7280">If you weren't expecting this account, reply to this email or contact VHBC.</p>
+      </td></tr>
+    </table>
+  </body>
+</html>`
+  return { subject, text, html }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
   if (req.method !== 'POST') return reply(405, { error: 'Use POST.' })
@@ -53,19 +99,24 @@ Deno.serve(async (req: Request) => {
   if (!firstName || !lastName || !mobileNumber || !email) return reply(400, { error: 'All fields are required.' })
   if (!EMAIL_PATTERN.test(email)) return reply(400, { error: 'Enter a valid email address.' })
 
-  // Left unconfirmed: the broker confirms through the "Confirm signup" email
-  // sent below, then signs in to the app with the generated password.
+  /*
+   * Confirmed from the start: the password is only ever sent to this address,
+   * so signing in with it shows the broker has the inbox. `must_change_password`
+   * tells the app to ask for a new one on first sign-in; the app clears it once
+   * the password is changed.
+   */
   const password = generatePassword()
   const { data: created, error: createError } = await admin.auth.admin.createUser({
     email,
     password,
-    email_confirm: false,
+    email_confirm: true,
     user_metadata: {
       first_name: firstName,
       last_name: lastName,
       full_name: `${firstName} ${lastName}`,
       mobile_number: mobileNumber,
       role: 'broker',
+      must_change_password: true,
     },
   })
   if (createError || !created?.user) {
@@ -97,23 +148,19 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  // Supabase's own "Confirm signup" email, from the project's existing template
-  // and email settings. The admin API creates users silently, so the email is
-  // requested the way the app's own sign-up would resend it.
-  const { error: emailError } = await publicClient().auth.resend({ type: 'signup', email })
-
-  // An account nobody can confirm is no use, so without the email nothing is kept.
-  if (emailError) {
+  // The broker's sign-in details, sent through Resend. Without them the broker
+  // has no way in, so if the email cannot be sent nothing is kept.
+  try {
+    await sendEmail({ to: email, ...welcomeEmail(firstName, email, password) })
+  } catch (err) {
     await admin.from('brokers').delete().eq('id', row.id)
     await admin.auth.admin.deleteUser(created.user.id)
-    const limited = emailError.status === 429 || /rate limit/i.test(emailError.message)
-    return reply(limited ? 429 : 502, {
-      error: limited
-        ? 'Too many emails sent recently. Wait a few minutes and try again. The account was not created.'
-        : `Could not send the confirmation email: ${emailError.message}. The account was not created.`,
+    const message = err instanceof Error ? err.message : String(err)
+    return reply(/too many/i.test(message) ? 429 : 502, {
+      error: `Could not email the sign-in details: ${message} The account was not created.`,
     })
   }
 
-  // The only place the password is ever returned; it is not stored anywhere readable.
+  // Also returned once, in case the email goes astray; it is not stored anywhere readable.
   return reply(200, { id: row.id, authUserId: created.user.id, email, password })
 })

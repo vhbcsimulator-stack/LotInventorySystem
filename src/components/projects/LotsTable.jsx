@@ -5,6 +5,38 @@ import Pagination from '@/components/ui-kit/Pagination'
 import { COLORS, LOT_STATUS } from '@/theme/colors'
 import { formatNumber, formatPeso } from '@/utils/format'
 import { DEFAULT_LOT_TERMS, LOT_STATUS_OPTIONS } from '@/data/projectsData'
+import useApiQuery from '@/hooks/useApiQuery'
+import { fetchBrokerNames } from '@/data/brokersData'
+import { findAccount } from '@/components/projects/seller'
+
+/**
+ * Who sold a lot, for display: { name, email, role }. The lot stores a picked
+ * account's email, shown here as the account's name; an "Other" name shows as is.
+ */
+function useSeller(lot) {
+  const { data } = useApiQuery(fetchBrokerNames)
+  const broker = Boolean(lot.soldBy)
+  const stored = lot.soldBy || lot.salesAgent
+  const account = findAccount((broker ? data?.brokers : data?.salesAgents) ?? [], stored)
+  return { name: account?.name ?? stored, email: account?.email ?? '', role: broker ? 'broker' : 'sales agent' }
+}
+
+function SoldByNote({ lot, short = false, ...rest }) {
+  const seller = useSeller(lot)
+  const verb = lot.rawStatus === 'sold' ? 'Sold' : 'Reserved'
+  const title = `${verb} by ${seller.name} (${seller.role})${seller.email ? ` · ${seller.email}` : ''}`
+  return (
+    <Text fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} title={title} {...rest}>
+      {short ? `by ${seller.name}` : `${verb} by ${seller.name} (${seller.role})`}
+    </Text>
+  )
+}
+
+/**
+ * A sold lot that names who sold it. A client reservation keeps who reserved it
+ * on the lot but shows only its client here; the lot's details name the seller.
+ */
+const hasSeller = (lot) => lot.rawStatus === 'sold' && Boolean(lot.soldBy || lot.salesAgent)
 
 const PAGE_SIZES = [10, 25, 50]
 const HEADER_BG = '#EEF3FC'
@@ -77,19 +109,7 @@ export function LotStatusCell({ lot, saving, onChange }) {
   return (
     <>
       <StatusSelect lot={lot} saving={saving} onChange={onChange} />
-      {lot.rawStatus === 'sold' && lot.soldBy ? (
-        <Text
-          mt="4px"
-          pl="4px"
-          fontFamily="Inter, system-ui, sans-serif"
-          fontSize="11px"
-          color={COLORS.subtle}
-          whiteSpace="nowrap"
-          title={`Sold by ${lot.soldBy}`}
-        >
-          by {lot.soldBy}
-        </Text>
-      ) : null}
+      {hasSeller(lot) ? <SoldByNote lot={lot} short mt="4px" pl="4px" whiteSpace="nowrap" /> : null}
       {lot.status === 'reserved' && lot.reserveType ? (
         <Text mt="4px" pl="4px" fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} whiteSpace="nowrap">
           {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}
@@ -282,7 +302,7 @@ export default function LotsTable({
             </Flex>
             <Flex align="center" justify="space-between" gap="8px" mt="12px" flexWrap="wrap">
               <StatusSelect lot={lot} saving={savingIds?.has(lot.id)} onChange={onStatusChange} />
-              {lot.rawStatus === 'sold' && lot.soldBy ? <Text fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} overflowWrap="anywhere">Sold by {lot.soldBy}</Text> : null}
+              {hasSeller(lot) ? <SoldByNote lot={lot} overflowWrap="anywhere" /> : null}
               {lot.status === 'reserved' && lot.reserveType ? (
                 <Text fontFamily="Inter, system-ui, sans-serif" fontSize="11px" color={COLORS.subtle} overflowWrap="anywhere">
                   {`${lot.reserveType === 'company' ? 'Company' : 'Client'} Reserve${lot.reservedFor ? ` · ${lot.reservedFor}` : ''}`}

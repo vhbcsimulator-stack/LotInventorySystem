@@ -17,6 +17,7 @@ const PAGE_TITLES = {
   projects: 'Projects & Lots',
   announcements: 'Announcements',
   brokers: 'Add Brokers',
+  salesAgents: 'Add Sales Agents',
   clients: 'Clients',
 }
 

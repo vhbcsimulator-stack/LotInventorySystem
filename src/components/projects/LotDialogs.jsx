@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Box, CloseButton, Dialog, Flex, Input, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
+import { Box, CloseButton, Dialog, Flex, Icon, Input, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
+import { LuCheck, LuX } from 'react-icons/lu'
 import {
   DEFAULT_LOT_TERMS,
   LOT_STATUS_OPTIONS,
@@ -12,9 +13,13 @@ import {
   updateReserveType,
 } from '@/data/projectsData'
 import { PRICE_CONFIG } from '@/data/pricesData'
+import { unitDescription, updateClientForLot } from '@/data/clientsData'
+import { SellerPicker } from '@/components/projects/SoldByPicker'
+import { sellerFields, sellerOf } from '@/components/projects/seller'
+import ClientPicker from '@/components/projects/ClientPicker'
 import { COLORS, LOT_STATUS } from '@/theme/colors'
 import { formatNumber, formatPeso } from '@/utils/format'
-import { notifyFailed, notifySaved } from '@/lib/notify'
+import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -98,31 +103,131 @@ function ErrorText({ children }) {
 }
 
 /**
- * A reserved lot's reserve type, saved as soon as it is picked. The lot keeps
- * its reserved status; this only records who it is held for.
+ * Point a client's record at the lot they reserved or bought. The lot is saved
+ * by then, so a failure here only warns.
+ */
+async function pointClientAt(clientId, { stage, projectCode, lot, lotNo }) {
+  try {
+    await updateClientForLot(clientId, { stage, projectCode, lotNo: lotNo ?? lot.identifier, total: lot?.tcp })
+  } catch (err) {
+    console.error('[projects] client not updated:', err)
+    notifyWarning('Client record not updated', err.message)
+  }
+}
+
+/** A small square icon button: the reserve type's save and discard. */
+function IconAction({ icon, label, tone = 'neutral', ...rest }) {
+  const tones = {
+    neutral: { bg: COLORS.surface, color: COLORS.heading, border: '1px solid', borderColor: COLORS.border, _hover: { bg: COLORS.hoverBg } },
+    primary: { bg: COLORS.activeBg, color: '#FFFFFF' },
+  }
+  return (
+    <Flex
+      as="button"
+      type="button"
+      aria-label={label}
+      title={label}
+      align="center"
+      justify="center"
+      boxSize="32px"
+      borderRadius="8px"
+      cursor="pointer"
+      flexShrink={0}
+      _disabled={{ opacity: 0.45, cursor: 'not-allowed' }}
+      _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+      {...tones[tone]}
+      {...rest}
+    >
+      <Icon as={icon} boxSize="16px" />
+    </Flex>
+  )
+}
+
+/**
+ * A reserved lot's reserve type. The lot keeps its reserved status; this only
+ * records who it is held for. Every change is a draft until saved with the
+ * check icon, or put back with the cross: Company and Default carry no name,
+ * and Client Reserved can be saved once who reserved it and the client (an
+ * existing client or a new one) are both chosen.
  */
 function ReserveTypeSelect({ lot, projectCode, onSaved }) {
+  const forClient = lot.reserveType === 'client'
+  const savedClient = forClient ? (lot.reservedFor ?? '') : ''
+  const noSeller = { kind: '', name: '' }
+  const savedSeller = forClient ? sellerOf(lot) : noSeller
   const [value, setValue] = useState(lot.reserveType ?? '')
+  const [client, setClient] = useState(savedClient)
+  // Set when a client is picked here, so their record is pointed at this lot.
+  const [clientId, setClientId] = useState(null)
+  // Who reserved it: a broker or a sales agent, then which one.
+  const [seller, setSeller] = useState(savedSeller)
+  const [saved, setSaved] = useState({ type: lot.reserveType ?? '', client: savedClient, seller: savedSeller })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  async function handleChange(next) {
-    const previous = value
-    setValue(next)
+  async function save(type, { name, id, by } = {}) {
     setSaving(true)
     setError('')
     try {
-      await updateReserveType(lot.id, projectCode, next)
-      notifySaved('Reserve type updated', `${lot.identifier} is now ${RESERVE_TYPE_OPTIONS.find((option) => option.value === next)?.label ?? next}.`)
-      onSaved?.(next)
+      const forClient = type === 'client'
+      await updateReserveType(lot.id, projectCode, type, forClient ? name : undefined, forClient ? sellerFields(by) : undefined)
+      if (forClient && id) await pointClientAt(id, { stage: 'reserved', projectCode, lot })
+      const label = RESERVE_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type
+      notifySaved('Reserve type updated', `${lot.identifier} is now ${label}${forClient ? ` for ${name}` : ''}.`)
+      setSaved({ type, client: forClient ? name : '', seller: forClient ? by : noSeller })
+      onSaved?.(type, forClient ? name : '')
     } catch (err) {
       console.error('[projects] could not update reserve type:', err)
       notifyFailed('Could not update the reserve type', err)
-      setValue(previous)
+      setValue(saved.type)
+      setClient(saved.client)
+      setSeller(saved.seller)
       setError(err.message)
     } finally {
       setSaving(false)
     }
+  }
+
+  function handleChange(next) {
+    setValue(next)
+    setError('')
+    // A client reservation asks for who reserved it and its client; keep what it had if it was one.
+    const keep = next === 'client' && saved.type === 'client'
+    setClient(keep ? saved.client : '')
+    setSeller(keep ? saved.seller : noSeller)
+    setClientId(null)
+  }
+
+  function handleClient(name, id) {
+    setClient(name)
+    setClientId(id ?? null)
+    setError('')
+  }
+
+  function handleSeller(next) {
+    setSeller(next)
+    setError('')
+  }
+
+  const isClient = value === 'client'
+  const dirty =
+    value !== saved.type ||
+    (isClient && (client !== saved.client || seller.kind !== saved.seller.kind || seller.name !== saved.seller.name))
+  // A client reservation needs who reserved it and its client before it can be saved.
+  const complete = !isClient || (Boolean(client.trim()) && Boolean(seller.name.trim()))
+
+  function commit() {
+    if (!dirty || !complete || saving) return
+    if (isClient) save('client', { name: client.trim(), id: clientId, by: { ...seller, name: seller.name.trim() } })
+    else save(value)
+  }
+
+  function discard() {
+    setValue(saved.type)
+    setClient(saved.client)
+    setSeller(saved.seller)
+    setClientId(null)
+    setError('')
   }
 
   return (
@@ -148,6 +253,47 @@ function ReserveTypeSelect({ lot, projectCode, onSaved }) {
           <NativeSelect.Indicator />
         </NativeSelect.Root>
       </Flex>
+      {isClient ? (
+        <Flex direction="column" gap="6px" w="240px">
+          <SellerPicker
+            value={seller}
+            onChange={handleSeller}
+            disabled={saving}
+            fieldProps={{ h: '32px', fontFamily: FONT, fontSize: '13px', borderRadius: '8px' }}
+          />
+          <ClientPicker
+            value={client}
+            onChange={handleClient}
+            disabled={saving}
+            fieldProps={{ h: '32px', fontFamily: FONT, fontSize: '13px', borderRadius: '8px' }}
+            defaults={{
+              projectCode,
+              unitDescription: unitDescription(projectCode, lot.identifier, 'Reserved'),
+              tcpFormatted: lot.tcp ? formatPeso(lot.tcp) : '',
+              stage: 'reserved',
+              // A new client's broker is whoever reserved the lot.
+              brokerName: seller.name,
+            }}
+          />
+          {dirty && !complete ? (
+            <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle} textAlign="end">
+              Choose who reserved it and the client to save.
+            </Text>
+          ) : null}
+        </Flex>
+      ) : null}
+      {dirty ? (
+        <Flex gap="6px" mt="2px">
+          <IconAction icon={LuX} label="Discard changes" onClick={discard} disabled={saving} />
+          <IconAction
+            icon={LuCheck}
+            label="Save reserve type"
+            tone="primary"
+            onClick={commit}
+            disabled={saving || !complete}
+          />
+        </Flex>
+      ) : null}
       {error ? (
         <Text role="alert" fontFamily={FONT} fontSize="12px" color="#B91C1C" textAlign="end">
           {error}
@@ -176,7 +322,8 @@ export function LotDetailsDialog({ lot, projectName, projectCode, terms = DEFAUL
               ['TCP', formatPeso(lot.tcp)],
             ]),
         ['Status', statusLabel],
-        ...(reserved && lot.reserveType && lot.reservedFor ? [['Reserved For', lot.reservedFor]] : []),
+        // A client reservation's client is picked under Reserve Type; an imported company hold keeps its label (MSD).
+        ...(reserved && lot.reserveType === 'company' && lot.reservedFor ? [['Reserved For', lot.reservedFor]] : []),
       ]
     : []
   return (
@@ -264,7 +411,12 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
   // Existing lots change status through the table's status picker; only a new lot picks one here.
   const [status, setStatus] = useState('available')
   const showSoldBy = isNew ? status === 'sold' : lot.rawStatus === 'sold'
-  const [soldBy, setSoldBy] = useState(lot?.soldBy ?? '')
+  // Who sold it: a broker or a sales agent, then which one.
+  const [seller, setSeller] = useState(() => sellerOf(lot))
+  // A sold lot's buyer, kept in reserved_for.
+  const [client, setClient] = useState(lot?.rawStatus === 'sold' ? (lot?.reservedFor ?? '') : '')
+  // Set when a client is picked here, so their record is pointed at this lot.
+  const [clientId, setClientId] = useState(null)
   // New lots can carry a source date. Editing other fields keeps the stored date.
   const [lastUpdated, setLastUpdated] = useState(() => new Date().toISOString().slice(0, 10))
   const [saving, setSaving] = useState(false)
@@ -282,8 +434,11 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
         ...(isNew ? { lastUpdated } : {}),
         ...(unitFields.length ? { unit } : {}),
       }
-      if (isNew) await createLot(projectCode, { ...fields, status, soldBy })
-      else await updateLot(lot.id, projectCode, { ...fields, ...(showSoldBy ? { soldBy } : {}) })
+      if (isNew) await createLot(projectCode, { ...fields, status, ...sellerFields(seller), client })
+      else await updateLot(lot.id, projectCode, { ...fields, ...(showSoldBy ? { ...sellerFields(seller), client } : {}) })
+      if (showSoldBy && client && clientId) {
+        await pointClientAt(clientId, { stage: 'closed', projectCode, lot, lotNo: lotNo.trim() })
+      }
       setSaving(false)
       notifySaved(`${terms.item} ${isNew ? 'added' : 'updated'}`, `${terms.item} ${lotNo.trim()} was ${isNew ? 'added' : 'saved'}.`)
       onSaved(`${terms.item} ${lotNo.trim()} ${isNew ? 'added' : 'updated'}.`)
@@ -413,12 +568,27 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
 
         {showSoldBy ? (
           <FormRow id="lot-sold-by" label="Sold By">
-            <Input
-              id="lot-sold-by"
-              value={soldBy}
-              onChange={(event) => setSoldBy(event.target.value)}
-              placeholder="Sales agent's name"
-              {...fieldProps}
+            <SellerPicker id="lot-sold-by" value={seller} onChange={setSeller} disabled={saving} fieldProps={fieldProps} />
+          </FormRow>
+        ) : null}
+
+        {showSoldBy ? (
+          <FormRow id="lot-client" label="Client">
+            <ClientPicker
+              id="lot-client"
+              value={client}
+              onChange={(name, id) => {
+                setClient(name)
+                setClientId(id ?? null)
+              }}
+              disabled={saving}
+              fieldProps={fieldProps}
+              defaults={{
+                brokerName: seller.name,
+                projectCode,
+                unitDescription: unitDescription(projectCode, lotNo.trim(), 'Sold'),
+                tcpFormatted: lot?.tcp ? formatPeso(lot.tcp) : '',
+              }}
             />
           </FormRow>
         ) : null}

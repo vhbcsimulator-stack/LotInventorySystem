@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { Box, CloseButton, Dialog, Flex, Icon, Menu, NativeSelect, Portal, Text } from '@chakra-ui/react'
-import { LuChevronDown, LuMousePointerClick, LuPaintbrush, LuScanEye, LuShapes, LuTrash2, LuTriangleAlert, LuUpload, LuX } from 'react-icons/lu'
+import { LuChevronDown, LuMousePointerClick, LuPaintbrush, LuShapes, LuTrash2, LuTriangleAlert, LuUpload, LuX } from 'react-icons/lu'
 import AnnotatedImagePreview from '@/components/projects/AnnotatedImagePreview'
 import useApiQuery from '@/hooks/useApiQuery'
 import {
@@ -43,8 +43,10 @@ const FREEHAND_WARNING =
 
 /**
  * The lot-outline actions of the map tab in view: Color lots, which opens the
- * annotated preview ready to paint, and a menu to upload, preview or delete the
- * COCO JSON describing that map's lot polygons.
+ * annotated preview ready to paint, and a menu to upload or delete the COCO
+ * JSON describing that map's lot polygons. Previewing the outlines is Open full
+ * size on the map itself: `previewRef.current.previewOutlines(url)` opens that
+ * picture with its outlines drawn, or returns false when the map has none.
  *
  * The annotations belong to a slot — the tab's value — so each map tab carries
  * its own. Color lots on a map with none offers a choice: upload the COCO JSON
@@ -66,6 +68,8 @@ export default function AnnotatedImagesPanel({
   // Asked to move to another tab — when coloring starts on a map other than this one.
   onSelectSlot,
   startColoring = false,
+  // Receives { previewOutlines(url) } for the map tab's Open full size.
+  previewRef,
 }) {
   const query = useMemo(() => ({ projectCode }), [projectCode])
   const { data, loading, reload } = useApiQuery(fetchAnnotatedImages, query)
@@ -133,6 +137,21 @@ export default function AnnotatedImagesPanel({
     openColoringWhenReady(image)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images])
+
+  useImperativeHandle(
+    previewRef,
+    () => ({
+      // Previewing outlines is for looking at them, so they show from the start.
+      previewOutlines(url) {
+        if (!current?.coco) return false
+        setError('')
+        setFitError('')
+        setPreviewing({ image: current, url: url || current.url, startPainting: false, showAnnotations: true })
+        return true
+      },
+    }),
+    [current],
+  )
 
   if (loading && !data) return null
 
@@ -228,13 +247,16 @@ export default function AnnotatedImagesPanel({
       const url = await uploadMapImage({ projectCode, projectId, slot: image.slot, file })
       // Freehand coloring has no annotations row to point at the new map.
       if (url && image.id !== FREEHAND) await saveAnnotatedImage({ projectCode, slot: image.slot, existing: image, imageUrl: url })
-      const { updated, failed } = await updateLotStatuses(changes, projectCode)
+      const { updated, failed, clientsFailed } = await updateLotStatuses(changes, projectCode)
       const name = slotLabel(image.slot, slots)
       const message =
         `The colored map was saved — the ${name} map tab now shows it` +
         (updated ? `, and ${updated} lot status${updated === 1 ? ' was' : 'es were'} updated in the table.` : '.')
       if (failed.length) notifyWarning('Map saved, some lots not updated', `${failed.length} lot${failed.length === 1 ? '' : 's'} kept the old status.`)
       else notifySaved('Map colors saved', message)
+      if (clientsFailed.length) {
+        notifyWarning('Client record not updated', `${clientsFailed[0].message} (${clientsFailed.map((entry) => entry.lotNo).join(', ')})`)
+      }
       if (url) setPreviewing((open) => (open?.image.id === image.id ? { ...open, image: { ...open.image, url }, url, startPainting: false } : open))
       reload()
       return { failed }
@@ -304,67 +326,60 @@ export default function AnnotatedImagesPanel({
         Color lots
       </ActionButton>
 
-      <Menu.Root
-        positioning={{ placement: 'bottom-end' }}
-        onSelect={({ value }) => {
-          setError('')
-          if (value === 'upload') setEditing({ image: current, slot })
-          // Previewing outlines is for looking at them, so they show from the start.
-          else if (value === 'preview') openPreview(current, false, true)
-          else if (value === 'delete') setConfirming(current)
-        }}
-      >
-        {/* Styled as ActionButton, which cannot take the trigger's ref. */}
-        <Menu.Trigger
-          display="flex"
-          alignItems="center"
-          gap="6px"
-          h="34px"
-          px="12px"
-          borderRadius="8px"
-          border="1px solid"
-          borderColor={COLORS.border}
-          bg={COLORS.surface}
-          color={COLORS.heading}
-          fontFamily={FONT}
-          fontWeight="600"
-          fontSize="13px"
-          cursor="pointer"
-          flexShrink={0}
-          disabled={Boolean(busy)}
-          _hover={{ bg: COLORS.hoverBg }}
-          _disabled={{ opacity: 0.55, cursor: 'not-allowed' }}
-          _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+      {/* Upload, replace and delete are all edits, so the menu is for editors only. */}
+      {canEdit ? (
+        <Menu.Root
+          positioning={{ placement: 'bottom-end' }}
+          onSelect={({ value }) => {
+            setError('')
+            if (value === 'upload') setEditing({ image: current, slot })
+            else if (value === 'delete') setConfirming(current)
+          }}
         >
-          <Icon as={LuShapes} boxSize="14px" />
-          {hasOutlines ? `Lot outlines (${current.annotations})` : 'Lot outlines'}
-          <Icon as={LuChevronDown} boxSize="14px" />
-        </Menu.Trigger>
-        <Portal>
-          <Menu.Positioner>
-            <Menu.Content minW="200px">
-              {hasOutlines ? (
-                <Menu.Item value="preview" {...menuItem}>
-                  <Icon as={LuScanEye} boxSize="14px" />
-                  Preview outlines
-                </Menu.Item>
-              ) : null}
-              {canEdit ? (
+          {/* Styled as ActionButton, which cannot take the trigger's ref. */}
+          <Menu.Trigger
+            display="flex"
+            alignItems="center"
+            gap="6px"
+            h="34px"
+            px="12px"
+            borderRadius="8px"
+            border="1px solid"
+            borderColor={COLORS.border}
+            bg={COLORS.surface}
+            color={COLORS.heading}
+            fontFamily={FONT}
+            fontWeight="600"
+            fontSize="13px"
+            cursor="pointer"
+            flexShrink={0}
+            disabled={Boolean(busy)}
+            _hover={{ bg: COLORS.hoverBg }}
+            _disabled={{ opacity: 0.55, cursor: 'not-allowed' }}
+            _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+          >
+            <Icon as={LuShapes} boxSize="14px" />
+            {hasOutlines ? `Annotations` : 'Annotation'}
+            <Icon as={LuChevronDown} boxSize="14px" />
+          </Menu.Trigger>
+          <Portal>
+            <Menu.Positioner>
+              <Menu.Content minW="200px">
                 <Menu.Item value="upload" {...menuItem}>
                   <Icon as={LuUpload} boxSize="14px" />
                   {current ? 'Replace COCO JSON' : 'Upload COCO JSON'}
                 </Menu.Item>
-              ) : null}
-              {canEdit && current ? (
-                <Menu.Item value="delete" {...menuItem} color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
-                  <Icon as={LuTrash2} boxSize="14px" />
-                  Delete outlines
-                </Menu.Item>
-              ) : null}
-            </Menu.Content>
-          </Menu.Positioner>
-        </Portal>
-      </Menu.Root>
+                {current ? (
+                  <Menu.Item value="delete" {...menuItem} color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+                    <Icon as={LuTrash2} boxSize="14px" />
+                    Delete outlines
+                  </Menu.Item>
+                ) : null}
+              </Menu.Content>
+            </Menu.Positioner>
+          </Portal>
+        </Menu.Root>
+      ) : null}
 
       {error && !editing ? (
         <Text role="alert" w="100%" fontFamily={FONT} fontSize="13px" color="#B91C1C">
@@ -375,6 +390,7 @@ export default function AnnotatedImagesPanel({
       {previewing ? (
         <AnnotatedImagePreview
           open
+          projectCode={projectCode}
           title={`${projectName || projectCode} — ${slotLabel(previewing.image.slot, slots)}${previewing.freehand ? ' (no outlines)' : ''}`}
           warning={previewing.freehand ? FREEHAND_WARNING : ''}
           url={previewing.url}

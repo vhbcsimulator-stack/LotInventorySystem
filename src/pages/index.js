@@ -15,6 +15,7 @@ const loaders = {
   projects: () => import('./ProjectsPage'),
   announcements: () => import('./AnnouncementsPage'),
   brokers: () => import('./BrokersPage'),
+  salesAgents: () => import('./SalesAgentsPage'),
   clients: () => import('./ClientsPage'),
 }
 
@@ -31,6 +32,7 @@ export const PAGE_FALLBACKS = {
   projects: ProjectsSkeleton,
   announcements: AnnouncementsSkeleton,
   brokers: BrokersSkeleton,
+  salesAgents: BrokersSkeleton,
   clients: ClientsSkeleton,
 }
 

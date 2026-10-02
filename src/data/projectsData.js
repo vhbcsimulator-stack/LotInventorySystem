@@ -17,6 +17,7 @@ import { SOURCE, num, text } from './api'
 import { STATUS_ALIASES, fetchAllRows, supabase, uiStatus, unwrap } from './supabase'
 import { PRICE_CONFIG, fetchPriceLookup } from './pricesData'
 import { cached } from './queryClient'
+import { relabelClientsForLot, updateClientForLot } from './clientsData'
 
 export { SOURCE }
 
@@ -530,6 +531,7 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
    */
   const unitColumns = terms.unitFields.map((field) => field.column)
   const attempts = [
+    [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for', 'payment_type', 'contract_type', 'sales_agent'],
     [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for', 'payment_type', 'contract_type'],
     [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for', 'payment_type'],
     [...unitColumns, 'last_updated_precision', 'sold_by', 'reserve_type', 'reserved_for'],
@@ -582,6 +584,8 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
       status: uiStatus(lot.status),
       rawStatus: text(lot.status),
       soldBy: text(lot.sold_by),
+      // The sold lot's sales agent, beside its broker; '' before 20261017_add_lot_sales_agent.sql.
+      salesAgent: text(lot.sales_agent),
       // 'client' or 'company' for a reserved lot; '' for a default reservation or any other status.
       reserveType: text(lot.reserve_type),
       reservedFor: text(lot.reserved_for),
@@ -739,8 +743,12 @@ const SOLD_BY_MISSING =
 const UNIT_COLUMNS_MISSING =
   'The MSCC unit table has no unit columns yet — run supabase/migrations/20260916_add_mscc_unit_columns.sql in the Supabase SQL Editor.'
 
+const SALES_AGENT_MISSING =
+  'The lot table has no sales_agent column yet — run supabase/migrations/20261017_add_lot_sales_agent.sql in the Supabase SQL Editor.'
+
 /** Supabase's "unknown column" errors, rewritten as the migration to run. */
 function explainMissingColumn(err) {
+  if (/sales_agent/.test(err.message)) return new Error(SALES_AGENT_MISSING)
   if (/sold_by/.test(err.message)) return new Error(SOLD_BY_MISSING)
   if (UNIT_FIELDS.some((field) => err.message.includes(field.column))) return new Error(UNIT_COLUMNS_MISSING)
   return err
@@ -781,13 +789,27 @@ function unitColumnsFor(projectCode, unit) {
 }
 
 /**
- * `soldBy` is the agent's name and is required for 'sold'. Any other status
- * clears it, so an agent is never credited with a lot that is no longer sold.
+ * `soldBy` is who sold the lot — a broker's full name or another agent's — and
+ * is written with 'sold'; left undefined, a sold lot keeps the name it had. Any
+ * other status clears it, so an agent is never credited with a lot that is no
+ * longer sold.
+ *
+ * `client` is who bought a sold lot, or who a client reservation is held for
+ * (a client's name, kept in `reserved_for`); left undefined, the lot keeps the
+ * name it had. A company or default reservation never carries a name.
+ *
+ * `salesAgent` is the sold lot's sales agent, kept beside its broker in
+ * `sales_agent` the same way: written with 'sold', kept when left undefined,
+ * and cleared by any other status.
+ *
+ * `clientId`, with `client`, is that client's `clients` row: it is updated to
+ * the lot (stage, project, unit description, TCP) once the lot is saved. Resolves
+ * { clientError } when only that update failed — the lot's status still changed.
  *
  * `reserveType` ('client', 'company', or '' for the default) is recorded with a
  * reserved status; left undefined, a reserved lot keeps the type it had.
  */
-export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE, { reserveType } = {}) {
+export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE, { reserveType, soldBy, salesAgent, client, clientId } = {}) {
   if (!supabase) throw new Error('No database connected.')
   const table = LOT_TABLES[projectCode]
   if (!table) throw new Error(`No lot table is set up for ${projectCode}.`)
@@ -810,22 +832,78 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
     ...(!reserved ? { reserve_type: null } : reserveType !== undefined ? { reserve_type: reserveType || null } : {}),
   }
 
-  const updateRow = (body) => supabase.from(table).update(body).eq('id', id).select('id')
+  const updateRow = (body) => supabase.from(table).update(body).eq('id', id).select('id, lot_no, total')
 
   /*
-   * Who sold a lot is recorded on the lot itself (the edit dialog's Sold By), not
-   * here — a status change only clears the name when the lot stops being sold.
+   * Who sold it — or, for a client reservation, who reserved it — is kept with
+   * a sale and a client reservation. A reservation that keeps its type keeps it
+   * too; any other status, and a company or default reservation, clears it.
    */
-  let result =
-    status === 'sold'
-      ? await writeTolerantly(changes, updateRow)
-      : await writeTolerantly({ ...changes, sold_by: null }, updateRow)
-  // Before the migration, the column does not exist yet; the status still changes.
+  const clearsSeller = status !== 'sold' && !(reserved && (reserveType === undefined || reserveType === 'client'))
+  const agent = clearsSeller ? { sold_by: null } : soldBy === undefined ? {} : { sold_by: text(soldBy).trim() || null }
+  const seller = clearsSeller
+    ? { sales_agent: null }
+    : salesAgent === undefined
+      ? {}
+      : { sales_agent: text(salesAgent).trim() || null }
+  /*
+   * `reserved_for` names a sold lot's buyer or a client reservation's holder.
+   * A status it does not fit drops it, so a past buyer never shows as who a
+   * company reservation is for. Kept when no client is given: a lot sold (the
+   * reservation's holder became the buyer), or a reservation whose type is kept.
+   */
+  const named = status === 'sold' || (reserved && reserveType === 'client')
+  const buyer = named
+    ? client === undefined ? {} : { reserved_for: text(client).trim() || null }
+    : !reserved || reserveType !== undefined
+      ? { reserved_for: null }
+      : {}
+  /*
+   * Before 20261004_add_lot_reserved_for.sql or 20261017_add_lot_sales_agent.sql
+   * there is no client or agent to clear, so a column only being cleared is
+   * dropped. One being filled in is kept, and its error names the migration.
+   */
+  const write = async (body) => {
+    const attempt = await writeTolerantly(body, updateRow)
+    const missing = ['reserved_for', 'sales_agent'].find(
+      (column) => column in body && !body[column] && attempt.error?.message.includes(column),
+    )
+    if (!missing) return attempt
+    const rest = { ...body }
+    delete rest[missing]
+    return write(rest)
+  }
+  let result = await write({ ...changes, ...agent, ...seller, ...buyer })
+  // Before the migration, the column does not exist yet; the status still changes,
+  // unless an agent was named — dropping it would lose who made the sale.
   if (result.error && /sold_by/.test(result.error.message)) {
-    result = await writeTolerantly(changes, updateRow)
+    if (agent.sold_by) throw new Error(SOLD_BY_MISSING)
+    result = await write({ ...changes, ...seller, ...buyer })
   }
   if (result.error) throw explainMissingColumn(new Error(result.error.message))
   if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+
+  const [lot] = result.data
+  const statusLabel = LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status
+  // Clients whose Unit Description names this lot follow its status ("MVLC B27 L1 · Available").
+  await relabelClientsForLot({ projectCode, lotNo: text(lot.lot_no), statusLabel }).catch((err) =>
+    console.error('[projects] lot saved, clients not relabelled:', err),
+  )
+
+  if (!clientId || !buyer.reserved_for) return {}
+  try {
+    await updateClientForLot(clientId, {
+      stage: status === 'sold' ? 'closed' : 'reserved',
+      projectCode,
+      lotNo: text(lot.lot_no),
+      total: lot.total,
+      statusLabel,
+    })
+    return {}
+  } catch (err) {
+    console.error('[projects] lot saved, client not updated:', err)
+    return { clientError: err.message }
+  }
 }
 
 /** Who a reserved lot is held for. '' is the default reservation and is stored as null. */
@@ -838,23 +916,41 @@ export const RESERVE_TYPE_OPTIONS = [
 const RESERVE_TYPE_MISSING =
   'The lot table has no reserve_type column yet — run supabase/migrations/20260921_add_lot_reserve_type.sql in the Supabase SQL Editor.'
 
-/** Record a reserved lot's reserve type. The status itself stays reserved. */
-export async function updateReserveType(id, projectCode, reserveType) {
+/**
+ * Record a reserved lot's reserve type. The status itself stays reserved.
+ * `client` is who a client reservation is held for, and `seller` ({ soldBy,
+ * salesAgent }, as sellerFields gives it) the broker or sales agent who
+ * reserved it; company and default reservations carry neither.
+ */
+export async function updateReserveType(id, projectCode, reserveType, client, seller) {
   const table = lotTableFor(projectCode)
   if (!RESERVE_TYPE_OPTIONS.some((option) => option.value === reserveType)) {
     throw new Error(`Unknown reserve type "${reserveType}".`)
   }
 
-  const result = await supabase
-    .from(table)
-    .update({
-      reserve_type: reserveType || null,
-      // A client name must not remain attached after switching to Company/Default.
-      ...(reserveType === 'client' ? {} : { reserved_for: null }),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', id)
-    .select('id')
+  const forClient = reserveType === 'client'
+  const sellerColumns = !forClient
+    ? { sold_by: null, sales_agent: null }
+    : seller === undefined
+      ? {}
+      : { sold_by: text(seller.soldBy).trim() || null, sales_agent: text(seller.salesAgent).trim() || null }
+  const body = {
+    reserve_type: reserveType || null,
+    // A client name must not remain attached after switching to Company/Default.
+    ...(!forClient ? { reserved_for: null } : client === undefined ? {} : { reserved_for: text(client).trim() || null }),
+    ...sellerColumns,
+    updated_at: new Date().toISOString(),
+  }
+  const write = (row) => supabase.from(table).update(row).eq('id', id).select('id')
+  let result = await write(body)
+  // Before the sold_by / sales_agent migrations, a column only being cleared is dropped.
+  const missing = ['sales_agent', 'sold_by'].find((column) => column in body && !body[column] && result.error?.message.includes(column))
+  if (missing) {
+    const rest = { ...body }
+    delete rest[missing]
+    result = await write(rest)
+  }
+  if (result.error && /sales_agent|sold_by/.test(result.error.message)) throw explainMissingColumn(new Error(result.error.message))
   if (result.error) {
     throw new Error(/reserve_type/.test(result.error.message) ? RESERVE_TYPE_MISSING : result.error.message)
   }
@@ -942,21 +1038,30 @@ export async function fetchLotsByIdentifier(projectCode, { phase = null, section
 }
 
 /**
- * Apply several status changes ([{ id, lotNo, status, reserveType? }]) one lot at a time.
- * Never stops at the first failure: returns { updated, failed: [{ lotNo, message }] }.
+ * Apply several status changes ([{ id, lotNo, status, reserveType?, soldBy?, salesAgent?, client?, clientId? }]) one lot at a time.
+ * Never stops at the first failure: returns { updated, failed: [{ lotNo, message }],
+ * clientsFailed: [{ lotNo, message }] } — the last for lots saved whose client record was not updated.
  */
 export async function updateLotStatuses(changes, projectCode) {
   let updated = 0
   const failed = []
+  const clientsFailed = []
   for (const change of changes) {
     try {
-      await updateLotStatus(change.id, change.status, projectCode, { reserveType: change.reserveType })
+      const saved = await updateLotStatus(change.id, change.status, projectCode, {
+        reserveType: change.reserveType,
+        soldBy: change.soldBy,
+        salesAgent: change.salesAgent,
+        client: change.client,
+        clientId: change.clientId,
+      })
       updated += 1
+      if (saved?.clientError) clientsFailed.push({ lotNo: change.lotNo, message: saved.clientError })
     } catch (err) {
       failed.push({ lotNo: change.lotNo, message: err.message })
     }
   }
-  return { updated, failed }
+  return { updated, failed, clientsFailed }
 }
 
 function lotTableFor(projectCode) {
@@ -984,7 +1089,7 @@ function lastUpdatedDay(value, fallback) {
  * and TCP are refreshed from the project's price table so they stay consistent
  * with what the lots page shows. `phase` may be null for projects without phases.
  */
-export async function updateLot(id, projectCode, { lotNo, phase, category, areaSqm, soldBy, unit, lastUpdated }) {
+export async function updateLot(id, projectCode, { lotNo, phase, category, areaSqm, soldBy, salesAgent, client, unit, lastUpdated }) {
   const table = lotTableFor(projectCode)
   // Projects whose lots are not grouped (ERHD) never store a phase.
   if (!lotTermsFor(projectCode).group) phase = null
@@ -1014,6 +1119,9 @@ export async function updateLot(id, projectCode, { lotNo, phase, category, areaS
     ...(pricePerSqm === null ? {} : { price_per_sqm: pricePerSqm }),
     // Only sent for sold lots, where the form shows the agent field.
     ...(soldBy === undefined ? {} : { sold_by: text(soldBy).trim() || null }),
+    ...(salesAgent === undefined ? {} : { sales_agent: text(salesAgent).trim() || null }),
+    // The buyer, likewise only for sold lots.
+    ...(client === undefined ? {} : { reserved_for: text(client).trim() || null }),
     ...unitColumnsFor(projectCode, unit),
   }
 
@@ -1025,9 +1133,9 @@ export async function updateLot(id, projectCode, { lotNo, phase, category, areaS
 /**
  * Add one lot to the project's lot table. Price per sqm and TCP come from the
  * project's price table, as for updates and imports; `soldBy` is required for
- * 'sold'. `phase` may be null for projects without phases. Resolves the new id.
+ * 'sold', and `client` names its buyer. `phase` may be null for projects without phases. Resolves the new id.
  */
-export async function createLot(projectCode, { lotNo, phase, category, areaSqm, status = 'available', soldBy = '', unit, lastUpdated }) {
+export async function createLot(projectCode, { lotNo, phase, category, areaSqm, status = 'available', soldBy = '', salesAgent = '', client = '', unit, lastUpdated }) {
   const table = lotTableFor(projectCode)
   // Projects whose lots are not grouped (ERHD) never store a phase.
   if (!lotTermsFor(projectCode).group) phase = null
@@ -1040,7 +1148,7 @@ export async function createLot(projectCode, { lotNo, phase, category, areaSqm, 
   if (phase !== null && !(Number.isInteger(phase) && phase > 0)) throw new Error(`${lotTermsFor(projectCode).group ?? 'Phase'} must be a whole number.`)
   if (!LOT_STATUS_OPTIONS.some((option) => option.value === status)) throw new Error(`Unknown status "${status}".`)
   const agent = text(soldBy).trim()
-  if (status === 'sold' && !agent) throw new Error('Enter the sales agent who sold this lot.')
+  if (status === 'sold' && !agent && !text(salesAgent).trim()) throw new Error('Choose who sold this lot: a broker or a sales agent.')
 
   const { data: auth } = await supabase.auth.getUser()
   if (!auth?.user) throw new Error('Sign in to add lots.')
@@ -1075,11 +1183,13 @@ export async function createLot(projectCode, { lotNo, phase, category, areaSqm, 
     last_updated_precision: null,
     user_id: auth.user.id,
     ...unitColumnsFor(projectCode, unit),
+    ...(status === 'sold' && text(client).trim() ? { reserved_for: text(client).trim() } : {}),
+    ...(status === 'sold' && text(salesAgent).trim() ? { sales_agent: text(salesAgent).trim() } : {}),
   }
 
   const insertRow = (body) => supabase.from(table).insert(body).select('id')
 
-  let result = await writeTolerantly({ ...row, sold_by: status === 'sold' ? agent : null }, insertRow)
+  let result = await writeTolerantly({ ...row, sold_by: status === 'sold' ? agent || null : null }, insertRow)
   // Before the sold_by migration, a lot that is not sold still goes in without it.
   if (result.error && /sold_by/.test(result.error.message) && status !== 'sold') {
     result = await writeTolerantly(row, insertRow)

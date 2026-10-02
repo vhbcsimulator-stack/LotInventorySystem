@@ -1,6 +1,18 @@
 import { useState } from 'react'
-import { Box, CloseButton, Drawer, Flex, Grid, Icon, Image, Input, Portal, Text } from '@chakra-ui/react'
-import { LuArrowDown, LuArrowUp, LuDownload, LuSearch, LuStar, LuTriangleAlert, LuUsers } from 'react-icons/lu'
+import { Box, CloseButton, Dialog, Drawer, Flex, Grid, Icon, Image, Input, Menu, Portal, Spinner, Text } from '@chakra-ui/react'
+import {
+  LuArrowDown,
+  LuArrowUp,
+  LuDownload,
+  LuEllipsisVertical,
+  LuPencil,
+  LuSearch,
+  LuStar,
+  LuTrash2,
+  LuTriangleAlert,
+  LuUsers,
+} from 'react-icons/lu'
+import { ClientFormDialog } from '@/components/projects/ClientPicker'
 import ClientsSkeleton from '@/components/skeletons/ClientsSkeleton'
 import { Reveal } from '@/components/ui-kit/Reveal'
 import EmptyState from '@/components/EmptyState'
@@ -10,7 +22,8 @@ import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
-import { CLIENTS_TABLE, fetchClients } from '@/data/clientsData'
+import { CLIENTS_TABLE, deleteClient, fetchClients } from '@/data/clientsData'
+import { notifyFailed, notifySaved } from '@/lib/notify'
 import { contractTypeFromCsv, paymentTypeFromCsv } from '@/data/lotImportData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
@@ -374,8 +387,124 @@ function ClientDrawer({ client, columns, parts, onClose }) {
   )
 }
 
+/** Row actions behind a three-dot button, like the brokers' and lots' menus. */
+function ClientActions({ name, onEdit, onDelete }) {
+  return (
+    <Menu.Root onSelect={({ value }) => (value === 'edit' ? onEdit() : value === 'delete' ? onDelete() : null)}>
+      <Menu.Trigger
+        aria-label={`More actions for ${name || 'client'}`}
+        title="More actions"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        boxSize="32px"
+        borderRadius="8px"
+        bg="transparent"
+        color={COLORS.heading}
+        cursor="pointer"
+        _hover={{ bg: COLORS.hoverBg }}
+        _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+      >
+        <Icon as={LuEllipsisVertical} boxSize="16px" />
+      </Menu.Trigger>
+      <Portal>
+        <Menu.Positioner>
+          <Menu.Content minW="150px">
+            <Menu.Item value="edit" gap="8px" fontSize="13px">
+              <Icon as={LuPencil} boxSize="14px" />
+              Edit
+            </Menu.Item>
+            <Menu.Item value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+              <Icon as={LuTrash2} boxSize="14px" />
+              Delete
+            </Menu.Item>
+          </Menu.Content>
+        </Menu.Positioner>
+      </Portal>
+    </Menu.Root>
+  )
+}
+
+/** Confirms, then permanently deletes one client. */
+function DeleteClientDialog({ client, name, onClose, onDeleted }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  function close() {
+    setError('')
+    onClose()
+  }
+
+  async function handleDelete() {
+    setBusy(true)
+    setError('')
+    try {
+      await deleteClient(client.id)
+      notifySaved('Client deleted', `${name || 'The client'} was removed from Clients.`)
+      onDeleted()
+    } catch (err) {
+      setError(err.message)
+      notifyFailed('Could not delete the client', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const button = { h: '40px', px: '18px', borderRadius: '8px', fontFamily: FONT, fontWeight: '600', fontSize: '14px', cursor: 'pointer' }
+  return (
+    <Dialog.Root role="alertdialog" open={Boolean(client)} onOpenChange={({ open }) => !open && !busy && close()} placement="center" size="sm">
+      <Portal>
+        <Dialog.Backdrop />
+        <Dialog.Positioner px="16px">
+          <Dialog.Content borderRadius="16px">
+            <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
+              <Dialog.Title fontFamily={HEADING_FONT} fontSize="18px" color={COLORS.heading}>
+                Delete client?
+              </Dialog.Title>
+            </Dialog.Header>
+            <Dialog.Body py="18px">
+              <Text fontFamily={FONT} fontSize="14px" lineHeight="22px" color={COLORS.muted}>
+                {name || 'This client'} will be removed from Clients, and from their broker&apos;s app. This cannot be
+                undone. Lots reserved for or sold to them keep the client&apos;s name.
+              </Text>
+              {error ? (
+                <Text role="alert" mt="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
+                  {error}
+                </Text>
+              ) : null}
+            </Dialog.Body>
+            <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px">
+              <Box as="button" type="button" {...button} bg={COLORS.hoverBg} color={COLORS.heading} disabled={busy} onClick={close}>
+                Cancel
+              </Box>
+              <Flex
+                as="button"
+                type="button"
+                align="center"
+                gap="8px"
+                {...button}
+                bg="#DC2626"
+                color="#FFFFFF"
+                _hover={{ bg: '#B91C1C' }}
+                cursor={busy ? 'progress' : 'pointer'}
+                onClick={busy ? undefined : handleDelete}
+              >
+                {busy ? <Spinner size="xs" /> : <Icon as={LuTrash2} boxSize="14px" />}
+                {busy ? 'Deleting…' : 'Delete client'}
+              </Flex>
+            </Dialog.Footer>
+          </Dialog.Content>
+        </Dialog.Positioner>
+      </Portal>
+    </Dialog.Root>
+  )
+}
+
 export default function ClientsPage() {
-  const { data, loading, refresh } = useApiQuery(fetchClients)
+  const { data, loading, refresh, reload } = useApiQuery(fetchClients)
+  // The client being edited or deleted from its row's menu.
+  const [editing, setEditing] = useState(null)
+  const [deleting, setDeleting] = useState(null)
   const [tab, setTab] = useState('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState(null)
@@ -590,6 +719,11 @@ export default function ClientsPage() {
                         </Box>
                       )
                     })}
+                    <Box as="th" w="48px" px="8px">
+                      <Box as="span" srOnly>
+                        Actions
+                      </Box>
+                    </Box>
                   </tr>
                 </Box>
                 <tbody>
@@ -632,6 +766,21 @@ export default function ClientsPage() {
                           )}
                         </Box>
                       ))}
+                      {/* The menu acts on the row without also opening its details. */}
+                      <Box
+                        as="td"
+                        px="8px"
+                        py="8px"
+                        verticalAlign="middle"
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      >
+                        <ClientActions
+                          name={plainValue(client[nameKey])}
+                          onEdit={() => setEditing(client)}
+                          onDelete={() => setDeleting(client)}
+                        />
+                      </Box>
                     </Box>
                   ))}
                 </tbody>
@@ -672,6 +821,28 @@ export default function ClientsPage() {
       </Flex>
 
       <ClientDrawer client={openClient} columns={columns} parts={parts} onClose={() => setOpenKey(null)} />
+      {editing ? (
+        <ClientFormDialog
+          key={editing._key}
+          open
+          client={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            setEditing(null)
+            reload()
+          }}
+        />
+      ) : null}
+      <DeleteClientDialog
+        client={deleting}
+        name={deleting ? plainValue(deleting[nameKey]) : ''}
+        onClose={() => setDeleting(null)}
+        onDeleted={() => {
+          if (deleting?._key === openKey) setOpenKey(null)
+          setDeleting(null)
+          reload()
+        }}
+      />
     </Reveal>
   )
 }

@@ -487,8 +487,8 @@ export default function ProjectsPage({
         open={importOpen}
         projectCode={data.project.code}
         projectName={data.project.name}
-        onReserveTypeSaved={(reserveType) => {
-          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType } } : prev))
+        onReserveTypeSaved={(reserveType, reservedFor) => {
+          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType, reservedFor } } : prev))
           reload()
         }}
         terms={data.terms}
@@ -520,8 +520,8 @@ export default function ProjectsPage({
         terms={data.terms}
         projectName={data.project.name}
         projectCode={data.project.code}
-        onReserveTypeSaved={(reserveType) => {
-          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType } } : prev))
+        onReserveTypeSaved={(reserveType, reservedFor) => {
+          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType, reservedFor } } : prev))
           reload()
         }}
         onClose={() => setLotDialog(null)}

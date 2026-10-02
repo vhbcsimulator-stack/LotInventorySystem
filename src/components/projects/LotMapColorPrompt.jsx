@@ -130,14 +130,27 @@ export default function LotMapColorPrompt({ projectCode, projectId, projectName,
       // The map first: if it fails, the lot keeps its old status too.
       const url = await uploadMapImage({ projectCode, projectId, slot: current.image.slot, file })
       if (url) await saveAnnotatedImage({ projectCode, slot: current.image.slot, existing: current.image, imageUrl: url })
-      // The reserve type chosen on the map (Client or Company) goes with a reserved status.
+      // The reserve type chosen on the map (Client or Company) goes with a reserved status,
+      // and who sold it and to whom with a sold one.
       const own = changes.find((change) => change.id === lot.id)
-      if (!state.saved.length) await updateLotStatus(lot.id, status, projectCode, { reserveType: own?.reserveType })
+      const saved = state.saved.length
+        ? {}
+        : await updateLotStatus(lot.id, status, projectCode, {
+            reserveType: own?.reserveType,
+            soldBy: own?.soldBy,
+            salesAgent: own?.salesAgent,
+            client: own?.client,
+            clientId: own?.clientId,
+          })
       // Other lots recoloured along the way; the requested one is written above.
       const result = await updateLotStatuses(
         changes.filter((change) => change.id !== lot.id),
         projectCode,
       )
+      const clientsFailed = [...(saved.clientError ? [{ lotNo: lot.identifier }] : []), ...(result.clientsFailed ?? [])]
+      if (clientsFailed.length) {
+        notifyWarning('Client record not updated', `Lot saved, but the client of ${clientsFailed.map((entry) => entry.lotNo).join(', ')} still shows the old details.`)
+      }
       if (result.failed.length) {
         notifyWarning(`${name} map saved, some lots not updated`, `${result.failed.length} other lot${result.failed.length === 1 ? '' : 's'} kept the old status.`)
       } else {
@@ -160,6 +173,7 @@ export default function LotMapColorPrompt({ projectCode, projectId, projectName,
     <AnnotatedImagePreview
       key={`${current.image.id}-${state.index}`}
       open
+      projectCode={projectCode}
       title={`Update map color — ${projectName || projectCode} ${name}${position}`}
       url={current.url}
       coco={current.image.coco}

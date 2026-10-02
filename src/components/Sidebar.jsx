@@ -6,7 +6,8 @@ import {
   LuLayoutDashboard,
   LuLogOut,
   LuMegaphone,
-  LuUserPlus,
+  LuBriefcaseBusiness,
+  LuContactRound,
   LuUsers,
 } from 'react-icons/lu'
 
@@ -14,7 +15,8 @@ const DEFAULT_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: LuLayoutDashboard },
   { key: 'projects', label: 'Projects & Lots', icon: LuBuilding2 },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
-  { key: 'brokers', label: 'Add Brokers', icon: LuUserPlus },
+  { key: 'brokers', label: 'Brokers', icon: LuContactRound },
+  { key: 'salesAgents', label: 'Sales Agents', icon: LuBriefcaseBusiness },
   { key: 'clients', label: 'Clients', icon: LuUsers },
 ]
 

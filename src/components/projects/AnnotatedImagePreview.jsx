@@ -8,6 +8,7 @@ import {
   LuEye,
   LuEyeOff,
   LuImage,
+  LuLayoutGrid,
   LuPaintbrush,
   LuPalette,
   LuPipette,
@@ -25,7 +26,11 @@ import useLotPainter from '@/components/projects/useLotPainter'
 import { TOLERANCE_DEFAULT, TOLERANCE_MAX, TOLERANCE_MIN } from '@/components/projects/lotRecolor'
 import { DEFAULT_PALETTE, hexToHsv, hsvToHex, isDefaultPalette, loadPalette, savePalette } from '@/components/projects/legendPalette'
 import { frameMisfit, isSvgUrl } from '@/lib/svgMaps'
-import { lotsForLabel, planStatusUpdate } from '@/components/projects/lotStatusPlan'
+import { fillForStatus, lotsForLabel, planStatusUpdate } from '@/components/projects/lotStatusPlan'
+import { SellerPicker } from '@/components/projects/SoldByPicker'
+import { sellerFields } from '@/components/projects/seller'
+import ClientPicker from '@/components/projects/ClientPicker'
+import { unitDescription } from '@/data/clientsData'
 import { LOT_STATUS_OPTIONS } from '@/data/projectsData'
 import { uiStatus } from '@/data/supabase'
 import { COLORS, LOT_STATUS, MAP_LOT_FILL } from '@/theme/colors'
@@ -270,6 +275,17 @@ const PaintLayers = memo(function PaintLayers({ id, url, width, height, layers }
  * selection, or their visibility actually change, and a pan just moves the layer
  * that already exists.
  */
+/**
+ * A status fill darkened for drawing an outline, so the pale fills (Open,
+ * Prime) still show as borders over lots painted the same colour.
+ */
+function outlineColor(hex) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) return hex
+  const value = parseInt(hex.slice(1), 16)
+  const shade = (channel) => Math.round(channel * 0.55)
+  return `rgb(${shade((value >> 16) & 255)}, ${shade((value >> 8) & 255)}, ${shade(value & 255)})`
+}
+
 const Shapes = memo(function Shapes({ shapes, selected, strokeWidth, onSelect, painting = false, outlined = true }) {
   /*
    * While colouring, the shapes are clear click targets over the recoloured map —
@@ -327,6 +343,8 @@ const Shapes = memo(function Shapes({ shapes, selected, strokeWidth, onSelect, p
  */
 export default function AnnotatedImagePreview({
   open,
+  // The lots' project, so a sold lot's new client is prefilled with it.
+  projectCode,
   title,
   url,
   coco,
@@ -370,6 +388,10 @@ export default function AnnotatedImagePreview({
   closeConfirm = 'Discard the lot colors you have not saved?',
 }) {
   const [natural, setNatural] = useState({ width: 0, height: 0 })
+  // The map url that has finished loading (or failed to); any other url is still on its way.
+  const [loadedUrl, setLoadedUrl] = useState('')
+  const [loadFailed, setLoadFailed] = useState(false)
+  const imageLoading = Boolean(url) && loadedUrl !== url
   const [selected, setSelected] = useState(null)
   // Keep the base map clean on open; annotations remain available from the
   // explicit Show annotations control (and appear automatically while painting).
@@ -522,6 +544,36 @@ export default function AnnotatedImagePreview({
       },
     )
   }
+
+  // The annotations list is coloured by each lot's status, so the lots load as soon as the preview opens.
+  useEffect(() => {
+    if (open) ensureLots()
+  })
+
+  /*
+   * The map colour for an annotation's lot status — Sold, Reserved, Hold, or
+   * Available (open) — as { color, label }. Null until the lots load, or when the
+   * label names no single lot; the annotation then keeps its own colour.
+   */
+  function statusSwatch(shape) {
+    if (!lotsByKey) return null
+    const matches = lotsForLabel(shape.label, lotsByKey)
+    if (matches.length !== 1) return null
+    const status = String(matches[0].status).toLowerCase()
+    const fill = fillForStatus(status)
+    if (!fill || !palette[fill]) return null
+    return { color: palette[fill], label: LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? matches[0].status }
+  }
+
+  // The outlines on the map follow the same status colours, darkened so pale fills still read as borders.
+  const statusShapes = useMemo(() => {
+    if (!lotsByKey) return shapes
+    return shapes.map((shape) => {
+      const matches = lotsForLabel(shape.label, lotsByKey)
+      const fill = matches.length === 1 ? fillForStatus(String(matches[0].status).toLowerCase()) : null
+      return fill && palette[fill] ? { ...shape, color: outlineColor(palette[fill]) } : shape
+    })
+  }, [shapes, lotsByKey, palette])
   // Selecting an outline shows its lot, so the lots load the first time one is picked.
   useEffect(() => {
     if (selected !== null) ensureLots()
@@ -691,6 +743,9 @@ export default function AnnotatedImagePreview({
    * review: null | { loading } | { plan } | { error }
    */
   const [review, setReview] = useState(null)
+  // Who sold each lot the review turns sold, and to which client, by lot id:
+  // { [id]: { soldBy, client } } — both required before saving to the table.
+  const [sales, setSales] = useState({})
 
   // Ctrl+Z undoes a colouring step; Ctrl+Y or Ctrl+Shift+Z redoes it (⌘ on a Mac).
   useEffect(() => {
@@ -730,6 +785,32 @@ export default function AnnotatedImagePreview({
     }
   }
   async function confirmSave(updateTable = true) {
+    const changes = updateTable
+      ? review.plan.changes.map((change) => {
+          const sale = sales[change.id] ?? {}
+          // Skipped: only the status changes; the lot keeps whatever seller and client it had.
+          if (sale.skip) return { ...change, skipped: true }
+          // The client's record is pointed at the lot too, when it is one from the list.
+          const client = { client: sale.client?.trim() ?? '', clientId: sale.clientId }
+          if (change.status === 'sold') return { ...change, ...sellerFields(sale.seller), ...client }
+          if (isClientReservation(change)) return { ...change, ...sellerFields(sale.seller), ...client }
+          return change
+        })
+      : []
+    const unnamed = (change) => !change.skipped && ((!change.soldBy && !change.salesAgent) || !change.client)
+    const unsold = changes.filter((change) => change.status === 'sold' && unnamed(change))
+    const unheld = changes.filter((change) => isClientReservation(change) && unnamed(change))
+    if (unsold.length || unheld.length) {
+      const lots = (list) => list.map((change) => change.lotNo).join(', ')
+      const message = [
+        unsold.length ? `Choose who sold ${lots(unsold)} and the client.` : '',
+        unheld.length ? `Choose who reserved ${lots(unheld)} and the client.` : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
+      setReview((current) => (current ? { ...current, saveError: message } : current))
+      return
+    }
     try {
       /*
        * Always saved as SVG, so nothing is lost: the map as it is — its own SVG,
@@ -737,8 +818,12 @@ export default function AnnotatedImagePreview({
        * written in as filled paths, all in one file the Flutter app also shows.
        */
       const file = new File([await painter.toSvgBlob()], svgFileName, { type: 'image/svg+xml' })
-      const { failed } = await onSaveUpdate({ file, changes: updateTable ? review.plan.changes : [] })
+      const { failed } = await onSaveUpdate({ file, changes })
+      // The lots' statuses just changed; reload them so the annotations list shows the new colours.
+      lotsRequested.current = false
+      ensureLots()
       setReview(null)
+      setSales({})
       if (failed.length) {
         setPaintMessage(
           `The map was saved, but ${failed.length} lot${failed.length === 1 ? '' : 's'} kept the old status: ${failed
@@ -948,6 +1033,11 @@ export default function AnnotatedImagePreview({
     _hover: { bg: COLORS.hoverBg },
   }
 
+  // Sizes that match (or are still loading) need no attention; a mismatch is always shown.
+  const sizesOk = matches || !natural.width
+  // With nothing to show beside it, the map takes the whole width.
+  const showSidebar = showShapes || !sizesOk || (painting && clickedPaints.length > 0)
+
   return (
     <Dialog.Root
       open={open}
@@ -1094,7 +1184,7 @@ export default function AnnotatedImagePreview({
                       ) : null}
                       {showShapes || painting ? (
                         <Shapes
-                          shapes={shapes}
+                          shapes={statusShapes}
                           selected={selected}
                           // Thin: about 1.4 units on a 2048-wide map, so outlines trace the lots without covering them.
                           strokeWidth={Math.max(0.75, (canvas.width || 1) / 1500)}
@@ -1114,7 +1204,15 @@ export default function AnnotatedImagePreview({
                         alt=""
                         hidden
                         decoding="async"
-                        onLoad={(event) => setNatural({ width: event.target.naturalWidth, height: event.target.naturalHeight })}
+                        onLoad={(event) => {
+                          setNatural({ width: event.target.naturalWidth, height: event.target.naturalHeight })
+                          setLoadFailed(false)
+                          setLoadedUrl(url)
+                        }}
+                        onError={() => {
+                          setLoadFailed(true)
+                          setLoadedUrl(url)
+                        }}
                       />
                     </Box>
                     {selectedShape ? (
@@ -1214,6 +1312,30 @@ export default function AnnotatedImagePreview({
                         <Icon as={LuZoomIn} boxSize="16px" />
                       </Flex>
                     </Flex>
+                    {/* Covers the frame until the map arrives, so outlines never float over an empty canvas. */}
+                    {imageLoading || loadFailed || !url ? (
+                      <Flex
+                        role="status"
+                        position="absolute"
+                        inset="0"
+                        direction="column"
+                        align="center"
+                        justify="center"
+                        gap="10px"
+                        px="24px"
+                        bg={COLORS.canvas}
+                        textAlign="center"
+                      >
+                        {loadFailed ? (
+                          <Icon as={LuTriangleAlert} boxSize="22px" color="#B91C1C" />
+                        ) : (
+                          <Spinner size="md" color={COLORS.brandGreen} />
+                        )}
+                        <Text fontFamily={FONT} fontSize="13px" color={loadFailed ? '#B91C1C' : COLORS.subtle}>
+                          {loadFailed ? 'The map image could not be loaded. Close and try again.' : 'Loading map…'}
+                        </Text>
+                      </Flex>
+                    ) : null}
                     {/*
                       * Opened for approval, the untouched map must never pass for
                       * the preview: it stays covered until the new colors are on.
@@ -1243,24 +1365,11 @@ export default function AnnotatedImagePreview({
                   </Box>
 
                   <Flex mt="10px" gap="8px" align="center" flexWrap="wrap">
-                    <Flex
-                      {...controlStyle}
-                      display={startPainting ? 'none' : 'flex'}
-                      aria-pressed={painting}
-                      bg={painting ? COLORS.hoverBg : undefined}
-                      onClick={() => {
-                        setPainting((on) => !on)
-                        setSelected(null)
-                        setPaintMessage('')
-                      }}
-                    >
-                      <Icon as={LuPaintbrush} boxSize="14px" />
-                      {painting ? 'Stop coloring' : 'Color lots'}
-                    </Flex>
                     {shapes.length ? (
-                      <Flex {...controlStyle} onClick={() => setShowShapes((on) => !on)}>
+                      // One switch for the outlines on the map, the size report and the annotations list.
+                      <Flex {...controlStyle} aria-pressed={showShapes} onClick={() => setShowShapes((on) => !on)}>
                         <Icon as={showShapes ? LuEyeOff : LuEye} boxSize="14px" />
-                        {showShapes ? 'Hide annotations' : 'Show annotations'}
+                        {showShapes ? 'Hide lot outlines' : 'Show lot outlines'}
                       </Flex>
                     ) : null}
                     {selected !== null ? (
@@ -1354,8 +1463,21 @@ export default function AnnotatedImagePreview({
                   ) : null}
                 </Box>
 
+                {showSidebar ? (
                 <Box w={{ base: '100%', lg: '280px' }} flexShrink={0}>
-                  <SizeReport annotated={annotated} natural={natural} fit={fit} matches={matches} reshaped={reshaped} frameIssue={frameIssue} />
+                  {showShapes || !sizesOk ? (
+                    <SizeReport
+                      annotated={annotated}
+                      natural={natural}
+                      fit={fit}
+                      matches={matches}
+                      reshaped={reshaped}
+                      frameIssue={frameIssue}
+                      lots={shapes.length}
+                    />
+                  ) : null}
+                  {showShapes ? (
+                  <>
                   <Text mt="14px" mb="6px" fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
                     Annotations ({shapes.length})
                   </Text>
@@ -1380,7 +1502,9 @@ export default function AnnotatedImagePreview({
                         <Box
                           boxSize="10px"
                           borderRadius="2px"
-                          bg={shape.id === selected ? SELECTED : shape.color}
+                          bg={shape.id === selected ? SELECTED : (statusSwatch(shape)?.color ?? shape.color)}
+                          border={statusSwatch(shape) ? '1px solid rgba(0,0,0,0.25)' : undefined}
+                          title={statusSwatch(shape)?.label}
                           flexShrink={0}
                         />
                         <Text fontFamily={FONT} fontSize="12.5px" color={COLORS.heading} truncate>
@@ -1412,6 +1536,8 @@ export default function AnnotatedImagePreview({
                       </Text>
                     )}
                   </Flex>
+                  </>
+                  ) : null}
                   {painting && clickedPaints.length ? (
                     <>
                       <Text mt="14px" mb="6px" fontFamily={FONT} fontWeight="600" fontSize="13px" color={COLORS.heading}>
@@ -1448,6 +1574,7 @@ export default function AnnotatedImagePreview({
                     </>
                   ) : null}
                 </Box>
+                ) : null}
               </Flex>
             </Dialog.Body>
             <Dialog.CloseTrigger asChild top="14px" right="14px">
@@ -1463,6 +1590,12 @@ export default function AnnotatedImagePreview({
         saving={saving}
         error={review?.saveError || saveError}
         controlStyle={controlStyle}
+        projectCode={projectCode}
+        sales={sales}
+        onSaleChange={(id, patch) => {
+          setSales((current) => ({ ...current, [id]: { ...current[id], ...patch } }))
+          setReview((current) => (current?.saveError ? { ...current, saveError: '' } : current))
+        }}
         onCancel={() => setReview(null)}
         onConfirm={() => confirmSave(true)}
         onSaveMapOnly={allowMapOnlySave && review?.plan?.changes.length ? () => confirmSave(false) : null}
@@ -1562,7 +1695,7 @@ function statusLabel(value, reserveType) {
  * every coloured lot that will not change (with why). Nothing is written until
  * Save update is pressed here.
  */
-function SaveReviewDialog({ open, review: current, palette, saving, error, controlStyle, onCancel, onConfirm, onSaveMapOnly }) {
+function SaveReviewDialog({ open, review: current, palette, saving, error, controlStyle, projectCode, sales, onSaleChange, onCancel, onConfirm, onSaveMapOnly }) {
   /*
    * This dialog stays mounted and is opened through `open`. Mounting it already
    * open, inside the open map dialog, let StrictMode's mount–unmount–mount read
@@ -1616,18 +1749,34 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
                   </Text>
                   <Flex direction="column" gap="4px">
                     {plan.changes.map((change) => (
-                      <Flex key={change.id} gap="8px" align="center" px="8px" py="5px" borderRadius="8px" bg={COLORS.canvas}>
-                        <Text {...text} fontWeight="600" flex="1" truncate>
-                          {change.lotNo}
-                        </Text>
-                        <Text {...text} color={COLORS.subtle}>
-                          {statusLabel(change.from, change.fromReserveType)}
-                        </Text>
-                        <Text {...text}>→</Text>
-                        <Text {...text} fontWeight="700">
-                          {statusLabel(change.status, change.reserveType)}
-                        </Text>
-                      </Flex>
+                      <Box key={change.id} px="8px" py="5px" borderRadius="8px" bg={COLORS.canvas}>
+                        <Flex gap="8px" align="center">
+                          <Text {...text} fontWeight="600" flex="1" truncate>
+                            {change.lotNo}
+                          </Text>
+                          <Text {...text} color={COLORS.subtle}>
+                            {statusLabel(change.from, change.fromReserveType)}
+                          </Text>
+                          <Text {...text}>→</Text>
+                          <Text {...text} fontWeight="700">
+                            {statusLabel(change.status, change.reserveType)}
+                          </Text>
+                        </Flex>
+                        {/*
+                          * A sold lot names who sold it (a broker is credited on the Brokers page) and
+                          * to whom; a client reservation names its client. A company one names no one.
+                          */}
+                        {change.status === 'sold' || isClientReservation(change) ? (
+                          <SaleFields
+                            change={change}
+                            sale={sales[change.id] ?? {}}
+                            projectCode={projectCode}
+                            disabled={saving}
+                            textStyle={text}
+                            onChange={(patch) => onSaleChange(change.id, patch)}
+                          />
+                        ) : null}
+                      </Box>
                     ))}
                   </Flex>
                   {plan.upToDate.length ? (
@@ -1709,6 +1858,73 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
       </Portal>
       ) : null}
     </Dialog.Root>
+  )
+}
+
+/** A change that reserves a lot for a client, who must then be named. */
+const isClientReservation = (change) => change.status === 'reserved' && change.reserveType === 'client'
+
+/** Who sold or reserved it (a broker or a sales agent) and the client, for a lot the review turns sold or reserves for a client. */
+function SaleFields({ change, sale, projectCode, disabled, textStyle, onChange }) {
+  const sold = change.status === 'sold'
+  const fieldProps = { h: '32px', fontFamily: FONT, fontSize: '12.5px', bg: COLORS.surface, borderRadius: '8px' }
+  const labelProps = { ...textStyle, color: COLORS.subtle, lineHeight: '32px', flexShrink: 0, w: '52px' }
+  const linkProps = {
+    as: 'button',
+    type: 'button',
+    ...textStyle,
+    fontWeight: '600',
+    color: COLORS.activeBg,
+    cursor: disabled ? 'default' : 'pointer',
+    _hover: { textDecoration: 'underline' },
+  }
+  // Skipped: the status still changes, but no one is named; the lot keeps what it had.
+  if (sale.skip) {
+    return (
+      <Flex mt="6px" align="center" justify="space-between" gap="8px">
+        <Text {...textStyle} color={COLORS.subtle}>
+          Skipped — saved without who {sold ? 'sold' : 'reserved'} it or the client.
+        </Text>
+        <Box {...linkProps} onClick={disabled ? undefined : () => onChange({ skip: false })}>
+          Undo
+        </Box>
+      </Flex>
+    )
+  }
+  return (
+    <Flex direction="column" gap="6px" mt="6px">
+      {/* A sale and a client reservation alike name who brought the client in. */}
+      {sold || isClientReservation(change) ? (
+        <Flex gap="8px" align="flex-start">
+          <Text {...labelProps}>{sold ? 'Sold by' : 'Reserved by'}</Text>
+          <SellerPicker value={sale.seller} onChange={(seller) => onChange({ seller })} disabled={disabled} fieldProps={fieldProps} />
+        </Flex>
+      ) : null}
+      <Flex gap="8px" align="flex-start">
+        <Text {...labelProps}>Client</Text>
+        <ClientPicker
+          value={sale.client ?? ''}
+          onChange={(client, clientId) => onChange({ client, clientId })}
+          disabled={disabled}
+          fieldProps={fieldProps}
+          defaults={{
+            // A new client's broker is whoever sold or reserved the lot.
+            brokerName: sale.seller?.name ?? '',
+            ...(sold ? {} : { stage: 'reserved' }),
+            projectCode: projectCode ?? '',
+            unitDescription: unitDescription(projectCode, change.lotNo, sold ? 'Sold' : 'Reserved'),
+          }}
+        />
+      </Flex>
+      <Box
+        {...linkProps}
+        alignSelf="flex-end"
+        title="Change the status without naming the broker, sales agent, or client"
+        onClick={disabled ? undefined : () => onChange({ skip: true })}
+      >
+        Skip
+      </Box>
+    </Flex>
   )
 }
 
@@ -2481,7 +2697,7 @@ function PaintToolbar({
 }
 
 /** The two sizes side by side, and what was done about a mismatch. */
-function SizeReport({ annotated, natural, fit, matches, reshaped, frameIssue }) {
+function SizeReport({ annotated, natural, fit, matches, reshaped, frameIssue, lots = null }) {
   const row = (icon, label, value) => (
     <Flex align="center" gap="8px" py="3px">
       <Icon as={icon} boxSize="14px" color={COLORS.subtle} />
@@ -2532,6 +2748,12 @@ function SizeReport({ annotated, natural, fit, matches, reshaped, frameIssue }) 
           </Text>
         </Flex>
       )}
+      {/* Every annotation outlines one lot, so their count is the map's lot count. */}
+      {lots !== null ? (
+        <Box mt="8px" pt="6px" borderTop="1px solid" borderColor={COLORS.border}>
+          {row(LuLayoutGrid, 'Lots on this map', lots.toLocaleString())}
+        </Box>
+      ) : null}
     </Box>
   )
 }

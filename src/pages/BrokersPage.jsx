@@ -23,7 +23,7 @@ import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
-import { createBroker, deleteBroker, fetchBrokers, validateBroker } from '@/data/brokersData'
+import { ACCOUNT_KINDS, createAccount, deleteAccount, fetchAccounts, validateBroker } from '@/data/brokersData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
@@ -123,7 +123,7 @@ function csvCell(value) {
   return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str
 }
 
-function downloadBrokersCsv(brokers) {
+function downloadBrokersCsv(brokers, copy) {
   const rows = [
     ['first_name', 'last_name', 'email', 'mobile_number', 'lots_sold', 'total_tcp', 'created_at'],
     ...brokers.map((b) => [b.firstName, b.lastName, b.email, b.mobileNumber, b.lotsSold, Math.round(b.totalTcp), b.createdAt]),
@@ -133,7 +133,7 @@ function downloadBrokersCsv(brokers) {
   const url = URL.createObjectURL(new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `brokers-${new Date().toISOString().slice(0, 10)}.csv`
+  link.download = `${copy.plural.replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`
   link.rel = 'noopener'
   // Firefox and Safari only follow the click for a link that is in the document.
   document.body.appendChild(link)
@@ -247,7 +247,7 @@ function CopyRow({ label, value }) {
  * the server and exists nowhere else the portal can read, so this is the only
  * time it is shown.
  */
-function CreatedCredentials({ account, onDone }) {
+function CreatedCredentials({ account, copy, onDone }) {
   return (
     <Box role="status" p="16px" borderRadius="10px" bg={COLORS.statusBg} border="1px solid" borderColor={COLORS.border}>
       <Flex align="center" gap="8px">
@@ -257,9 +257,8 @@ function CreatedCredentials({ account, onDone }) {
         </Text>
       </Flex>
       <Text mt="6px" fontFamily={FONT} fontSize="13px" lineHeight="20px" color={COLORS.muted}>
-        A confirmation email was sent to {account.email}. The broker must confirm it before they can sign in to the
-        app. The password is not in that email, so give it to them yourself. It is shown only once: copy it before
-        closing.
+        The sign-in details were emailed to {account.email}, asking the {copy.singular} to change the temporary password after
+        signing in. If the email does not arrive, give them the password below. It is shown only once.
       </Text>
       <Flex mt="12px" direction="column" gap="10px">
         <CopyRow label="Email" value={account.email} />
@@ -293,7 +292,7 @@ function CreatedCredentials({ account, onDone }) {
  * The account form in a modal. Errors show per field once someone has tried to
  * submit. After a create it swaps to the one-time credentials until Done.
  */
-function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
+function AddBrokerDialog({ copy, open, disabled, onClose, onCreated }) {
   const [form, setForm] = useState(EMPTY_FORM)
   const [submitted, setSubmitted] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -323,16 +322,22 @@ function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
 
     setBusy(true)
     try {
-      const account = await createBroker(form)
+      const account = await createAccount(copy.kind, form)
       const name = `${form.firstName.trim()} ${form.lastName.trim()}`
-      setCreated({ name, email: account.email, password: account.password })
-      notifySaved('Broker account created', `A confirmation email was sent to ${account.email}.`)
       setForm(EMPTY_FORM)
       setSubmitted(false)
       onCreated()
+      if (!copy.hasLogin) {
+        // A sales agent has no login, so there is nothing to show once they are saved.
+        notifySaved(`${copy.title} added`, `${name} was added to ${copy.titlePlural}.`)
+        onClose()
+        return
+      }
+      setCreated({ name, email: account.email, password: account.password })
+      notifySaved(`${copy.title} account created`, `The sign-in details were emailed to ${account.email}.`)
     } catch (err) {
       setError(err.message)
-      notifyFailed('Could not create the broker account', err)
+      notifyFailed(copy.hasLogin ? `Could not create the ${copy.singular} account` : `Could not add the ${copy.singular}`, err)
     } finally {
       setBusy(false)
     }
@@ -355,10 +360,12 @@ function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
           <Dialog.Content borderRadius="16px">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px" display="block">
               <Dialog.Title fontFamily={HEADING_FONT} fontSize="18px" color={COLORS.heading}>
-                New Broker Account
+                {copy.hasLogin ? `New ${copy.title} Account` : `New ${copy.title}`}
               </Dialog.Title>
               <Dialog.Description mt="4px" fontFamily={FONT} fontSize="13px" color={COLORS.muted}>
-                All fields are required. A temporary password is generated, and the broker gets a confirmation email.
+                {copy.hasLogin
+                  ? `All fields are required. A temporary password is generated and emailed to the ${copy.singular}, who is asked to change it after signing in.`
+                  : `All fields are required. The ${copy.singular} is added to the directory; no app login is created.`}
               </Dialog.Description>
             </Dialog.Header>
             <Dialog.CloseTrigger asChild top="14px" right="14px">
@@ -367,7 +374,7 @@ function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
 
             {created ? (
               <Dialog.Body py="18px">
-                <CreatedCredentials account={created} onDone={close} />
+                <CreatedCredentials account={created} copy={copy} onDone={close} />
               </Dialog.Body>
             ) : (
               <form noValidate onSubmit={handleSubmit}>
@@ -424,7 +431,7 @@ function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
                     _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
                   >
                     {busy ? <Spinner size="sm" /> : <Icon as={LuUserPlus} boxSize="16px" />}
-                    Create Broker Account
+                    {copy.hasLogin ? `Create ${copy.title} Account` : `Add ${copy.title}`}
                   </Flex>
                 </Dialog.Footer>
               </form>
@@ -437,7 +444,7 @@ function AddBrokerDialog({ open, disabled, onClose, onCreated }) {
 }
 
 /** A broker's contact details and sales, opened from the row's Profile button. */
-function BrokerProfileDialog({ broker, onClose }) {
+function BrokerProfileDialog({ broker, copy, onClose }) {
   const details = broker
     ? [
         { icon: LuMail, label: 'Email', value: broker.email },
@@ -462,7 +469,7 @@ function BrokerProfileDialog({ broker, onClose }) {
                         {fullName(broker)}
                       </Dialog.Title>
                       <Text fontFamily={FONT} fontSize="13px" color={COLORS.muted}>
-                        Broker
+                        {copy.title}
                       </Text>
                     </Box>
                   </Flex>
@@ -526,7 +533,7 @@ function BrokerActions({ broker, onRemove }) {
           <Menu.Content minW="170px">
             <Menu.Item value="remove" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
               <Icon as={LuUserMinus} boxSize="14px" />
-              Remove account
+              Remove
             </Menu.Item>
           </Menu.Content>
         </Menu.Positioner>
@@ -536,7 +543,7 @@ function BrokerActions({ broker, onRemove }) {
 }
 
 /** Confirms, then removes the broker's app login and their row. */
-function RemoveBrokerDialog({ broker, onClose, onRemoved }) {
+function RemoveBrokerDialog({ broker, copy, onClose, onRemoved }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -549,13 +556,16 @@ function RemoveBrokerDialog({ broker, onClose, onRemoved }) {
     setBusy(true)
     setError('')
     try {
-      await deleteBroker(broker.id)
-      notifySaved('Broker account removed', `${fullName(broker)} can no longer sign in to the app.`)
+      await deleteAccount(copy.kind, broker.id)
+      notifySaved(
+        copy.hasLogin ? `${copy.title} account removed` : `${copy.title} removed`,
+        copy.hasLogin ? `${fullName(broker)} can no longer sign in to the app.` : `${fullName(broker)} was removed from ${copy.titlePlural}.`,
+      )
       setError('')
       onRemoved()
     } catch (err) {
       setError(err.message)
-      notifyFailed('Could not remove the broker account', err)
+      notifyFailed(`Could not remove the ${copy.singular}${copy.hasLogin ? ' account' : ''}`, err)
     } finally {
       setBusy(false)
     }
@@ -577,13 +587,15 @@ function RemoveBrokerDialog({ broker, onClose, onRemoved }) {
           <Dialog.Content borderRadius="16px">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title fontFamily={HEADING_FONT} fontSize="18px" color={COLORS.heading}>
-                Remove broker account?
+                {copy.hasLogin ? `Remove ${copy.singular} account?` : `Remove ${copy.singular}?`}
               </Dialog.Title>
             </Dialog.Header>
             <Dialog.Body py="18px">
               <Text fontFamily={FONT} fontSize="14px" lineHeight="22px" color={COLORS.muted}>
-                {broker ? fullName(broker) : ''} ({broker?.email}) will be signed out of the app and their login
-                deleted. This cannot be undone. To give them access again, create a new account.
+                {broker ? fullName(broker) : ''} ({broker?.email}){' '}
+                {copy.hasLogin
+                  ? 'will be signed out of the app and their login deleted. This cannot be undone. To give them access again, create a new account.'
+                  : `will be removed from ${copy.titlePlural}. This cannot be undone. Lots they sold keep their Sold By name.`}
               </Text>
               {error ? (
                 <Text role="alert" mt="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
@@ -629,7 +641,7 @@ function RemoveBrokerDialog({ broker, onClose, onRemoved }) {
                 onClick={handleRemove}
               >
                 {busy ? <Spinner size="sm" /> : null}
-                Remove account
+                {copy.hasLogin ? 'Remove account' : 'Remove'}
               </Flex>
             </Dialog.Footer>
           </Dialog.Content>
@@ -691,7 +703,7 @@ function SpotlightCard({ broker, rank }) {
   )
 }
 
-function Spotlight({ producers }) {
+function Spotlight({ producers, copy }) {
   return (
     <Box as="section" aria-labelledby="spotlight-heading">
       <Flex align="center" gap="8px" mb="16px">
@@ -709,8 +721,8 @@ function Spotlight({ producers }) {
       ) : (
         <Card p="22px">
           <Text fontFamily={FONT} fontSize="14px" color={COLORS.muted}>
-            No sales credited to a broker yet. A sold lot counts toward a broker when its Sold By name matches the
-            broker&apos;s first and last name.
+            No sales credited to a {copy.singular} yet. A sold lot counts toward a {copy.singular} when its Sold By name
+            matches the {copy.singular}&apos;s first and last name.
           </Text>
         </Card>
       )}
@@ -877,8 +889,13 @@ function Pager({ page, pageCount, onChange }) {
   )
 }
 
-export default function BrokersPage() {
-  const { data, loading, reload, refresh } = useApiQuery(fetchBrokers)
+/**
+ * The directory of one kind of app account — brokers or sales agents (`kind`,
+ * see ACCOUNT_KINDS): their logins, lots closed, and TCP credited to them.
+ */
+export function AccountsPage({ kind = 'broker' }) {
+  const copy = ACCOUNT_KINDS[kind]
+  const { data, loading, reload, refresh } = useApiQuery(fetchAccounts, { kind })
   const [removing, setRemoving] = useState(null)
   const [viewing, setViewing] = useState(null)
   const [adding, setAdding] = useState(false)
@@ -891,11 +908,11 @@ export default function BrokersPage() {
   if (loading && !data) return <BrokersSkeleton />
 
   const connected = data?.source === 'database'
-  const brokers = data?.brokers ?? []
+  const brokers = data?.accounts ?? []
   const producers = rankProducers(brokers)
   const topIds = new Set(producers.slice(0, TOP_PERFORMERS).map((broker) => broker.id))
   const segments = [
-    { value: 'all', label: 'All Brokers', count: brokers.length },
+    { value: 'all', label: `All ${copy.titlePlural}`, count: brokers.length },
     { value: 'top', label: 'Top Performers', count: topIds.size },
   ]
 
@@ -922,10 +939,10 @@ export default function BrokersPage() {
             letterSpacing="-0.8px"
             color={COLORS.heading}
           >
-            Brokers &amp; Performance Directory
+            {copy.titlePlural} &amp; Performance Directory
           </Text>
           <Text mt="6px" maxW="560px" fontFamily={FONT} fontSize="14px" lineHeight="20px" color={COLORS.muted}>
-            Broker accounts, lots closed, and gross contract volumes (TCP) credited from the project lot tables.
+            {copy.title} accounts, lots closed, and gross contract volumes (TCP) credited from the project lot tables.
           </Text>
         </Box>
 
@@ -953,8 +970,8 @@ export default function BrokersPage() {
                 setSearch(event.target.value)
                 setPage(1)
               }}
-              placeholder="Search brokers by name, email, or mobile..."
-              aria-label="Search brokers"
+              placeholder={`Search ${copy.plural} by name, email, or mobile...`}
+              aria-label={`Search ${copy.plural}`}
               fontFamily={FONT}
               fontSize="13.5px"
               color={COLORS.heading}
@@ -968,11 +985,11 @@ export default function BrokersPage() {
               disabled={!connected}
               _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
             >
-              Add Brokers
+              Add {copy.titlePlural}
             </ToolbarButton>
             <ToolbarButton
               icon={LuDownload}
-              onClick={() => downloadBrokersCsv(matching)}
+              onClick={() => downloadBrokersCsv(matching, copy)}
               disabled={!matching.length}
               _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
             >
@@ -981,11 +998,11 @@ export default function BrokersPage() {
           </Flex>
         </Flex>
 
-        <Spotlight producers={producers.slice(0, 3)} />
+        <Spotlight producers={producers.slice(0, 3)} copy={copy} />
 
-        <Card as="section" p="0" overflow="hidden" aria-label="Broker directory">
+        <Card as="section" p="0" overflow="hidden" aria-label={`${copy.title} directory`}>
           <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '18px' }} py="18px">
-            <Flex role="tablist" aria-label="Broker groups" gap="8px" flexWrap="wrap">
+            <Flex role="tablist" aria-label={`${copy.title} groups`} gap="8px" flexWrap="wrap">
               {segments.map((option) => (
                 <Pill
                   key={option.value}
@@ -1045,13 +1062,13 @@ export default function BrokersPage() {
               >
                 <Icon as={LuSlidersHorizontal} boxSize="18px" />
               </Flex>
-              <RefreshButton onRefresh={refresh} label="Refresh brokers" size="44px" />
+              <RefreshButton onRefresh={refresh} label={`Refresh ${copy.plural}`} size="44px" />
             </Flex>
           </Flex>
 
           <Box role="table" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
             <Grid role="row" templateColumns={TABLE_COLUMNS} alignItems="center" gap="16px" px={{ base: '16px', md: '24px' }} py="14px" bg={TINT}>
-              <HeaderCell textAlign={{ base: 'left', lg: 'center' }}>Broker Profile</HeaderCell>
+              <HeaderCell textAlign={{ base: 'left', lg: 'center' }}>{copy.title} Profile</HeaderCell>
               <HeaderCell display={{ base: 'none', md: 'block' }}>Lots Sold</HeaderCell>
               <HeaderCell display={{ base: 'none', md: 'block' }} textAlign="center">
                 Total TCP
@@ -1073,9 +1090,9 @@ export default function BrokersPage() {
             ) : (
               <Box p="16px">
                 {brokers.length ? (
-                  <EmptyState icon={LuSearch} title="No matching brokers" hint="Try a different name, email, or mobile number." />
+                  <EmptyState icon={LuSearch} title={`No matching ${copy.plural}`} hint="Try a different name, email, or mobile number." />
                 ) : (
-                  <EmptyState icon={LuUsers} title="No brokers yet" hint="Use Add Brokers to create the first account." />
+                  <EmptyState icon={LuUsers} title={`No ${copy.plural} yet`} hint={`Use Add ${copy.titlePlural} to create the first account.`} />
                 )}
               </Box>
             )}
@@ -1084,7 +1101,7 @@ export default function BrokersPage() {
           {matching.length ? (
             <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '18px' }} py="18px">
               <Text fontFamily={FONT} fontSize="14px" color={COLORS.muted}>
-                Showing {visible.length} of {matching.length} {matching.length === 1 ? 'broker' : 'brokers'}
+                Showing {visible.length} of {matching.length} {matching.length === 1 ? copy.singular : copy.plural}
               </Text>
               <Pager page={currentPage} pageCount={pageCount} onChange={setPage} />
             </Flex>
@@ -1092,12 +1109,13 @@ export default function BrokersPage() {
         </Card>
       </Flex>
 
-      <AddBrokerDialog open={adding} disabled={!connected} onClose={() => setAdding(false)} onCreated={reload} />
+      <AddBrokerDialog copy={copy} open={adding} disabled={!connected} onClose={() => setAdding(false)} onCreated={reload} />
 
-      <BrokerProfileDialog broker={viewing} onClose={() => setViewing(null)} />
+      <BrokerProfileDialog broker={viewing} copy={copy} onClose={() => setViewing(null)} />
 
       <RemoveBrokerDialog
         broker={removing}
+        copy={copy}
         onClose={() => setRemoving(null)}
         onRemoved={() => {
           setRemoving(null)
@@ -1106,4 +1124,8 @@ export default function BrokersPage() {
       />
     </Reveal>
   )
+}
+
+export default function BrokersPage() {
+  return <AccountsPage kind="broker" />
 }
