@@ -27,3 +27,7 @@ dist-ssr
 .env.example
 
 dist/
+
+# Supabase: database migrations and the CLI's local link state stay off GitHub
+supabase/migrations/
+supabase/.temp/
