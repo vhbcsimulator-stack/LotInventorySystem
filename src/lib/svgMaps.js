@@ -230,8 +230,22 @@ const OUTSIDE_DRAWING = 'defs, clipPath, mask, pattern, symbol, marker'
 /** Root children that are not drawing. */
 const NOT_DRAWN = new Set(['defs', 'style', 'title', 'desc', 'metadata'])
 /** The layer of recoloured lots, drawn over the map; each lot in it is a group of its own. */
-const COLORS_ATTR = 'data-vhbc-lot-colors'
-const LOT_ATTR = 'data-vhbc-lot'
+const COLORS_ATTR = 'data-bhri-lot-colors'
+const LOT_ATTR = 'data-bhri-lot'
+/** The same marks under the names maps were saved with before the rename to BHRI. */
+const LEGACY_ATTRS = [
+  ['data-vhbc-lot-colors', COLORS_ATTR],
+  ['data-vhbc-lot', LOT_ATTR],
+]
+/** Renames the older marks in a saved map, so its earlier colours are found and replaced as usual. */
+function upgradeLegacyMarks(root) {
+  for (const [legacy, current] of LEGACY_ATTRS) {
+    for (const el of root.querySelectorAll(`[${legacy}]`)) {
+      el.setAttribute(current, el.getAttribute(legacy))
+      el.removeAttribute(legacy)
+    }
+  }
+}
 const hex = ([r, g, b]) => `#${[r, g, b].map((v) => Math.round(Math.min(255, Math.max(0, v))).toString(16).padStart(2, '0')).join('')}`
 const rgbOf = (value) => {
   const match = /rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(value ?? '')
@@ -292,8 +306,9 @@ export function lotShapes(region, width, rgb) {
  * Recolour lots in an SVG map, keeping it a vector the Flutter app can draw.
  *
  * `width` × `height` is the canvas the regions were found on. Each of `lots` is
- * { region, rgb, fill }: a region from lotRecolor, the new colour, and the
- * lot's colour as it appears on the map.
+ * { region, rgb, fill, ring }: a region from lotRecolor, the new colour, the
+ * lot's colour as it appears on the map, and — for a circled lot, which keeps
+ * its colour — the ring drawn over it ({ cx, cy, r, strokeWidth }, see lotRing).
  *
  * A lot drawn as its own shape has that shape's fill changed. Any other lot
  * (one shape covers many lots, or the SVG wraps a picture) gets its new colour
@@ -313,6 +328,7 @@ export function recolorSvg(text, { width, height, lots: painted }) {
   const doc = parse(text)
   const root = doc.documentElement
   ensureViewBox(root)
+  upgradeLegacyMarks(root)
 
   // Hit-testing needs it rendered: off screen, at the canvas size, so one
   // viewport unit is one canvas pixel.
@@ -340,7 +356,7 @@ export function recolorSvg(text, { width, height, lots: painted }) {
     let shapes = 0
     let paths = 0
 
-    for (const { region, rgb, fill } of lots) {
+    for (const { region, rgb, fill, ring } of lots) {
       // The map as seen already shows an earlier save's colour here: that one gives way.
       for (const group of earlier) {
         if (!group.parentNode) continue
@@ -351,6 +367,32 @@ export function recolorSvg(text, { width, height, lots: painted }) {
         const cx = Math.min(width - 1, Math.round(((x + 0.5) * width) / w0 - 0.5))
         const cy = Math.min(height - 1, Math.round(((y + 0.5) * height) / h0 - 0.5))
         if (regionContains(region, cy * width + cx)) group.remove()
+      }
+
+      // A circled lot keeps its colour and gets a red ring drawn over it.
+      if (ring) {
+        if (!layer) {
+          layer = doc.createElementNS(SVG_NS, 'g')
+          layer.setAttribute(COLORS_ATTR, '')
+        }
+        const group = doc.createElementNS(SVG_NS, 'g')
+        group.setAttribute(LOT_ATTR, '')
+        group.setAttribute('transform', toUser)
+        group.setAttribute('data-seed', `${region.seed % width},${(region.seed / width) | 0}`)
+        group.setAttribute('data-canvas', `${width}x${height}`)
+        // Worked out by the painter, with the ring's thickness and where it was dragged to.
+        const { cx, cy, r, strokeWidth } = ring
+        const circle = doc.createElementNS(SVG_NS, 'circle')
+        circle.setAttribute('cx', String(+cx.toFixed(2)))
+        circle.setAttribute('cy', String(+cy.toFixed(2)))
+        circle.setAttribute('r', String(+r.toFixed(2)))
+        circle.setAttribute('fill', 'none')
+        circle.setAttribute('stroke', LOT_RING_COLOR)
+        circle.setAttribute('stroke-width', String(+strokeWidth.toFixed(2)))
+        group.appendChild(circle)
+        layer.appendChild(group)
+        paths += 1
+        continue
       }
 
       const bounds = boundsOf(region, width)
@@ -448,6 +490,38 @@ export function recolorMatrix(base, next) {
   // A grey lot has no tint to go by, so every pixel in its clip is recoloured.
   const alpha = strength > 1e-4 ? [...tint.map((v) => v / strength), 0, 0] : [0, 0, 0, 1, 0]
   return [...rows.flat(), ...alpha].map((v) => +v.toFixed(6)).join(' ')
+}
+
+/** The red of the ring a circled lot (ERHD's Sold) is marked with. */
+export const LOT_RING_COLOR = '#E11D1D'
+
+/** How thick a ring can be set, as a multiple of its default thickness. */
+export const RING_THICKNESS_MIN = 0.5
+export const RING_THICKNESS_MAX = 3
+
+/**
+ * A ring's centre `[cx, cy]` kept inside its lot's `bounds`: the whole ring
+ * stays within the lot along each side it fits, and sits in the middle along
+ * one too short for it to move.
+ */
+export function clampRingCenter([cx, cy], r, { x0, y0, x1, y1 }) {
+  const clamp = (value, lo, hi) => (lo > hi ? (lo + hi) / 2 : Math.min(hi, Math.max(lo, value)))
+  return [clamp(cx, x0 + r, x1 - r), clamp(cy, y0 + r, y1 - r)]
+}
+
+/**
+ * The ring marking a circled lot, in canvas pixels: just inside the lot's
+ * shorter side, so it rings the lot number and area as the printed maps do.
+ * It is centred on the lot's own fill, moved by `offset` (canvas pixels) when it
+ * has been dragged — never out of the lot — and `thickness` times as thick as
+ * the default. `bounds` is the lot's box, which the ring is kept inside.
+ */
+export function lotRing(region, width, { thickness = 1, offset = null } = {}) {
+  const bounds = boundsOf({ pixels: region.fill ?? region.pixels }, width)
+  const { x0, y0, x1, y1 } = bounds
+  const r = 0.44 * Math.min(x1 - x0, y1 - y0)
+  const [cx, cy] = clampRingCenter([(x0 + x1) / 2 + (offset?.[0] ?? 0), (y0 + y1) / 2 + (offset?.[1] ?? 0)], r, bounds)
+  return { cx, cy, r, strokeWidth: Math.max(2.5, r * 0.14) * thickness, bounds }
 }
 
 function boundsOf(region, width) {

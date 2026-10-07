@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TOLERANCE_DEFAULT, createRegionFinder, hexToRgb, regionContains, sampleColor } from './lotRecolor'
 import { DEFAULT_PALETTE } from './legendPalette'
-import { SVG_TYPE, isSvgUrl, lotMask, maskPath, pictureSvg, recolorMatrix, recolorSvg, sanitizeSvg } from '@/lib/svgMaps'
+import { SVG_TYPE, isSvgUrl, lotMask, lotRing, maskPath, pictureSvg, recolorMatrix, recolorSvg, sanitizeSvg } from '@/lib/svgMaps'
 import { UPLOAD_RULES } from '@/lib/uploadRules'
 
 /*
@@ -72,6 +72,8 @@ const toDataUrl = (blob) =>
     reader.readAsDataURL(blob)
   })
 
+const NO_STATUSES = []
+
 const keyOf = (paint) => (paint.shapeId !== undefined ? `s:${paint.shapeId}` : `p:${paint.x.toFixed(1)},${paint.y.toFixed(1)}`)
 
 /**
@@ -102,6 +104,10 @@ export default function useLotPainter({
   palette = DEFAULT_PALETTE,
   // How an annotated lot is found: 'polygon' colors exactly inside its outline; 'lines' follows the printed lot lines from it.
   shapeMode = 'polygon',
+  // Statuses marked with a red ring around the lot rather than recoloured (ERHD's Sold).
+  circled = NO_STATUSES,
+  // How thick those rings are, as a multiple of the default.
+  ringThickness = 1,
 }) {
   const [loaded, setLoaded] = useState(null) // { key, pixels }
   const [failed, setFailed] = useState(null) // { key, message }
@@ -162,7 +168,9 @@ export default function useLotPainter({
 
   /**
    * Each painted lot once — its last paint wins — with its new colour and the
-   * colour it has on the untouched map.
+   * colour it has on the untouched map. A circled lot carries its ring instead
+   * (in canvas pixels), moved by the paint's `ringOffset` — where it was
+   * dragged to, in the annotations' coordinates.
    */
   const painted = useMemo(() => {
     if (!pixels) return []
@@ -173,10 +181,35 @@ export default function useLotPainter({
       if (!region || !fillRgb[paint.status]) continue
       if (lots.some((lot) => regionContains(lot.region, region.seed))) continue
       const o = region.seed * 4
-      lots.unshift({ region, rgb: fillRgb[paint.status], fill: [data[o], data[o + 1], data[o + 2]] })
+      const ring = circled.includes(paint.status)
+        ? lotRing(region, W, {
+            thickness: ringThickness,
+            offset: paint.ringOffset ? [paint.ringOffset.dx * sx, paint.ringOffset.dy * sy] : null,
+          })
+        : null
+      lots.unshift({ paint, region, rgb: fillRgb[paint.status], fill: [data[o], data[o + 1], data[o + 2]], ring })
     }
     return lots
-  }, [pixels, paints, regionOf, fillRgb])
+  }, [pixels, paints, regionOf, fillRgb, circled, ringThickness, W, sx, sy])
+
+  /**
+   * The rings drawn over circled lots, in the preview's units: each with the
+   * paint it belongs to and its lot's box, so the preview can drag it within it.
+   */
+  const circles = useMemo(() => {
+    const s = Math.sqrt(sx * sy)
+    return painted
+      .filter((lot) => lot.ring)
+      .map(({ paint, region, ring: { cx, cy, r, strokeWidth, bounds } }) => ({
+        key: region.seed,
+        paint,
+        cx: cx / sx,
+        cy: cy / sy,
+        r: r / s,
+        strokeWidth: strokeWidth / s,
+        bounds: { x0: bounds.x0 / sx, y0: bounds.y0 / sy, x1: bounds.x1 / sx, y1: bounds.y1 / sy },
+      }))
+  }, [painted, sx, sy])
 
   /*
    * The preview's colour layers: per old → new colour pair, the painted lots'
@@ -187,7 +220,8 @@ export default function useLotPainter({
    */
   const layers = useMemo(() => {
     const byPair = new Map()
-    for (const { region, rgb, fill } of painted) {
+    for (const { region, rgb, fill, ring } of painted) {
+      if (ring) continue
       const key = `${fill.join('-')}_${rgb.join('-')}`
       if (!byPair.has(key)) {
         byPair.set(key, { key, matrix: recolorMatrix(fill, rgb), paths: [], box: [Infinity, Infinity, -Infinity, -Infinity] })
@@ -294,6 +328,7 @@ export default function useLotPainter({
     error: enabled && failed?.key === loadKey ? failed.message : '',
     isSvg: isSvgUrl(url),
     layers: ready ? layers : [],
+    circles: ready ? circles : [],
     locatePoint,
     sampleColor: sample,
     toSvgBlob,

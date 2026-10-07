@@ -12,7 +12,7 @@ import { Box } from '@chakra-ui/react'
  * panel whose arrival is already being revealed by something around it.
  */
 
-const REVEAL = 'vhbc-reveal'
+const REVEAL = 'bhri-reveal'
 
 export function Reveal({ children, duration = '620ms', delay = '0ms', animate = true, ...rest }) {
   return (

@@ -239,6 +239,8 @@ export const DEFAULT_LOT_TERMS = {
   pricing: true,
   // Extra per-unit columns (UNIT_FIELDS); empty for projects that sell land.
   unitFields: [],
+  // Map statuses drawn as a red ring around the lot instead of a fill colour.
+  circled: [],
 }
 export const LOT_TERMS_BY_PROJECT = {
   MSCC: {
@@ -250,7 +252,8 @@ export const LOT_TERMS_BY_PROJECT = {
     pricing: false,
     unitFields: UNIT_FIELDS,
   },
-  ERHD: { ...DEFAULT_LOT_TERMS, group: null },
+  // ERHD's maps mark a sold lot with a red ring around its number and area, not a fill.
+  ERHD: { ...DEFAULT_LOT_TERMS, group: null, circled: ['sold'] },
 }
 export const lotTermsFor = (projectCode) => LOT_TERMS_BY_PROJECT[projectCode] ?? DEFAULT_LOT_TERMS
 
@@ -996,6 +999,25 @@ export function formatLotIdentifier(projectCode, value) {
 export function isLotIdentifierValid(projectCode, value) {
   if (!/^MVLC$/i.test(projectCode)) return Boolean(text(value).trim())
   return /^(?:B[1-9]\d*(?:-[A-Z])?|C) L[1-9]\d*[A-Z]?$/.test(formatLotIdentifier(projectCode, value))
+}
+
+/**
+ * Call `onChange` whenever a row of the project's lot table is added, changed,
+ * or deleted — in this app, another browser, or the Supabase dashboard.
+ * Returns the unsubscribe function. Needs the table in the supabase_realtime
+ * publication (20261018_realtime_lot_tables.sql); without it nothing arrives.
+ */
+export function subscribeToLots(projectCode, onChange) {
+  const table = supabase ? LOT_TABLES[projectCode] : null
+  if (!table) return () => {}
+  // A unique name: two open views of one table must not share (and close) a channel.
+  const channel = supabase
+    .channel(`lots:${table}:${Math.random().toString(36).slice(2)}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table }, () => onChange())
+    .subscribe()
+  return () => {
+    supabase.removeChannel(channel)
+  }
 }
 
 /**

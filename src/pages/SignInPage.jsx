@@ -3,7 +3,7 @@ import { Box, Flex, Icon, Image, Input, Spinner, Text } from '@chakra-ui/react'
 import { LuEye, LuEyeOff, LuLock, LuMail } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
 import { COLORS } from '@/theme/colors'
-import logo from '@/assets/vhbc-logo.png'
+import logo from '@/assets/BHRI OFFICIAL LOGO TRANSPARENT.png'
 
 function Field({ id, label, icon, children }) {
   return (
@@ -66,7 +66,8 @@ export default function SignInPage({ onSignIn }) {
     <Flex minH="100dvh" align="center" justify="center" bg={COLORS.canvas} px="16px" py="32px">
       <Card as="form" onSubmit={handleSubmit} w="full" maxW="400px" p={{ base: '24px', sm: '32px' }} noValidate>
         <Flex direction="column" align="center" gap="8px" mb="28px">
-          <Image src={logo} alt="VHBC" h="48px" objectFit="contain" />
+          {/* Wide and short with `cover`: the artwork is a band across a square transparent canvas. */}
+          <Image src={logo} alt="BHRI" w="128px" h="54px" objectFit="cover" />
           <Text
             as="h1"
             mt="8px"
@@ -79,7 +80,7 @@ export default function SignInPage({ onSignIn }) {
             Sign in to the Sales Portal
           </Text>
           <Text fontFamily="Inter, system-ui, sans-serif" fontSize="13px" color={COLORS.subtle} textAlign="center">
-            Use the email and password for your VHBC account.
+            Use the email and password for your BHRI account.
           </Text>
         </Flex>
 

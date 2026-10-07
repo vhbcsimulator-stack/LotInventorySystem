@@ -32,7 +32,7 @@ export default function PortfolioHero({ projects = [], project = 'overall', onPr
             letterSpacing="-0.4px"
             color={COLORS.heading}
           >
-            VHBC Portfolio Performance
+            BHRI Portfolio Performance
           </Text>
           <Text
             mt="6px"

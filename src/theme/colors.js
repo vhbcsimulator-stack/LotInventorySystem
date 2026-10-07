@@ -51,7 +51,7 @@ export default COLORS
 
 /*
  * Fills for recolouring lots on an uploaded site map, matched to the legend
- * printed on the VHBC maps themselves (SOLD, RESERVED, HOLD, PRIME, OPEN) so a
+ * printed on the BHRI maps themselves (SOLD, RESERVED, HOLD, PRIME, OPEN) so a
  * repainted lot reads the same as the ones the designer coloured.
  */
 export const MAP_LOT_FILL = [

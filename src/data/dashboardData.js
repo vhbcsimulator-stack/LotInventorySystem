@@ -187,13 +187,20 @@ export function filterMovements(rows = [], { project = 'overall', statuses = [] 
   })
 }
 
-/** Project code -> display name, newest row per code (the table repeats codes). */
+/**
+ * Project code -> { id, name, paused }, newest row per code (the table repeats
+ * codes). `paused` needs 20261012_add_project_paused.sql; until then every
+ * project reads as active.
+ */
 async function fetchProjectNames() {
-  const { data } = unwrap(await supabase.from('projects').select('id, code, name').order('id', { ascending: false }))
+  const read = (columns) => supabase.from('projects').select(columns).order('id', { ascending: false })
+  let result = await read('id, code, name, paused')
+  if (result.error && /paused/.test(result.error.message)) result = await read('id, code, name')
+  const { data } = unwrap(result)
   const byCode = new Map()
   data.forEach((row) => {
     const code = String(row.code ?? '').trim()
-    if (code && !byCode.has(code)) byCode.set(code, { id: row.id, name: String(row.name ?? '').trim() || code })
+    if (code && !byCode.has(code)) byCode.set(code, { id: row.id, name: String(row.name ?? '').trim() || code, paused: row.paused === true })
   })
   return byCode
 }
@@ -385,8 +392,9 @@ export async function fetchDashboard() {
   if (!supabase) return { ...EMPTY_DASHBOARD, source: SOURCE.NOT_CONFIGURED }
 
   try {
-    const codes = Object.keys(LOT_TABLES)
     const names = await fetchProjectNames()
+    // A paused project (Project Actions → Pause project) is left off the dashboard entirely.
+    const codes = Object.keys(LOT_TABLES).filter((code) => !names.get(code)?.paused)
     /*
      * Every project's lots and the announcements board, in parallel: the page
      * summarises both, and neither waits on the other.

@@ -4,7 +4,7 @@ const clientsModule = await import('./clientsData')
 const { NEW_CLIENT_FIELDS, portalSubtitle, validateClient } = clientsModule
 
 const VALID = {
-  broker_name: 'VHBC Test',
+  broker_name: 'BHRI Test',
   name: 'Aaron',
   phone: '096528104',
   stage: 'cold',

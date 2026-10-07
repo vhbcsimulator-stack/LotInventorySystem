@@ -3,8 +3,8 @@
 // Needs two function secrets:
 //   RESEND_API_KEY  an API key from resend.com/api-keys
 //   RESEND_FROM     the sender, on a domain verified in Resend,
-//                   e.g. "VHBC Portal <no-reply@yourdomain.com>"
-// Set them with: supabase secrets set RESEND_API_KEY=re_... RESEND_FROM="VHBC Portal <no-reply@yourdomain.com>"
+//                   e.g. "BHRI Portal <no-reply@yourdomain.com>"
+// Set them with: supabase secrets set RESEND_API_KEY=re_... RESEND_FROM="BHRI Portal <no-reply@yourdomain.com>"
 
 declare const Deno: {
   env: {

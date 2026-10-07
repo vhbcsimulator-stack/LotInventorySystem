@@ -1,5 +1,5 @@
 import { Box, Flex, Icon, Image, Text } from '@chakra-ui/react'
-import vhbcLogo from '@/assets/VHBC black logo (1).png'
+import bhriLogo from '@/assets/BHRI OFFICIAL LOGO TRANSPARENT.png'
 import { COLORS } from '@/theme/colors'
 import {
   LuBuilding2,
@@ -25,9 +25,9 @@ const DEFAULT_FOOTER_ITEMS = [
 ]
 
 const DEFAULT_BRAND = {
-  name: 'VHBC Portal',
-  tagline: 'Building Leisure Lifestyle Community',
-  logo: vhbcLogo,
+  name: 'BHRI Portal',
+  tagline: 'Buy Smart. Sell Wise.',
+  logo: bhriLogo,
 }
 
 function NavLink({ item, isActive, onSelect }) {
@@ -110,16 +110,19 @@ export default function Sidebar({
          */}
         <Flex direction="column" align="center" gap="10px" px="24px" pt="24px" pb="8px">
           {/*
-           * `logo` wins over `icon`. The artwork is dark-on-white, so it gets a
-           * plain white plate rather than the green tile the icon variant uses.
+           * `logo` wins over `icon`. The BHRI artwork sits in a band across the
+           * middle of a square transparent canvas, so the box is wide and short
+           * and `cover` crops away the empty top and bottom — the mark shows
+           * about 60px tall instead of a third of that.
            */}
           {brand?.logo ? (
             <Image
               src={brand.logo}
               alt={brand.name ? `${brand.name} logo` : 'Logo'}
-              h="56px"
+              w="160px"
+              h="68px"
               maxW="100%"
-              objectFit="contain"
+              objectFit="cover"
             />
           ) : brand?.icon ? (
             <Flex

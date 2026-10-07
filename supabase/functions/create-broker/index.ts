@@ -42,11 +42,11 @@ const clean = (value: unknown) => String(value ?? '').trim()
 
 /** The welcome email: the broker's sign-in details, and a request to change the password. */
 function welcomeEmail(firstName: string, email: string, password: string) {
-  const subject = 'Your VHBC broker account'
+  const subject = 'Your BHRI broker account'
   const text = [
     `Hi ${firstName},`,
     '',
-    'A broker account was created for you in the VHBC app. Sign in with:',
+    'A broker account was created for you in the BHRI app. Sign in with:',
     '',
     `Email: ${email}`,
     `Temporary password: ${password}`,
@@ -54,7 +54,7 @@ function welcomeEmail(firstName: string, email: string, password: string) {
     'This password is temporary. After you sign in, please change it in the app',
     'right away and keep your new password to yourself.',
     '',
-    "If you weren't expecting this account, reply to this email or contact VHBC.",
+    "If you weren't expecting this account, reply to this email or contact BHRI.",
   ].join('\n')
 
   const name = escapeHtml(firstName)
@@ -63,8 +63,8 @@ function welcomeEmail(firstName: string, email: string, password: string) {
   <body style="margin:0;padding:24px;background:#f4f6f8;font-family:Inter,Segoe UI,Arial,sans-serif;color:#1f2937">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:28px">
       <tr><td>
-        <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to VHBC, ${name}</h1>
-        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A broker account was created for you in the VHBC app. Sign in with:</p>
+        <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to BHRI, ${name}</h1>
+        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A broker account was created for you in the BHRI app. Sign in with:</p>
         <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;background:#f3f4f6;border-radius:8px;padding:14px;font-size:14px">
           <tr><td style="padding:4px 0;color:#6b7280;width:150px">Email</td><td style="padding:4px 0;font-weight:600">${escapeHtml(email)}</td></tr>
           <tr><td style="padding:4px 0;color:#6b7280">Temporary password</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(password)}</td></tr>
@@ -73,7 +73,7 @@ function welcomeEmail(firstName: string, email: string, password: string) {
           <strong>This password is temporary.</strong> After you sign in, please change it in the app
           right away and keep your new password to yourself.
         </p>
-        <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#6b7280">If you weren't expecting this account, reply to this email or contact VHBC.</p>
+        <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#6b7280">If you weren't expecting this account, reply to this email or contact BHRI.</p>
       </td></tr>
     </table>
   </body>

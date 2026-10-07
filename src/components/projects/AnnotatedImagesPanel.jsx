@@ -29,8 +29,10 @@ const FONT = 'Inter, system-ui, sans-serif'
 function slotLabel(slot, slots) {
   const known = slots.find((option) => option.value === slot)
   if (known) return known.label
-  const phase = /^phase-(\d+)$/.exec(slot ?? '')?.[1]
-  return phase ? `Phase ${phase}` : slot === 'commercial' ? 'Commercial' : 'Whole Map'
+  // Named as the tabs are (projectMapsData): 'phase-2-b' reads "Phase 2B".
+  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(slot ?? '')
+  if (match) return `Phase ${match[1]}${match[2] ? (match[2] === 'east' ? 'East' : match[2].toUpperCase()) : ''}`
+  return slot === 'commercial' ? 'Commercial' : 'Whole Map'
 }
 
 /** Stands in for an annotations row when coloring a map that has none. */
@@ -394,6 +396,8 @@ export default function AnnotatedImagesPanel({
           title={`${projectName || projectCode} — ${slotLabel(previewing.image.slot, slots)}${previewing.freehand ? ' (no outlines)' : ''}`}
           warning={previewing.freehand ? FREEHAND_WARNING : ''}
           url={previewing.url}
+          paletteSlot={previewing.image.slot}
+          slotName={(slot) => slotLabel(slot, slots)}
           coco={previewing.image.coco}
           fitting={busy === 'fit'}
           fitError={fitError}

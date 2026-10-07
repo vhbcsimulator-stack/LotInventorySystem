@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Box, CloseButton, Dialog, Flex, Icon, Portal, Spinner, Text } from '@chakra-ui/react'
+import { Box, CloseButton, Dialog, Flex, Icon, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
 import {
   LuCheck,
   LuChevronDown,
@@ -24,14 +24,27 @@ import {
 } from 'react-icons/lu'
 import useLotPainter from '@/components/projects/useLotPainter'
 import { TOLERANCE_DEFAULT, TOLERANCE_MAX, TOLERANCE_MIN } from '@/components/projects/lotRecolor'
-import { DEFAULT_PALETTE, hexToHsv, hsvToHex, isDefaultPalette, loadPalette, savePalette } from '@/components/projects/legendPalette'
-import { frameMisfit, isSvgUrl } from '@/lib/svgMaps'
+import {
+  DEFAULT_PALETTE,
+  hexToHsv,
+  hexToRgb,
+  hsvToHex,
+  isDefaultPalette,
+  samePalette,
+  loadPalette,
+  parseColorCode,
+  rgbToHex,
+  savePalette,
+} from '@/components/projects/legendPalette'
+import { LOT_RING_COLOR, RING_THICKNESS_MAX, RING_THICKNESS_MIN, clampRingCenter, frameMisfit, isSvgUrl } from '@/lib/svgMaps'
 import { fillForStatus, lotsForLabel, planStatusUpdate } from '@/components/projects/lotStatusPlan'
 import { SellerPicker } from '@/components/projects/SoldByPicker'
 import { sellerFields } from '@/components/projects/seller'
 import ClientPicker from '@/components/projects/ClientPicker'
 import { unitDescription } from '@/data/clientsData'
-import { LOT_STATUS_OPTIONS } from '@/data/projectsData'
+import { LOT_STATUS_OPTIONS, lotTermsFor, subscribeToLots } from '@/data/projectsData'
+import { fetchLegendColors, fetchProjectLegendColors, saveLegendColors } from '@/data/legendColorsData'
+import { notifyFailed } from '@/lib/notify'
 import { uiStatus } from '@/data/supabase'
 import { COLORS, LOT_STATUS, MAP_LOT_FILL } from '@/theme/colors'
 
@@ -345,6 +358,10 @@ export default function AnnotatedImagePreview({
   open,
   // The lots' project, so a sold lot's new client is prefilled with it.
   projectCode,
+  // The map tab ('whole', 'phase-2-east', ...) its legend colors are saved under, with projectCode.
+  paletteSlot = '',
+  // A map tab's name ('Phase 2', 'Whole Map'), so legend colors say which phase they belong to.
+  slotName = (slot) => slot,
   title,
   url,
   coco,
@@ -469,6 +486,9 @@ export default function AnnotatedImagePreview({
    * drawn well inside the lines. Clicked lots always follow the printed lines.
    */
   const [shapeMode, setShapeMode] = useState('polygon')
+  // Statuses this project marks with a red ring rather than a colour (ERHD's Sold), and how thick the rings are.
+  const circled = lotTermsFor(projectCode).circled
+  const [ringThickness, setRingThickness] = useState(1)
   const [reserveType, setReserveType] = useState(initialPaints.at(-1)?.reserveType ?? RESERVE_TYPES[0].value)
   // What a click paints: the brush's colour, and for Reserved who it is held for.
   const brushPaint = useMemo(
@@ -487,13 +507,74 @@ export default function AnnotatedImagePreview({
   const paletteKey = title || url
   const [savedPalette, setSavedPalette] = useState(() => loadPalette(paletteKey))
   const [legendDraft, setLegendDraft] = useState(null) // null, or the palette being matched
-  const palette = legendDraft ?? savedPalette
+  // Edit colors: null, or the palette being set by hand, and the status open on the wheel.
+  const [colorDraft, setColorDraft] = useState(null)
+  const [colorStatus, setColorStatus] = useState(MAP_LOT_FILL[0].value)
+  const palette = legendDraft ?? colorDraft ?? savedPalette
   const [picking, setPicking] = useState([])
   const pickingRef = useRef(false)
   pickingRef.current = picking.length > 0
+  /*
+   * The colours are saved in Supabase per project map (map_legend_colors), so
+   * every user and browser shares them. This browser's copy shows at once and
+   * stands in when the database cannot be reached; the saved row then wins —
+   * unless the colours were changed here before it arrived.
+   */
+  const paletteChanged = useRef(false)
+  useEffect(() => {
+    if (!open || !paletteSlot) return undefined
+    let live = true
+    paletteChanged.current = false
+    fetchLegendColors({ projectCode, slot: paletteSlot }).then(
+      (stored) => {
+        if (!live || !stored || paletteChanged.current) return
+        setSavedPalette(stored)
+        savePalette(paletteKey, stored)
+      },
+      (err) => console.warn('[annotated preview] legend colors not loaded from the database:', err),
+    )
+    return () => {
+      live = false
+    }
+  }, [open, projectCode, paletteSlot, paletteKey])
+  /*
+   * Every map of this project with its own colours — offered in the Legend
+   * colors dropdown and listed in Edit colors under its phase, so one phase's
+   * colours can be reused on another. Loaded when the preview opens and again
+   * each time Edit colors opens, so colours saved meanwhile elsewhere show up.
+   */
+  const [projectPalettes, setProjectPalettes] = useState([])
+  const editingColors = Boolean(colorDraft)
+  useEffect(() => {
+    if (!open || !projectCode) return undefined
+    let live = true
+    fetchProjectLegendColors(projectCode).then(
+      (maps) => live && setProjectPalettes(maps),
+      (err) => console.warn('[annotated preview] other phases\' legend colors not loaded:', err),
+    )
+    return () => {
+      live = false
+    }
+  }, [open, editingColors, projectCode])
+  // The other phases' saved colours, named as their map tabs are.
+  const otherPhasePalettes = projectPalettes
+    .filter((map) => map.slot !== paletteSlot)
+    .map((map) => ({ ...map, name: slotName(map.slot) }))
+  // This map's own colours from before another phase's were copied on, so
+  // "Don't use other phase colors" can put them back (Default when not known).
+  const [paletteBeforePhase, setPaletteBeforePhase] = useState(null)
+  // The phase last picked from "Use colors from", so of two phases with the
+  // same colours (Phase 2A and 2B) the one chosen is the one shown selected.
+  const [chosenPhaseSlot, setChosenPhaseSlot] = useState('')
   function changePalette(next) {
+    paletteChanged.current = true
     setSavedPalette(next)
     savePalette(paletteKey, next)
+    if (!paletteSlot) return
+    saveLegendColors({ projectCode, slot: paletteSlot, palette: next }).catch((err) => {
+      console.error('[annotated preview] legend colors not saved to the database:', err)
+      notifyFailed('Legend colors not saved online', err)
+    })
   }
   const setDraftColor = (status, hex) => setLegendDraft((draft) => ({ ...(draft ?? savedPalette), [status]: hex }))
   function pickLegendColor(x, y) {
@@ -525,30 +606,57 @@ export default function AnnotatedImagePreview({
   const [lotsByKey, setLotsByKey] = useState(null)
   const [lotsError, setLotsError] = useState('')
   const lotsRequested = useRef(false)
+  function applyLots(byKey) {
+    setLotsByKey(byKey)
+    setLotOptions(
+      [...byKey.values()]
+        .flat()
+        .map((lot) => ({ ...lot, key: String(lot.lotNo).toLowerCase().replace(/[^a-z0-9]/g, '') }))
+        .sort((a, b) => String(a.lotNo).localeCompare(String(b.lotNo), undefined, { numeric: true })),
+    )
+  }
   function ensureLots() {
     if (!fetchLots || lotsRequested.current) return
     lotsRequested.current = true
-    fetchLots().then(
-      (byKey) => {
-        setLotsByKey(byKey)
-        setLotOptions(
-          [...byKey.values()]
-            .flat()
-            .map((lot) => ({ ...lot, key: String(lot.lotNo).toLowerCase().replace(/[^a-z0-9]/g, '') }))
-            .sort((a, b) => String(a.lotNo).localeCompare(String(b.lotNo), undefined, { numeric: true })),
-        )
-      },
-      (err) => {
-        lotsRequested.current = false
-        setLotsError(err.message)
-      },
-    )
+    fetchLots().then(applyLots, (err) => {
+      lotsRequested.current = false
+      setLotsError(err.message)
+    })
   }
 
   // The annotations list is coloured by each lot's status, so the lots load as soon as the preview opens.
   useEffect(() => {
     if (open) ensureLots()
   })
+
+  /*
+   * Live while open: a lot changed anywhere — this portal, another browser, the
+   * Supabase dashboard — reloads the lots, so the selected lot's card, the
+   * outline colours, and the annotations list follow it without a reload. A
+   * burst of changes (an import, a bulk save) reloads once, after it settles.
+   */
+  const fetchLotsRef = useRef(fetchLots)
+  fetchLotsRef.current = fetchLots
+  const hasLotSource = Boolean(fetchLots)
+  useEffect(() => {
+    if (!open || !hasLotSource) return undefined
+    let timer = null
+    let live = true
+    const unsubscribe = subscribeToLots(projectCode, () => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        fetchLotsRef.current?.().then(
+          (byKey) => live && applyLots(byKey),
+          (err) => console.error('[annotated preview] lots not refreshed:', err),
+        )
+      }, 400)
+    })
+    return () => {
+      live = false
+      clearTimeout(timer)
+      unsubscribe()
+    }
+  }, [open, hasLotSource, projectCode])
 
   /*
    * The map colour for an annotation's lot status — Sold, Reserved, Hold, or
@@ -617,6 +725,8 @@ export default function AnnotatedImagePreview({
     tolerance,
     palette,
     shapeMode,
+    circled,
+    ringThickness,
   })
   const updatePaints = (update) => setPaintState((prev) => withPaints(prev, url, update))
   /*
@@ -715,6 +825,58 @@ export default function AnnotatedImagePreview({
     if (x < 0 || y < 0 || x > canvas.width || y > canvas.height) return
     if (picking.length) pickLegendColor(x, y)
     else paintPoint(x, y)
+  }
+
+  /*
+   * Moving a ring: dragged by its line, it follows the pointer but never leaves
+   * its lot, and on release its place is kept on the paint as `ringOffset` (from
+   * the lot's middle) — one step Undo can take back. A press that does not move
+   * is a click on the lot under it, which repaints it with another status.
+   */
+  const ringDragRef = useRef(null) // { ring, startX, startY, moved, cx, cy }
+  const [ringDrag, setRingDrag] = useState(null) // { key, cx, cy } while a ring is being moved
+  const drawingPoint = (event) => {
+    const svg = event.currentTarget.ownerSVGElement
+    const matrix = svg?.getScreenCTM()
+    if (!matrix) return [0, 0]
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+    return [point.x, point.y]
+  }
+  function onRingPointerDown(event, ring) {
+    // Space or the middle button still moves the map; reading the legend still samples.
+    if (event.button !== 0 || spaceHeld.current || picking.length || !painter.ready) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const [x, y] = drawingPoint(event)
+    ringDragRef.current = { ring, startX: event.clientX, startY: event.clientY, x, y, moved: false, cx: ring.cx, cy: ring.cy }
+  }
+  function onRingPointerMove(event) {
+    const current = ringDragRef.current
+    if (!current) return
+    if (!current.moved && Math.hypot(event.clientX - current.startX, event.clientY - current.startY) <= DRAG_SLOP) return
+    current.moved = true
+    const [x, y] = drawingPoint(event)
+    const { ring } = current
+    ;[current.cx, current.cy] = clampRingCenter([ring.cx + x - current.x, ring.cy + y - current.y], ring.r, ring.bounds)
+    setRingDrag({ key: ring.key, cx: current.cx, cy: current.cy })
+  }
+  function onRingPointerUp(event) {
+    const current = ringDragRef.current
+    ringDragRef.current = null
+    if (!current) return
+    event.stopPropagation()
+    // The click that follows is the end of this press, not a click on the map.
+    dragged.current = true
+    setRingDrag(null)
+    const { ring } = current
+    if (current.moved) {
+      const { x0, y0, x1, y1 } = ring.bounds
+      const ringOffset = { dx: current.cx - (x0 + x1) / 2, dy: current.cy - (y0 + y1) / 2 }
+      updatePaints((list) => list.map((paint) => (paint === ring.paint ? { ...paint, ringOffset } : paint)))
+    } else if (brush !== ring.paint.status) {
+      if (ring.paint.shapeId !== undefined) paintShape(ring.paint.shapeId)
+      else paintPoint(ring.paint.x, ring.paint.y)
+    }
   }
 
   const fileNameBase = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored`
@@ -1197,6 +1359,37 @@ export default function AnnotatedImagePreview({
                           outlined={showShapes}
                         />
                       ) : null}
+                      {/*
+                        * Rings over circled lots, above the outlines so they can be
+                        * grabbed: by a wide invisible band along the line, so the
+                        * inside of the ring still clicks through to the lot.
+                        */}
+                      {painting && !showOriginal
+                        ? painter.circles.map((ring) => {
+                            const at = ringDrag?.key === ring.key ? ringDrag : ring
+                            return (
+                              <g key={ring.key}>
+                                <circle cx={at.cx} cy={at.cy} r={ring.r} fill="none" stroke={LOT_RING_COLOR} strokeWidth={ring.strokeWidth} pointerEvents="none" />
+                                <circle
+                                  cx={at.cx}
+                                  cy={at.cy}
+                                  r={ring.r}
+                                  fill="none"
+                                  stroke="transparent"
+                                  strokeWidth={Math.max(ring.strokeWidth * 2.5, ring.r * 0.3)}
+                                  pointerEvents="stroke"
+                                  cursor="move"
+                                  onPointerDown={(event) => onRingPointerDown(event, ring)}
+                                  onPointerMove={onRingPointerMove}
+                                  onPointerUp={onRingPointerUp}
+                                  onPointerCancel={onRingPointerUp}
+                                >
+                                  <title>Drag to move this ring within its lot</title>
+                                </circle>
+                              </g>
+                            )
+                          })
+                        : null}
                     </Box>
                     {/*
                       * Hidden twin, only there to report the image's true pixel
@@ -1422,15 +1615,72 @@ export default function AnnotatedImagePreview({
                       matching={Boolean(legendDraft)}
                       onMatchLegend={() => {
                         setPaintMessage('')
+                        setColorDraft(null)
                         setLegendDraft({ ...savedPalette })
                         setPicking(MAP_LOT_FILL.map(({ value }) => value))
                       }}
                       onDefaultPalette={() => {
                         endMatching(false)
+                        setColorDraft(null)
                         changePalette(DEFAULT_PALETTE)
                       }}
+                      editingColors={editingColors}
+                      paletteFor={paletteSlot ? slotName(paletteSlot) : ''}
+                      otherPhases={paletteSlot ? otherPhasePalettes : []}
+                      onUsePhase={(other) => {
+                        endMatching(false)
+                        setColorDraft(null)
+                        // Keep the map's own colours only the first time, not another phase's.
+                        if (!otherPhasePalettes.some((map) => samePalette(map.palette, savedPalette))) {
+                          setPaletteBeforePhase({ ...savedPalette })
+                        }
+                        changePalette({ ...other.palette })
+                        setChosenPhaseSlot(other.slot)
+                      }}
+                      chosenPhaseSlot={chosenPhaseSlot}
+                      onStopUsingPhase={() => {
+                        endMatching(false)
+                        setColorDraft(null)
+                        const own =
+                          paletteBeforePhase && !otherPhasePalettes.some((map) => samePalette(map.palette, paletteBeforePhase))
+                            ? paletteBeforePhase
+                            : DEFAULT_PALETTE
+                        changePalette({ ...own })
+                        setPaletteBeforePhase(null)
+                        setChosenPhaseSlot('')
+                      }}
+                      onEditColors={() => {
+                        if (colorDraft) {
+                          setColorDraft(null)
+                          return
+                        }
+                        endMatching(false)
+                        setColorDraft({ ...savedPalette })
+                      }}
+                      colorEditor={
+                        colorDraft ? (
+                          <PaletteEditor
+                            draft={colorDraft}
+                            saved={savedPalette}
+                            status={colorStatus}
+                            onStatus={setColorStatus}
+                            mapName={paletteSlot ? slotName(paletteSlot) : ''}
+                            otherMaps={otherPhasePalettes}
+                            onUseMap={(other) => setColorDraft({ ...other })}
+                            onChange={(status, hex) => setColorDraft((draft) => ({ ...draft, [status]: hex }))}
+                            onSave={() => {
+                              changePalette(colorDraft)
+                              setColorDraft(null)
+                            }}
+                            onCancel={() => setColorDraft(null)}
+                          />
+                        ) : null
+                      }
                       tolerance={tolerance}
                       onTolerance={setTolerance}
+                      circled={circled}
+                      ringThickness={ringThickness}
+                      onRingThickness={setRingThickness}
                       shapeMode={shapes.length ? shapeMode : null}
                       onShapeMode={setShapeMode}
                       count={paints.length}
@@ -2028,12 +2278,225 @@ function ColorWheel({ value, onChange, size = 150 }) {
  * one chosen side by side, and its hex code to read or type. Lots already
  * painted with this status show the new colour on the map as it moves.
  */
-function ManualColorPanel({ label, value, original, onChange, onUse, onCancel, button }) {
+const PANEL_BUTTON_BASE = {
+  as: 'button',
+  type: 'button',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
+  h: '32px',
+  px: '14px',
+  borderRadius: '8px',
+  fontFamily: FONT,
+  fontSize: '13px',
+  fontWeight: '700',
+  cursor: 'pointer',
+}
+/** The colour panels' buttons: the green one that commits, and the plain one beside it. */
+const PANEL_BUTTONS = {
+  primary: { ...PANEL_BUTTON_BASE, bg: COLORS.brandGreen, color: '#FFFFFF', _hover: { bg: '#00541F' } },
+  secondary: {
+    ...PANEL_BUTTON_BASE,
+    bg: COLORS.surface,
+    color: COLORS.heading,
+    border: '1px solid',
+    borderColor: COLORS.border,
+    _hover: { bg: COLORS.hoverBg },
+  },
+}
+
+/**
+ * Edit colors: every status's colour set by hand — on the wheel, or as a hex or
+ * RGB code — from the Color lots toolbar, without matching the map's legend.
+ * `draft` is the palette being edited; painted lots preview it as it changes,
+ * and only Save colors keeps it.
+ */
+function PaletteEditor({ draft, saved, status, onStatus, onChange, onSave, onCancel, mapName = '', otherMaps = [], onUseMap }) {
+  const current = MAP_LOT_FILL.find((option) => option.value === status) ?? MAP_LOT_FILL[0]
+  const changed = MAP_LOT_FILL.filter(({ value }) => draft[value] !== saved[value]).length
+  return (
+    <Flex mt="8px" direction="column" gap="8px" role="group" aria-label={mapName ? `Edit legend colors for ${mapName}` : 'Edit legend colors'}>
+      {mapName ? (
+        <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+          Editing the colors of <PhaseBadge name={mapName} /> — other phases keep their own.
+        </Text>
+      ) : null}
+      <Flex gap="6px" flexWrap="wrap" role="tablist" aria-label="Status to edit">
+        {MAP_LOT_FILL.map(({ value, label }) => {
+          const now = value === current.value
+          return (
+            <Flex
+              key={value}
+              as="button"
+              type="button"
+              role="tab"
+              aria-selected={now}
+              align="center"
+              gap="6px"
+              h="28px"
+              px="10px"
+              borderRadius="999px"
+              border="1px solid"
+              borderColor={now ? COLORS.heading : COLORS.border}
+              bg={now ? COLORS.hoverBg : COLORS.surface}
+              fontFamily={FONT}
+              fontSize="12px"
+              fontWeight={now ? '700' : '500'}
+              color={COLORS.heading}
+              cursor="pointer"
+              onClick={() => onStatus(value)}
+            >
+              <Swatch color={draft[value]} />
+              {label}
+              {draft[value] !== saved[value] ? <Box boxSize="6px" borderRadius="999px" bg={COLORS.brandGreen} title="Changed" /> : null}
+            </Flex>
+          )
+        })}
+      </Flex>
+      <ManualColorPanel
+        key={current.value}
+        label={current.label}
+        value={draft[current.value]}
+        original={saved[current.value]}
+        button={PANEL_BUTTONS}
+        useLabel={changed ? `Save colors (${changed})` : 'Save colors'}
+        onChange={(hex) => onChange(current.value, hex)}
+        onUse={onSave}
+        onCancel={onCancel}
+      />
+      <OtherPhaseColors maps={otherMaps} draft={draft} current={current} onPick={(hex) => onChange(current.value, hex)} onUseMap={onUseMap} />
+    </Flex>
+  )
+}
+
+/** Which map tab ('Phase 2', 'Whole Map') a set of legend colours belongs to. */
+function PhaseBadge({ name, title }) {
+  return (
+    <Box
+      as="span"
+      display="inline-flex"
+      alignItems="center"
+      h="22px"
+      px="8px"
+      borderRadius="999px"
+      bg={COLORS.hoverBg}
+      border="1px solid"
+      borderColor={COLORS.border}
+      fontFamily={FONT}
+      fontSize="11.5px"
+      fontWeight="700"
+      color={COLORS.heading}
+      whiteSpace="nowrap"
+      title={title}
+    >
+      {name}
+    </Box>
+  )
+}
+
+/**
+ * The colours the project's other maps are saved with, one row per phase. A
+ * swatch sets the status being edited to that colour; Use all copies the whole
+ * row into the draft. A swatch this map's draft already uses is outlined.
+ */
+function OtherPhaseColors({ maps, draft, current, onPick, onUseMap }) {
+  return (
+    <Flex direction="column" gap="6px" p="10px" borderRadius="10px" bg={COLORS.canvas} border="1px solid" borderColor={COLORS.border}>
+      <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle}>
+        Colors from other phases — click one to use it for {current.label}
+      </Text>
+      {maps.length === 0 ? (
+        <Text fontFamily={FONT} fontSize="11.5px" color={COLORS.subtle}>
+          No other phase of this project has its own colors yet.
+        </Text>
+      ) : (
+        maps.map((map) => (
+          <Flex key={map.slot} align="center" gap="6px" flexWrap="wrap">
+            <Box minW="96px">
+              <PhaseBadge name={map.name} />
+            </Box>
+            {MAP_LOT_FILL.map(({ value, label }) => {
+              const hex = map.palette[value]
+              return (
+                <Flex
+                  key={value}
+                  as="button"
+                  type="button"
+                  align="center"
+                  gap="4px"
+                  h="26px"
+                  px="6px"
+                  borderRadius="6px"
+                  border="1px solid"
+                  borderColor={draft[current.value] === hex ? COLORS.heading : COLORS.border}
+                  bg={COLORS.surface}
+                  fontFamily={FONT}
+                  fontSize="11px"
+                  color={COLORS.heading}
+                  cursor="pointer"
+                  title={`${map.name} ${label}: ${hex}`}
+                  aria-label={`Use ${map.name} ${label} color ${hex} for ${current.label}`}
+                  onClick={() => onPick(hex)}
+                  _hover={{ bg: COLORS.hoverBg }}
+                >
+                  <Swatch color={hex} size="14px" />
+                  {label}
+                </Flex>
+              )
+            })}
+            <Box
+              as="button"
+              type="button"
+              h="26px"
+              px="8px"
+              borderRadius="6px"
+              fontFamily={FONT}
+              fontSize="11.5px"
+              fontWeight="700"
+              color={COLORS.brandGreen}
+              cursor="pointer"
+              _hover={{ bg: COLORS.hoverBg }}
+              title={`Copy all of ${map.name}'s colors; Save colors keeps them`}
+              onClick={() => onUseMap(map.palette)}
+            >
+              Use all
+            </Box>
+          </Flex>
+        ))
+      )}
+    </Flex>
+  )
+}
+
+function ManualColorPanel({ label, value, original, onChange, onUse, onCancel, button, useLabel = 'Use this color' }) {
+  // What is typed, kept apart from `value` so a half-typed code is not overwritten.
   const [text, setText] = useState(value)
+  const [rgb, setRgb] = useState(() => (hexToRgb(value) ?? [0, 0, 0]).map(String))
   const [lastValue, setLastValue] = useState(value)
   if (value !== lastValue) {
     setLastValue(value)
     setText(value)
+    setRgb((hexToRgb(value) ?? [0, 0, 0]).map(String))
+  }
+  const field = {
+    as: 'input',
+    onPointerDown: (event) => event.stopPropagation(),
+    h: '32px',
+    px: '8px',
+    borderRadius: '8px',
+    border: '1px solid',
+    borderColor: COLORS.border,
+    bg: COLORS.surface,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: '13px',
+    color: COLORS.heading,
+  }
+  function changeChannel(index, raw) {
+    const digits = raw.replace(/\D/g, '').slice(0, 3)
+    const next = rgb.map((channel, i) => (i === index ? digits : channel))
+    setRgb(next)
+    const numbers = next.map(Number)
+    if (next.every((channel) => channel !== '') && numbers.every((channel) => channel <= 255)) onChange(rgbToHex(numbers))
   }
   return (
     <Flex gap="16px" align="center" flexWrap="wrap" p="12px" borderRadius="10px" bg={COLORS.canvas} border="1px solid" borderColor={COLORS.border}>
@@ -2058,36 +2521,51 @@ function ManualColorPanel({ label, value, original, onChange, onUse, onCancel, b
               New
             </Text>
           </Flex>
-          <Box
-            as="input"
-            value={text}
-            aria-label={`${label} color code`}
-            maxLength={7}
-            onPointerDown={(event) => event.stopPropagation()}
-            onChange={(event) => {
-              const next = event.target.value.toUpperCase()
-              setText(next)
-              if (/^#[0-9A-F]{6}$/.test(next)) onChange(next)
-            }}
-            ml="auto"
-            w="92px"
-            h="32px"
-            px="8px"
-            borderRadius="8px"
-            border="1px solid"
-            borderColor={COLORS.border}
-            bg={COLORS.surface}
-            fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-            fontSize="13px"
-            color={COLORS.heading}
-          />
+        </Flex>
+        {/* The same colour as a code: hex (#RRGGBB, #RGB, or rgb(…) pasted in) or red, green and blue. */}
+        <Flex align="flex-end" gap="8px" flexWrap="wrap">
+          <Flex direction="column" gap="3px">
+            <Text as="span" fontFamily={FONT} fontSize="11px" fontWeight="600" color={COLORS.subtle}>
+              HEX
+            </Text>
+            <Box
+              {...field}
+              value={text}
+              aria-label={`${label} color code (hex or rgb)`}
+              placeholder="#RRGGBB"
+              maxLength={20}
+              w="96px"
+              onChange={(event) => {
+                setText(event.target.value)
+                const parsed = parseColorCode(event.target.value)
+                if (parsed) onChange(parsed)
+              }}
+              onBlur={() => setText(value)}
+            />
+          </Flex>
+          {['R', 'G', 'B'].map((channel, index) => (
+            <Flex key={channel} direction="column" gap="3px">
+              <Text as="span" fontFamily={FONT} fontSize="11px" fontWeight="600" color={COLORS.subtle}>
+                {channel}
+              </Text>
+              <Box
+                {...field}
+                value={rgb[index]}
+                aria-label={`${label} ${['red', 'green', 'blue'][index]} (0–255)`}
+                inputMode="numeric"
+                w="52px"
+                onChange={(event) => changeChannel(index, event.target.value)}
+                onBlur={() => setRgb((hexToRgb(value) ?? [0, 0, 0]).map(String))}
+              />
+            </Flex>
+          ))}
         </Flex>
         <Text fontFamily={FONT} fontSize="11.5px" color={COLORS.subtle}>
           Lots already colored {label} show the new color on the map as you pick.
         </Text>
         <Flex gap="6px">
           <Box {...button.primary} onClick={onUse}>
-            Use this color
+            {useLabel}
           </Box>
           <Box {...button.secondary} onClick={onCancel}>
             Cancel
@@ -2112,24 +2590,7 @@ function LegendPickBanner({ picking, palette, saved, onSkip, onDone, onPreview, 
   // The status open on the colour wheel, with its colour from before the wheel moved it.
   const [manual, setManual] = useState(null) // null | { status, original }
   const manualOpen = Boolean(current && manual?.status === current.value)
-  const base = {
-    as: 'button',
-    type: 'button',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    h: '32px',
-    px: '14px',
-    borderRadius: '8px',
-    fontFamily: FONT,
-    fontSize: '13px',
-    fontWeight: '700',
-    cursor: 'pointer',
-  }
-  const button = {
-    primary: { ...base, bg: COLORS.brandGreen, color: '#FFFFFF', _hover: { bg: '#00541F' } },
-    secondary: { ...base, bg: COLORS.surface, color: COLORS.heading, border: '1px solid', borderColor: COLORS.border, _hover: { bg: COLORS.hoverBg } },
-  }
+  const button = PANEL_BUTTONS
   const changed = MAP_LOT_FILL.filter(({ value }) => palette[value] !== saved[value]).length
   function closeManual(restore) {
     if (restore && manual) onPreview(manual.status, manual.original)
@@ -2443,8 +2904,26 @@ function PaintToolbar({
   matching,
   onMatchLegend,
   onDefaultPalette,
+  // Edit colors: whether the wheel is open, its toggle, and the editor shown below the legend row.
+  editingColors = false,
+  onEditColors,
+  colorEditor = null,
+  // The map tab ('Phase 2') whose colours these are; shown beside the legend chips.
+  paletteFor = '',
+  // The project's other maps with saved colours ({ slot, name, palette }), for the
+  // "Use colors from" dropdown; picking one copies its colours onto this map.
+  otherPhases = [],
+  onUsePhase,
+  // The phase last picked there, preferred when several match these colours.
+  chosenPhaseSlot = '',
+  // Stop using another phase's colours: back to this map's own, or the defaults.
+  onStopUsingPhase,
   tolerance,
   onTolerance,
+  // Statuses painted as a red ring rather than a colour (ERHD's Sold), and the rings' thickness.
+  circled = [],
+  ringThickness = 1,
+  onRingThickness,
   // 'polygon' | 'lines' for a map with annotations; null hides the choice.
   shapeMode,
   onShapeMode,
@@ -2467,6 +2946,13 @@ function PaintToolbar({
   // Clicked lots not yet linked to a lot in the table; Save Update waits for them.
   unlinked = 0,
 }) {
+  /*
+   * The other phase whose colours this map now paints with — the one picked from
+   * "Use colors from", or any that happens to match — so the dropdown can show
+   * it as selected. Worked out from the colours, so it holds after a reload.
+   */
+  const matchingPhases = matching || editingColors ? [] : otherPhases.filter((map) => samePalette(map.palette, palette))
+  const fromPhase = matchingPhases.find((map) => map.slot === chosenPhaseSlot) ?? matchingPhases[0] ?? null
   const chip = (value, label, swatch, chosen = brush === value, onPick = onBrush) => {
     return (
       <Flex
@@ -2497,6 +2983,7 @@ function PaintToolbar({
   }
   const baseId = useId().replace(/[^a-zA-Z0-9]/g, '')
   const toleranceId = `${baseId}-tolerance`
+  const ringId = `${baseId}-ring`
   const moreId = `${baseId}-more`
   const [moreOpen, setMoreOpen] = useState(false)
   // Settings behind More options that are off their default.
@@ -2518,10 +3005,49 @@ function PaintToolbar({
           Color as
         </Text>
         {MAP_LOT_FILL.map(({ value, label }) =>
-          chip(value, label, <Box boxSize="12px" borderRadius="3px" bg={palette[value]} border="1px solid rgba(0,0,0,0.25)" />),
+          chip(
+            value,
+            label,
+            // A circled status shows the ring it draws, not a colour.
+            circled.includes(value) ? (
+              <Box boxSize="13px" borderRadius="full" border="2.5px solid" borderColor={LOT_RING_COLOR} title="Marked with a red ring" />
+            ) : (
+              <Box boxSize="12px" borderRadius="3px" bg={palette[value]} border="1px solid rgba(0,0,0,0.25)" />
+            ),
+          ),
         )}
         {chip(ORIGINAL, 'Original', <Icon as={LuEraser} boxSize="13px" />)}
       </Flex>
+      {/*
+        * How thick the rings of circled lots are; painted rings follow at once.
+        * A ring is moved by dragging its line on the map.
+        */}
+      {circled.length && onRingThickness ? (
+        <Flex mt="8px" align="center" gap="8px" flexWrap="wrap">
+          <Flex as="label" htmlFor={ringId} align="center" gap="6px" fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            <Box boxSize="13px" borderRadius="full" border={`${Math.min(5, 1.5 + ringThickness)}px solid`} borderColor={LOT_RING_COLOR} />
+            Ring thickness
+          </Flex>
+          <input
+            id={ringId}
+            type="range"
+            min={Math.round(RING_THICKNESS_MIN * 100)}
+            max={Math.round(RING_THICKNESS_MAX * 100)}
+            step={10}
+            value={Math.round(ringThickness * 100)}
+            aria-valuetext={`${Math.round(ringThickness * 100)}%${ringThickness === 1 ? ', default' : ''}`}
+            onChange={(event) => onRingThickness(Number(event.target.value) / 100)}
+            style={{ width: '180px', accentColor: LOT_RING_COLOR, cursor: 'pointer' }}
+          />
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.heading} minW="92px">
+            {Math.round(ringThickness * 100)}%{ringThickness === 1 ? ' · Default' : ''}
+          </Text>
+          {ringThickness !== 1 ? chip('ring-default', 'Use default', null, false, () => onRingThickness(1)) : null}
+          <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+            Drag a ring&apos;s line to move it within its lot.
+          </Text>
+        </Flex>
+      ) : null}
       {/*
         * Which colours the statuses paint: the default legend, or the colours of
         * the legend printed on this map, read by clicking each of its swatches.
@@ -2530,15 +3056,55 @@ function PaintToolbar({
         <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
           Legend colors
         </Text>
-        {chip('palette-default', 'Default', null, !matching && isDefaultPalette(palette), onDefaultPalette)}
+        {chip('palette-default', 'Default', null, !matching && !editingColors && isDefaultPalette(palette), onDefaultPalette)}
         {chip(
           'palette-legend',
           'Custom',
           <Icon as={LuPipette} boxSize="13px" />,
-          matching || !isDefaultPalette(palette),
+          matching || (!editingColors && !fromPhase && !isDefaultPalette(palette)),
           onMatchLegend,
         )}
+        {onEditColors ? chip('palette-wheel', 'Edit colors', <Icon as={LuPalette} boxSize="13px" />, editingColors, onEditColors) : null}
+        {paletteFor ? <PhaseBadge name={paletteFor} title={`These colors are saved for ${paletteFor} only`} /> : null}
+        {onUsePhase && otherPhases.length ? (
+          <NativeSelect.Root size="sm" w="auto">
+            <NativeSelect.Field
+              value={fromPhase?.slot ?? ''}
+              onChange={(event) => {
+                const other = otherPhases.find((map) => map.slot === event.target.value)
+                if (other) onUsePhase(other)
+                else if (!event.target.value) onStopUsingPhase?.()
+              }}
+              aria-label={paletteFor ? `Use another phase's legend colors for ${paletteFor}` : "Use another phase's legend colors"}
+              title={fromPhase ? `This map uses ${fromPhase.name}'s legend colors` : "Copy another phase's legend colors onto this map"}
+              h="30px"
+              pr="28px"
+              bg={fromPhase ? COLORS.hoverBg : COLORS.surface}
+              border="1px solid"
+              borderColor={fromPhase ? COLORS.heading : COLORS.border}
+              borderRadius="999px"
+              fontFamily={FONT}
+              fontWeight={fromPhase ? '700' : '500'}
+              fontSize="12px"
+              color={COLORS.heading}
+              cursor="pointer"
+              _focusVisible={{ borderColor: COLORS.activeBg, outline: 'none' }}
+            >
+              {/* While another phase's colours are in use, the empty choice turns them off. */}
+              <option value="" disabled={!fromPhase || !onStopUsingPhase}>
+                {fromPhase && onStopUsingPhase ? "Don't use other phase colors" : 'Use colors from…'}
+              </option>
+              {otherPhases.map((map) => (
+                <option key={map.slot} value={map.slot}>
+                  {map.slot === fromPhase?.slot ? `✓ Colors from ${map.name}` : map.name}
+                </option>
+              ))}
+            </NativeSelect.Field>
+            <NativeSelect.Indicator color={COLORS.subtle} />
+          </NativeSelect.Root>
+        ) : null}
       </Flex>
+      {colorEditor}
       {brush === 'reserved' ? (
         <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Reserved for">
           <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">

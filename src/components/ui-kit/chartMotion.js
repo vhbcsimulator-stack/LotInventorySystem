@@ -11,18 +11,18 @@
 
 const EASE = 'cubic-bezier(0.22, 1, 0.36, 1)'
 /** Marked on every animated mark, so one media query can still them all. */
-const STILL = 'vhbc-chart-motion'
+const STILL = 'bhri-chart-motion'
 
 export const CHART_MOTION = {
   /* Draws a stroked path from its start. The path must carry pathLength="1". */
-  draw: 'vhbc-chart-draw',
-  fade: 'vhbc-chart-fade',
+  draw: 'bhri-chart-draw',
+  fade: 'bhri-chart-fade',
   /* A marker arriving on a line that has already been drawn. */
-  pop: 'vhbc-chart-pop',
+  pop: 'bhri-chart-pop',
   /* A bar filling from its left edge. */
-  grow: 'vhbc-chart-grow',
+  grow: 'bhri-chart-grow',
   /* A ring or pie settling into place. */
-  sweep: 'vhbc-chart-sweep',
+  sweep: 'bhri-chart-sweep',
 }
 
 /**

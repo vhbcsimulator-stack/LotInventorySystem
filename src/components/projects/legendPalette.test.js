@@ -1,5 +1,48 @@
 import { describe, expect, it } from 'vitest'
-import { hexToHsv, hsvToHex } from './legendPalette'
+import { DEFAULT_PALETTE, hexToHsv, hexToRgb, hsvToHex, isDefaultPalette, parseColorCode, rgbToHex, samePalette } from './legendPalette'
+
+describe('samePalette', () => {
+  it('matches palettes colour for colour, ignoring case', () => {
+    const lower = Object.fromEntries(Object.entries(DEFAULT_PALETTE).map(([status, hex]) => [status, hex.toLowerCase()]))
+    expect(samePalette(lower, DEFAULT_PALETTE)).toBe(true)
+    expect(isDefaultPalette(lower)).toBe(true)
+  })
+
+  it('tells palettes apart by any one status', () => {
+    expect(samePalette({ ...DEFAULT_PALETTE, hold: '#000000' }, DEFAULT_PALETTE)).toBe(false)
+    expect(samePalette({}, {})).toBe(false)
+  })
+})
+
+describe('parseColorCode', () => {
+  it('reads hex codes with or without #, in six or three digits', () => {
+    expect(parseColorCode('#5c9df2')).toBe('#5C9DF2')
+    expect(parseColorCode('5C9DF2')).toBe('#5C9DF2')
+    expect(parseColorCode('#fa0')).toBe('#FFAA00')
+    expect(parseColorCode('  fa0 ')).toBe('#FFAA00')
+  })
+
+  it('reads red, green and blue from 0 to 255', () => {
+    expect(parseColorCode('rgb(92, 157, 242)')).toBe('#5C9DF2')
+    expect(parseColorCode('92,157,242')).toBe('#5C9DF2')
+    expect(parseColorCode('92 157 242')).toBe('#5C9DF2')
+  })
+
+  it('rejects anything else', () => {
+    expect(parseColorCode('')).toBeNull()
+    expect(parseColorCode('red')).toBeNull()
+    expect(parseColorCode('#12345')).toBeNull()
+    expect(parseColorCode('rgb(256, 0, 0)')).toBeNull()
+  })
+})
+
+describe('hexToRgb / rgbToHex', () => {
+  it('round-trips', () => {
+    expect(hexToRgb('#5C9DF2')).toEqual([92, 157, 242])
+    expect(rgbToHex([92, 157, 242])).toBe('#5C9DF2')
+    expect(hexToRgb('#FFF')).toBeNull()
+  })
+})
 
 describe('hsvToHex / hexToHsv', () => {
   it('converts the primaries', () => {

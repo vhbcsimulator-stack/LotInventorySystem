@@ -8,7 +8,7 @@ import { COLORS } from '@/theme/colors'
  * "Loading…" once, rather than having every bar announce itself.
  */
 
-const SHIMMER = 'vhbc-skeleton-shimmer'
+const SHIMMER = 'bhri-skeleton-shimmer'
 
 /** One placeholder bar or block. */
 export function Skeleton({ h = '12px', w = '100%', rounded = '6px', ...rest }) {

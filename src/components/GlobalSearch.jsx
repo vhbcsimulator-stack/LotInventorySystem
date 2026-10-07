@@ -5,7 +5,7 @@ import { COMMANDS, SEARCH_SUGGESTIONS, searchCommands } from '@/lib/commands'
 import { COLORS } from '@/theme/colors'
 
 const FONT = 'Inter, system-ui, sans-serif'
-const HISTORY_KEY = 'vhbc-global-search-history'
+const HISTORY_KEY = 'bhri-global-search-history'
 const HISTORY_LIMIT = 6
 
 function loadHistory() {

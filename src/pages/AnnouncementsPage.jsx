@@ -205,7 +205,7 @@ function AnnouncementItem({ item, onEdit, onDelete }) {
         <Box minW={0} flex="1">
           <Flex align="center" gap="8px" flexWrap="wrap">
             <Text fontFamily={FONT} fontWeight="600" fontSize="12.5px" color={COLORS.heading}>
-              {item.author || 'VHBC'}
+              {item.author || 'BHRI'}
             </Text>
             <Text as="time" dateTime={item.createdAt} fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
               {relativeTime(item.createdAt)} · {formatShortDate(item.createdAt)}
