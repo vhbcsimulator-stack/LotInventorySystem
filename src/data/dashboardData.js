@@ -211,12 +211,29 @@ async function fetchProjectNames() {
  */
 async function fetchLotsFor(code, table, names) {
   try {
-    // No `last_updated`: nothing the dashboard shows is counted by date any more.
     const tracksSections = table === LOT_TABLES.MVLC
-    const lots = await fetchAllRows(
-      table,
-      `id, lot_no, phase, size_sqm, status, total${tracksSections ? ', map_section' : ''}`,
-    )
+    const base = `id, lot_no, phase, size_sqm, status, total${tracksSections ? ', map_section' : ''}`
+    /*
+     * The date and the people of a sale or reservation, for the Recent
+     * Transactions list only — no figure is counted by date. A table from
+     * before the seller, agent, or client columns falls back step by step,
+     * down to the bare lot.
+     */
+    const attempts = [
+      `${base}, last_updated, last_updated_precision, updated_at, sold_by, sales_agent, reserved_for, reserve_type`,
+      `${base}, last_updated, last_updated_precision, updated_at, sold_by, reserved_for, reserve_type`,
+      `${base}, last_updated, updated_at`,
+      base,
+    ]
+    let lots
+    for (const [index, columns] of attempts.entries()) {
+      try {
+        lots = await fetchAllRows(table, columns)
+        break
+      } catch (err) {
+        if (index === attempts.length - 1) throw err
+      }
+    }
     const count = { available: 0, reserved: 0, sold: 0 }
     // Square metres per status: the size of what has moved, which no repricing
     // can change underneath the figure.
@@ -262,6 +279,19 @@ async function fetchLotsFor(code, table, names) {
           phase: lot.phase === null || lot.phase === undefined || lot.phase === '' ? null : Number(lot.phase),
           mapSection: String(lot.map_section ?? '').trim() || null,
           group: project.group,
+          /*
+           * When the lot last changed, as recorded: the portal writes the day a
+           * status is changed, an imported sheet its own date — sometimes only
+           * the month ('month'). Empty on rows nothing ever dated.
+           */
+          date: String(lot.last_updated ?? '').slice(0, 10),
+          datePrecision: lot.last_updated_precision === 'month' ? 'month' : 'day',
+          // When the row was written, only to order changes made the same day.
+          writtenAt: String(lot.updated_at ?? ''),
+          soldBy: String(lot.sold_by ?? '').trim(),
+          salesAgent: String(lot.sales_agent ?? '').trim(),
+          client: String(lot.reserved_for ?? '').trim(),
+          reserveType: String(lot.reserve_type ?? '').trim(),
         }))
         // A status the portal does not recognise belongs to no count at all.
         .filter((row) => row.status),
@@ -275,6 +305,18 @@ async function fetchLotsFor(code, table, names) {
     console.error(`[dashboard] skipping ${code}:`, err)
     return null
   }
+}
+
+/**
+ * The latest sales and reservations, newest first: every sold or reserved lot
+ * with a recorded date, ordered by that date (and, the same day, by when the row
+ * was written). A month-only date sorts as its first day. Lots with no date
+ * cannot be placed in time, so they are left out and only counted (`undated`).
+ */
+export function recentTransactions(movements = []) {
+  const dated = movements.filter((row) => /^\d{4}-\d{2}-\d{2}$/.test(row.date ?? ''))
+  dated.sort((a, b) => b.date.localeCompare(a.date) || (b.writtenAt ?? '').localeCompare(a.writtenAt ?? ''))
+  return { rows: dated, undated: movements.length - dated.length }
 }
 
 /**
@@ -377,6 +419,7 @@ export function summarize(lots = [], filters = {}) {
       pageSize: TRANSACTION_ROWS,
       page: 1,
     },
+    recent: recentTransactions(movements),
   }
 }
 

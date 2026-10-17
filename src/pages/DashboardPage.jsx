@@ -9,6 +9,7 @@ import SellThroughCard from '@/components/dashboard/SellThroughCard'
 import InventoryByEstateCard from '@/components/dashboard/InventoryByEstateCard'
 import PortfolioDistributionCard from '@/components/dashboard/PortfolioDistributionCard'
 import RecentTransactionsCard from '@/components/dashboard/RecentTransactionsCard'
+import LatestTransactionsCard from '@/components/dashboard/LatestTransactionsCard'
 import AnnouncementsCard from '@/components/dashboard/AnnouncementsCard'
 import SourceNotice from '@/components/SourceNotice'
 import { summarize } from '@/data/dashboardData'
@@ -16,6 +17,7 @@ import { DEFAULT_PROJECT_CODE } from '@/data/projectsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed } from '@/lib/notify'
+import { formatDate } from '@/utils/format'
 
 const workbookHeader = (value) => ({ value, fontWeight: 'bold', textColor: '#FFFFFF', backgroundColor: '#00652C' })
 
@@ -110,6 +112,22 @@ export default function DashboardPage({ onNavigate }) {
           ['Project', 'Lot', 'Status', 'Lot Area (sqm)'],
           view.transactions.rows.map((row) => [row.projectName, row.property, row.status, row.areaSqm]),
           [30, 22, 16, 20],
+          metadata,
+        ),
+        workbookSheet(
+          'Recent Transactions',
+          ['Date', 'Project', 'Lot', 'Status', 'Broker', 'Sales Agent', 'Client', 'Lot Area (sqm)'],
+          view.recent.rows.map((row) => [
+            formatDate(row.date, { precision: row.datePrecision }),
+            row.projectName,
+            row.property,
+            row.status === 'reserved' && row.reserveType ? `reserved (${row.reserveType})` : row.status,
+            row.soldBy,
+            row.salesAgent,
+            row.client,
+            row.areaSqm,
+          ]),
+          [16, 30, 22, 20, 24, 24, 28, 18],
           metadata,
         ),
       ]
@@ -218,6 +236,13 @@ export default function DashboardPage({ onNavigate }) {
 
       {/* The other half of what the portal holds: the announcements board. */}
       <AnnouncementsCard announcements={data.announcements} onOpen={() => onNavigate?.('announcements')} />
+
+      {/* The latest sales and reservations, by the date each was recorded; keyed by project so a new filter starts at the top. */}
+      <LatestTransactionsCard
+        key={project}
+        recent={view.recent}
+        projectName={project === 'overall' ? '' : (data.projects ?? []).find((option) => option.code === project)?.name ?? project}
+      />
 
       <Box h="4px" />
     </Flex>
