@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 const clientsModule = await import('./clientsData')
-const { NEW_CLIENT_FIELDS, portalSubtitle, validateClient } = clientsModule
+const { NEW_CLIENT_FIELDS, portalSubtitle, sellerKindOf, validateClient } = clientsModule
 
 const VALID = {
   broker_name: 'BHRI Test',
@@ -58,5 +58,30 @@ describe('unitDescription', () => {
 describe('client form', () => {
   it('no longer asks for the TCP', () => {
     expect(NEW_CLIENT_FIELDS.some((field) => field.key === 'tcp_formatted')).toBe(false)
+  })
+})
+
+describe('sellerKindOf', () => {
+  const accounts = [
+    { kind: 'broker', authUserId: 'b-1', name: 'Gerald Delima', email: 'gerald@example.com' },
+    { kind: 'sales_agent', authUserId: 's-1', name: 'Maria Santos', email: 'maria@example.com' },
+    { kind: 'regular_user', authUserId: 'u-1', name: 'VHBC Test', email: 'test@example.com' },
+    { kind: 'sales_agent', authUserId: null, name: 'Juan Cruz', email: 'juan@example.com' },
+    { kind: 'broker', authUserId: 'b-2', name: 'Juan Cruz', email: 'juan.b@example.com' },
+  ]
+
+  it('goes by the linked app login first', () => {
+    expect(sellerKindOf({ broker_id: 's-1', broker_name: 'Gerald Delima' }, accounts)).toBe('sales_agent')
+  })
+
+  it('falls back to a name or email only one account has', () => {
+    expect(sellerKindOf({ broker_name: 'vhbc  test' }, accounts)).toBe('regular_user')
+    expect(sellerKindOf({ broker_name: 'Maria@Example.com' }, accounts)).toBe('sales_agent')
+  })
+
+  it('tells nothing from a shared name or no match', () => {
+    expect(sellerKindOf({ broker_name: 'Juan Cruz' }, accounts)).toBe('')
+    expect(sellerKindOf({ broker_name: 'Someone Else' }, accounts)).toBe('')
+    expect(sellerKindOf({}, accounts)).toBe('')
   })
 })

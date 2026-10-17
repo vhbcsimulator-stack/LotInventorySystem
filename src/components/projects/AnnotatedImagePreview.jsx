@@ -11,12 +11,14 @@ import {
   LuLayoutGrid,
   LuPaintbrush,
   LuPalette,
+  LuPencil,
   LuPipette,
   LuSave,
   LuShapes,
   LuSlidersHorizontal,
   LuRedo2,
   LuTriangleAlert,
+  LuType,
   LuUndo2,
   LuWandSparkles,
   LuZoomIn,
@@ -36,7 +38,18 @@ import {
   rgbToHex,
   savePalette,
 } from '@/components/projects/legendPalette'
-import { LOT_RING_COLOR, RING_THICKNESS_MAX, RING_THICKNESS_MIN, clampRingCenter, frameMisfit, isSvgUrl } from '@/lib/svgMaps'
+import {
+  LOT_RING_COLOR,
+  MARK_FONT,
+  RING_SIZE_MAX,
+  RING_SIZE_MIN,
+  RING_THICKNESS_MAX,
+  RING_THICKNESS_MIN,
+  clampRingCenter,
+  frameMisfit,
+  isSvgUrl,
+  strokePath,
+} from '@/lib/svgMaps'
 import { fillForStatus, lotsForLabel, planStatusUpdate } from '@/components/projects/lotStatusPlan'
 import { SellerPicker } from '@/components/projects/SoldByPicker'
 import { sellerFields } from '@/components/projects/seller'
@@ -50,6 +63,72 @@ import { COLORS, LOT_STATUS, MAP_LOT_FILL } from '@/theme/colors'
 
 /** The brush that removes a lot's new colour, leaving the map's own. */
 const ORIGINAL = 'original'
+// The brush that erases a red circle printed into the map picture, leaving the lot's status alone.
+const ERASE_RING = 'erase-ring'
+/** The mark-up tools: drawing freehand, and writing text, on the map. */
+const DRAW = 'draw'
+const TEXT = 'text'
+const marking = (brush) => brush === DRAW || brush === TEXT
+/*
+ * The pointer while picking a colour off the map: an eyedropper, black over a
+ * white outline so it shows on any colour, with its tip — the bottom-left
+ * corner — the point that is read. The crosshair stands in where custom
+ * cursors are not drawn.
+ */
+const EYEDROPPER_SHAPE =
+  '<path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z"/>'
+const EYEDROPPER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round">` +
+    `<g stroke="#FFFFFF" stroke-width="4.5">${EYEDROPPER_SHAPE}</g>` +
+    `<g stroke="#111827" stroke-width="2" fill="#FFFFFF">${EYEDROPPER_SHAPE}</g>` +
+    '</svg>',
+)}") 2 22, crosshair`
+/** The colours marks can be drawn in. */
+const MARK_COLORS = ['#111827', '#E11D1D', '#1D4ED8', '#16A34A', '#F59E0B', '#FFFFFF']
+/** The colours offered for the rings of circled lots, red (the default) first; any other can be picked too. */
+const RING_COLORS = [LOT_RING_COLOR, '#111827', '#1D4ED8', '#16A34A', '#F59E0B', '#7C3AED']
+/** Every new text box starts in black, whatever colour the brush was last in. */
+const TEXT_DEFAULT_COLOR = '#111827'
+/** The size marks start at: small. */
+const MARK_SIZE_DEFAULT = 2
+/** A text's height per step of Size, in mark units; and how small or large a text can be dragged. */
+const TEXT_SCALE = 6
+const TEXT_SIZE_MIN = 3
+const TEXT_SIZE_MAX = 150
+const MARK_SIZE_MIN = 1
+const MARK_SIZE_MAX = 10
+/** A mark's size step, as a share of the map's width, so marks look alike on any map. */
+const MARK_UNIT = 1 / 1000
+/** The weights text can be written in — the two every SVG reader draws in Arial. */
+const TEXT_WEIGHTS = [
+  { value: 'normal', label: 'Regular' },
+  { value: 'bold', label: 'Bold' },
+]
+/** A point of the drawing under the pointer, in its own units. */
+function pointIn(svg, event) {
+  const matrix = svg?.getScreenCTM()
+  if (!matrix) return null
+  const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+  return [point.x, point.y]
+}
+/** The text box's hint while empty. */
+const TEXT_HINT = 'Text'
+/** The text box's width: as wide as it was drawn, or as its text (or hint) needs if that is wider. */
+const textBoxWidth = (draft) => Math.max(draft.boxWidth ?? 0, (Math.max(draft.value.length, TEXT_HINT.length) * 0.62 + 0.6) * draft.size)
+/** Whether a colour is light — light text is typed on a dark box so it can be read. */
+const isLightColor = (hex) => {
+  const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16))
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160
+}
+/** The brush cursor: its ring's colour, and its thickness in screen pixels at any zoom. */
+const BRUSH_CURSOR_COLOR = '#939393'
+const BRUSH_CURSOR_WIDTH = 3
+/** How far below a text's middle its baseline sits, as a share of its size. */
+const TEXT_BASELINE = 0.35
+/** A text turned by its rotate handle snaps level (or upright) within this many degrees; with Shift, to every 15°. */
+const TEXT_ANGLE_SNAP = 4
+/** A turned text's transform: about the left end of its middle line, where its box turns too. */
+const textRotation = (angle, x, y) => (angle ? `rotate(${+angle.toFixed(1)} ${+x.toFixed(1)} ${+y.toFixed(1)})` : undefined)
 const FILL_BY_STATUS = Object.fromEntries(MAP_LOT_FILL.map((option) => [option.value, option]))
 /** Who a lot painted Reserved is held for; stored on the lot as its reserve type. */
 const RESERVE_TYPES = [
@@ -60,7 +139,9 @@ const RESERVE_TYPES = [
 ]
 const reserveTypeLabel = (value) => RESERVE_TYPES.find((option) => option.value === value)?.label ?? ''
 /** A paint's colour name, with its reserve type when it has one: "Reserved · Client". */
-function paintLabel({ status, reserveType }) {
+function paintLabel({ status, reserveType, eraseRing }) {
+  // A lot only cleared of its printed circle has no new status.
+  if (!status) return eraseRing ? 'Circle removed · Available' : ''
   const label = FILL_BY_STATUS[status]?.label ?? status
   return reserveType ? `${label} · ${reserveTypeLabel(reserveType)}` : label
 }
@@ -85,6 +166,17 @@ function withPaints(prev, url, update) {
   return { url, paints: next, past: [...past, current].slice(-HISTORY_LIMIT), future: [] }
 }
 const NONE = []
+
+/*
+ * Marks — brush strokes and text — share the paint list with the lot paints,
+ * so one Undo covers both; they are kept after the lot paints, and each kind
+ * is changed without touching the other.
+ */
+const isMark = (paint) => paint.mark !== undefined
+const withLotPaints = (prev, url, update) =>
+  withPaints(prev, url, (list) => [...update(list.filter((paint) => !isMark(paint))), ...list.filter(isMark)])
+const withMarks = (prev, url, update) =>
+  withPaints(prev, url, (list) => [...list.filter((paint) => !isMark(paint)), ...update(list.filter(isMark))])
 
 const FONT = 'Inter, system-ui, sans-serif'
 
@@ -275,6 +367,104 @@ const PaintLayers = memo(function PaintLayers({ id, url, width, height, layers }
           <image href={url} x="0" y="0" width={width} height={height} preserveAspectRatio="none" />
         </g>
       ))}
+    </g>
+  )
+})
+
+/**
+ * Brush strokes and text drawn on the map (see useLotPainter's `marks`), with
+ * the stroke being drawn. Clicks pass through to the map, except while a mark
+ * can be rubbed out (`onErase`) or a text opened to change it (`onEditText`).
+ */
+const MarksLayer = memo(function MarksLayer({ marks, live, editing, onErase, onEditText, onMoveText }) {
+  // A text being dragged: { mark, startX, startY (screen), start: [x, y], offset: [dx, dy], moved }.
+  const [moving, setMoving] = useState(null)
+  if (!marks.length && !live) return null
+  // With Text, a press on a text either drags it (once it travels) or, left still, opens it to change.
+  const movable = (mark) =>
+    onMoveText
+      ? {
+          cursor: 'move',
+          onPointerDown: (event) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            event.currentTarget.setPointerCapture(event.pointerId)
+            const start = pointIn(event.currentTarget.ownerSVGElement, event)
+            if (start) setMoving({ mark, startX: event.clientX, startY: event.clientY, start, offset: [0, 0], moved: false })
+          },
+          onPointerMove: (event) => {
+            if (moving?.mark !== mark) return
+            if (!moving.moved && Math.hypot(event.clientX - moving.startX, event.clientY - moving.startY) <= DRAG_SLOP) return
+            const point = pointIn(event.currentTarget.ownerSVGElement, event)
+            if (point) setMoving({ ...moving, moved: true, offset: [point[0] - moving.start[0], point[1] - moving.start[1]] })
+          },
+          onPointerUp: (event) => {
+            if (moving?.mark !== mark) return
+            event.stopPropagation()
+            setMoving(null)
+            if (moving.moved) onMoveText(mark, ...moving.offset)
+            else onEditText?.(mark)
+          },
+          onPointerCancel: () => setMoving(null),
+          onClick: (event) => event.stopPropagation(),
+        }
+      : {}
+  const pick = (mark, handler) =>
+    handler
+      ? {
+          cursor: 'pointer',
+          onPointerDown: (event) => event.stopPropagation(),
+          onClick: (event) => {
+            event.stopPropagation()
+            handler(mark)
+          },
+        }
+      : {}
+  return (
+    <g>
+      {marks.map((mark, index) => {
+        if (mark.mark === 'text') {
+          // The text open in the box is shown there instead.
+          if (mark === editing) return null
+          const handler = onErase ?? onEditText
+          const offset = moving?.mark === mark ? moving.offset : [0, 0]
+          return (
+            <text
+              key={index}
+              x={mark.x + offset[0]}
+              y={mark.y + offset[1]}
+              transform={textRotation(mark.angle, mark.x + offset[0], mark.y + offset[1] - mark.size * TEXT_BASELINE)}
+              fill={mark.color}
+              fontSize={mark.size}
+              fontFamily={MARK_FONT}
+              fontWeight={mark.weight ?? 'bold'}
+              // Inline too: the page's own font rules would otherwise win over SVG attributes.
+              style={{ fontFamily: MARK_FONT, fontWeight: mark.weight ?? 'bold', fontSize: `${mark.size}px` }}
+              pointerEvents={handler ? 'visiblePainted' : 'none'}
+              {...(onErase ? pick(mark, onErase) : movable(mark))}
+            >
+              {onErase ? <title>Click to rub out this text</title> : onEditText ? <title>Drag to move this text, or click to change it</title> : null}
+              {mark.text}
+            </text>
+          )
+        }
+        const d = strokePath(mark.points)
+        return (
+          <g key={index}>
+            <path d={d} fill="none" stroke={mark.color} strokeWidth={mark.width} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+            {onErase ? (
+              // A wider invisible line, so a thin stroke is easy to click.
+              <path d={d} fill="none" stroke="transparent" strokeWidth={Math.max(mark.width * 3, 6)} strokeLinecap="round" pointerEvents="stroke" {...pick(mark, onErase)}>
+                <title>Click to rub out this stroke</title>
+              </path>
+            ) : null}
+          </g>
+        )
+      })}
+      {live ? (
+        <path d={strokePath(live.points)} fill="none" stroke={live.color} strokeWidth={live.width} strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />
+      ) : null}
     </g>
   )
 })
@@ -489,6 +679,7 @@ export default function AnnotatedImagePreview({
   // Statuses this project marks with a red ring rather than a colour (ERHD's Sold), and how thick the rings are.
   const circled = lotTermsFor(projectCode).circled
   const [ringThickness, setRingThickness] = useState(1)
+  const [ringColor, setRingColor] = useState(LOT_RING_COLOR)
   const [reserveType, setReserveType] = useState(initialPaints.at(-1)?.reserveType ?? RESERVE_TYPES[0].value)
   // What a click paints: the brush's colour, and for Reserved who it is held for.
   const brushPaint = useMemo(
@@ -587,6 +778,17 @@ export default function AnnotatedImagePreview({
     if (apply && legendDraft) changePalette(legendDraft)
     setLegendDraft(null)
     setPicking([])
+  }
+  /*
+   * One status's colour read off the legend on its own: matching starts (or
+   * goes on) with only that swatch to click next — or it moves to the front of
+   * the ones still to read — and the review follows as for all of them.
+   */
+  function pickLegendStatus(status) {
+    setPaintMessage('')
+    setColorDraft(null)
+    setLegendDraft((draft) => draft ?? { ...savedPalette })
+    setPicking((queue) => [status, ...queue.filter((value) => value !== status)])
   }
   // The paints, with the steps before (past) and undone after (future) them.
   const [paintState, setPaintState] = useState({ url, paints: initialPaints, past: [], future: [] })
@@ -714,7 +916,9 @@ export default function AnnotatedImagePreview({
   }
   // Colour layers are referenced by id; unique per preview, and safe inside url(#…).
   const paintLayerId = `paint-${useId().replace(/[^a-zA-Z0-9]/g, '')}`
-  const paints = useMemo(() => (paintState.url === url ? paintState.paints : []), [paintState, url])
+  const allPaints = useMemo(() => (paintState.url === url ? paintState.paints : []), [paintState, url])
+  const paints = useMemo(() => allPaints.filter((paint) => !isMark(paint)), [allPaints])
+  const marks = useMemo(() => allPaints.filter(isMark), [allPaints])
   const painter = useLotPainter({
     enabled: painting,
     url,
@@ -727,8 +931,361 @@ export default function AnnotatedImagePreview({
     shapeMode,
     circled,
     ringThickness,
+    ringColor,
+    marks,
   })
-  const updatePaints = (update) => setPaintState((prev) => withPaints(prev, url, update))
+  // The painter as last rendered, for a save that waits for a change to be drawn first.
+  const painterRef = useRef(painter)
+  painterRef.current = painter
+  const updatePaints = (update) => setPaintState((prev) => withLotPaints(prev, url, update))
+  const updateMarks = (update) => setPaintState((prev) => withMarks(prev, url, update))
+
+  /*
+   * Marking up the map: freehand strokes (Draw) and text (Text), in the colour
+   * and size picked, saved over everything. The Original brush rubs a mark out.
+   */
+  const [markColor, setMarkColor] = useState(MARK_COLORS[0])
+  const [markSize, setMarkSize] = useState(MARK_SIZE_DEFAULT)
+  const [markWeight, setMarkWeight] = useState('bold')
+  const markUnit = (canvas.width || 1) * MARK_UNIT
+  const strokeRef = useRef(null)
+  const [liveStroke, setLiveStroke] = useState(null)
+  // The text being typed: { x, y (its middle), value, color, size, replaces? }.
+  const [textDraft, setTextDraft] = useState(null)
+  const textDraftRef = useRef(null)
+  textDraftRef.current = textDraft
+  const svgPoint = (svg, event) => {
+    const matrix = svg.getScreenCTM()
+    if (!matrix) return null
+    const point = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse())
+    return [point.x, point.y]
+  }
+  function onDrawPointerDown(event) {
+    if (!painting || !marking(brush) || pickingMark || event.button !== 0 || spaceHeld.current || picking.length) return
+    if (brush === TEXT) {
+      onTextBoxDown(event)
+      return
+    }
+    const point = svgPoint(event.currentTarget, event)
+    if (!point) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    strokeRef.current = [point]
+    setLiveStroke([point])
+  }
+  function onDrawPointerMove(event) {
+    if (brush === DRAW) moveBrushCursor(event)
+    if (textBoxDragRef.current) {
+      onTextBoxMove(event)
+      return
+    }
+    const points = strokeRef.current
+    if (!points) return
+    const point = svgPoint(event.currentTarget, event)
+    const last = points.at(-1)
+    if (!point || Math.hypot(point[0] - last[0], point[1] - last[1]) < markUnit * 0.75) return
+    points.push(point)
+    setLiveStroke([...points])
+  }
+  function onDrawPointerUp() {
+    if (textBoxDragRef.current) {
+      onTextBoxUp()
+      return
+    }
+    const points = strokeRef.current
+    strokeRef.current = null
+    setLiveStroke(null)
+    if (!points) return
+    updateMarks((list) => [...list, { mark: 'stroke', points, color: markColor, width: markSize * markUnit * 1.5 }])
+  }
+  /** Keep the text being typed (an empty one is dropped), replacing the text it was opened from. */
+  function commitText() {
+    const draft = textDraftRef.current
+    textDraftRef.current = null
+    setTextDraft(null)
+    if (!draft) return
+    const text = draft.value.trim()
+    updateMarks((list) => {
+      const rest = draft.replaces ? list.filter((mark) => mark !== draft.replaces) : list
+      if (!text) return rest
+      return [
+        ...rest,
+        {
+          mark: 'text',
+          x: draft.x,
+          y: draft.y + draft.size * TEXT_BASELINE,
+          text,
+          color: draft.color,
+          size: draft.size,
+          weight: draft.weight,
+          ...(draft.angle ? { angle: draft.angle } : {}),
+        },
+      ]
+    })
+  }
+  function openText(x, y) {
+    commitText()
+    setMarkColor(TEXT_DEFAULT_COLOR)
+    setTextDraft({ x, y, value: '', color: TEXT_DEFAULT_COLOR, size: markSize * markUnit * TEXT_SCALE, weight: markWeight })
+  }
+  // The colour and size picked are the next mark's — and the open text's, which changes with them.
+  function chooseMarkColor(color) {
+    setMarkColor(color)
+    setTextDraft((draft) => (draft ? { ...draft, color } : draft))
+  }
+  function chooseMarkWeight(weight) {
+    setMarkWeight(weight)
+    setTextDraft((draft) => (draft ? { ...draft, weight } : draft))
+  }
+  function chooseMarkSize(size) {
+    setMarkSize(size)
+    setTextDraft((draft) => (draft ? { ...draft, size: size * markUnit * TEXT_SCALE } : draft))
+  }
+  function editText(mark) {
+    commitText()
+    setMarkColor(mark.color)
+    setMarkWeight(mark.weight ?? 'bold')
+    setMarkSize(Math.min(MARK_SIZE_MAX, Math.max(MARK_SIZE_MIN, Math.round(mark.size / (markUnit * TEXT_SCALE)))))
+    setTextDraft({
+      x: mark.x,
+      y: mark.y - mark.size * TEXT_BASELINE,
+      value: mark.text,
+      color: mark.color,
+      size: mark.size,
+      weight: mark.weight ?? 'bold',
+      angle: mark.angle ?? 0,
+      replaces: mark,
+    })
+  }
+  // The open box, turned by its rotate handle about the left end of its middle line.
+  const textRotateRef = useRef(false)
+  function onTextRotateDown(event) {
+    if (event.button !== 0 || !textDraft) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    textRotateRef.current = true
+  }
+  function onTextRotateMove(event) {
+    if (!textRotateRef.current) return
+    event.stopPropagation()
+    const point = pointIn(event.currentTarget.ownerSVGElement, event)
+    if (!point) return
+    setTextDraft((draft) => {
+      if (!draft) return draft
+      let angle = (Math.atan2(point[1] - draft.y, point[0] - draft.x) * 180) / Math.PI
+      if (event.shiftKey) angle = Math.round(angle / 15) * 15
+      else {
+        const square = Math.round(angle / 90) * 90
+        if (Math.abs(angle - square) <= TEXT_ANGLE_SNAP) angle = square
+      }
+      // -180 and 180 are the same turn: kept as one.
+      return { ...draft, angle: angle === -180 ? 180 : angle }
+    })
+  }
+  function onTextRotateUp(event) {
+    if (!textRotateRef.current) return
+    event.stopPropagation()
+    textRotateRef.current = false
+    dragged.current = true
+  }
+  const textResizeRef = useRef(null) // { startY, startSize } while the corner is dragged
+  function onTextResizeDown(event) {
+    if (event.button !== 0 || !textDraft) return
+    // Keeps the text box focused, and the press off the map.
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const point = svgPoint(event.currentTarget.ownerSVGElement, event)
+    if (point) textResizeRef.current = { startY: point[1], startSize: textDraft.size }
+  }
+  function onTextResizeMove(event) {
+    const start = textResizeRef.current
+    if (!start) return
+    event.stopPropagation()
+    const point = svgPoint(event.currentTarget.ownerSVGElement, event)
+    if (!point) return
+    // The box is 1.6 sizes tall, so the corner follows the pointer down and up.
+    const size = Math.min(TEXT_SIZE_MAX * markUnit, Math.max(TEXT_SIZE_MIN * markUnit, start.startSize + (point[1] - start.startY) / 1.6))
+    setTextDraft((draft) => (draft ? { ...draft, size } : draft))
+  }
+  function onTextResizeUp(event) {
+    if (!textResizeRef.current) return
+    event.stopPropagation()
+    textResizeRef.current = null
+    // The click that ends the drag is not one on the map.
+    dragged.current = true
+  }
+  // A text dragged to a new place: moved by (dx, dy), one step Undo can take back.
+  const moveText = (mark, dx, dy) =>
+    updateMarks((list) => list.map((item) => (item === mark ? { ...item, x: item.x + dx, y: item.y + dy } : item)))
+  // The open box, dragged by its move handle.
+  const textMoveRef = useRef(null) // { start: [x, y], origin: [x, y] }
+  function onTextMoveDown(event) {
+    if (event.button !== 0 || !textDraft) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const point = pointIn(event.currentTarget.ownerSVGElement, event)
+    if (point) textMoveRef.current = { start: point, origin: [textDraft.x, textDraft.y] }
+  }
+  function onTextMoveMove(event) {
+    const current = textMoveRef.current
+    if (!current) return
+    event.stopPropagation()
+    const point = pointIn(event.currentTarget.ownerSVGElement, event)
+    if (!point) return
+    const x = current.origin[0] + point[0] - current.start[0]
+    const y = current.origin[1] + point[1] - current.start[1]
+    setTextDraft((draft) => (draft ? { ...draft, x, y } : draft))
+  }
+  function onTextMoveUp(event) {
+    if (!textMoveRef.current) return
+    event.stopPropagation()
+    textMoveRef.current = null
+    dragged.current = true
+  }
+  const eraseMark = (mark) => updateMarks((list) => list.filter((item) => item !== mark))
+
+  /*
+   * The eyedropper: the browser's own where it has one (it reads the screen, so
+   * a lot already recoloured gives its new colour); elsewhere the next click on
+   * the map reads the map's colour there. It picks for the brush and text
+   * ('mark') or for the rings of circled lots ('ring'); `pickingMark` is which,
+   * while a click is awaited.
+   */
+  const [pickingMark, setPickingMark] = useState(null)
+  const choosePicked = (target, hex) => (target === 'ring' ? setRingColor(hex) : chooseMarkColor(hex))
+  async function pickColor(target) {
+    if (typeof window !== 'undefined' && 'EyeDropper' in window) {
+      setPickingMark(null)
+      try {
+        const { sRGBHex } = await new window.EyeDropper().open()
+        if (/^#[0-9a-f]{6}$/i.test(sRGBHex)) choosePicked(target, sRGBHex.toUpperCase())
+      } catch {
+        // Closed with Escape: the colour stays as it was.
+      }
+      return
+    }
+    setPickingMark((on) => (on === target ? null : target))
+  }
+  const pickMarkColor = () => pickColor('mark')
+  const pickRingColor = () => pickColor('ring')
+  /*
+   * Alt-click: the eyedropper at once, for the colour the brush in hand uses —
+   * Brush and Text take the mark colour, a ringed status (Sold) the ring
+   * colour, any other status its legend colour (reviewed before it is used,
+   * as Custom's are). While the legend is being read, it reads the swatch due.
+   * The press is taken here, before it can draw, paint, or pan, and so is the
+   * click that ends it.
+   */
+  const altTarget = picking.length
+    ? 'legend'
+    : marking(brush)
+      ? 'mark'
+      : circled.includes(brush)
+        ? 'ring'
+        : FILL_BY_STATUS[brush]
+          ? 'legend'
+          : null
+  const altPicked = useRef(false)
+  function onAltPick(event) {
+    altPicked.current = false
+    if (!painting || !event.altKey || !altTarget || event.button !== 0) return
+    event.preventDefault()
+    event.stopPropagation()
+    altPicked.current = true
+    const point = svgPoint(event.currentTarget, event)
+    const hex = point && painter.ready ? painter.sampleColor(...point) : null
+    setPickingMark(null)
+    if (!hex) return
+    if (altTarget !== 'legend') {
+      choosePicked(altTarget, hex)
+      return
+    }
+    // The swatch due while the legend is read, else the brush's own status; the review shows once none are left.
+    setPaintMessage('')
+    setColorDraft(null)
+    setDraftColor(picking[0] ?? brush, hex)
+    if (picking.length) setPicking((queue) => queue.slice(1))
+  }
+  function onAltClick(event) {
+    if (!altPicked.current) return
+    altPicked.current = false
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  /*
+   * While drawing, the pointer is a circle as wide as the brush, drawn on the
+   * map itself so it keeps its true size at any zoom. It is moved directly,
+   * not through React, so following the pointer re-renders nothing.
+   */
+  const brushCursorRef = useRef(null)
+  function moveBrushCursor(event) {
+    const cursor = brushCursorRef.current
+    if (!cursor) return
+    const point = svgPoint(event.currentTarget, event)
+    if (!point || pickingMark || spaceHeld.current || event.altKey) {
+      cursor.setAttribute('visibility', 'hidden')
+      return
+    }
+    cursor.setAttribute('transform', `translate(${point[0]} ${point[1]})`)
+    cursor.setAttribute('visibility', 'visible')
+  }
+  const hideBrushCursor = () => brushCursorRef.current?.setAttribute('visibility', 'hidden')
+
+  /*
+   * With Text, dragging on the map draws the text's box: its height sets the
+   * text's size, its width the box's. A click without a drag opens a box of
+   * the size picked, there.
+   */
+  const textBoxDragRef = useRef(null) // { start: [x, y], end: [x, y] }
+  const [textBoxDrag, setTextBoxDrag] = useState(null)
+  function onTextBoxDown(event) {
+    const point = svgPoint(event.currentTarget, event)
+    if (!point) return
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    textBoxDragRef.current = { start: point, end: point }
+    setTextBoxDrag(textBoxDragRef.current)
+  }
+  function onTextBoxMove(event) {
+    const current = textBoxDragRef.current
+    if (!current) return
+    const point = svgPoint(event.currentTarget, event)
+    if (!point) return
+    textBoxDragRef.current = { ...current, end: point }
+    setTextBoxDrag(textBoxDragRef.current)
+  }
+  function onTextBoxUp() {
+    const current = textBoxDragRef.current
+    textBoxDragRef.current = null
+    setTextBoxDrag(null)
+    if (!current) return
+    const [x0, y0] = current.start
+    const [x1, y1] = current.end
+    const width = Math.abs(x1 - x0)
+    const height = Math.abs(y1 - y0)
+    // Too small to be a box (a click, or a slip of the hand): a box of the size picked.
+    if (Math.max(width, height) < 6 * screenPixel) {
+      openText(x0, y0)
+      return
+    }
+    const size = Math.min(TEXT_SIZE_MAX * markUnit, Math.max(TEXT_SIZE_MIN * markUnit, height / 1.6))
+    commitText()
+    setMarkColor(TEXT_DEFAULT_COLOR)
+    setTextDraft({
+      x: Math.min(x0, x1),
+      y: Math.min(y0, y1) + (size * 1.6) / 2,
+      value: '',
+      color: TEXT_DEFAULT_COLOR,
+      size,
+      weight: markWeight,
+      boxWidth: width,
+    })
+    setMarkSize(Math.min(MARK_SIZE_MAX, Math.max(MARK_SIZE_MIN, Math.round(size / (markUnit * TEXT_SCALE)))))
+  }
   /*
    * "Show original" hides the colours to compare with the map as it was. It is
    * tied to the paints it was turned on for: any change — a paint, undo, redo,
@@ -772,18 +1329,25 @@ export default function AnnotatedImagePreview({
   // The newest paint of each annotated lot, for the swatches in the list.
   const shapePaint = new Map(paints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint]))
   // Areas colored by clicking, each once; the one being linked, while it still exists (undo can remove it).
-  const clickedPaints = paints.filter((paint) => paint.shapeId === undefined)
+  // (An area cleared of its printed ring is linked too: its lot turns Available.)
+  const clickedPaints = paints.filter((paint) => paint.shapeId === undefined && (paint.status || paint.eraseRing))
   const linkingPaint = linking ? (clickedPaints.find((paint) => samePoint(paint, linking)) ?? null) : null
   const linkedIds = new Set(clickedPaints.filter((paint) => paint.lot).map((paint) => paint.lot.id))
 
   // Stable per brush, so the memoised polygons are not rebuilt on every pan frame.
   const paintShape = useCallback(
     (id) => {
+      // Drawing and writing on the map never colour the lot underneath; with no brush in hand, nothing does.
+      if (!brush || marking(brush)) return
       setPaintMessage('')
       setPaintState((prev) =>
-        withPaints(prev, url, (list) => {
+        withLotPaints(prev, url, (list) => {
           const rest = list.filter((paint) => paint.shapeId !== id)
-          return brush === ORIGINAL ? rest : [...rest, { shapeId: id, ...brushPaint }]
+          const current = list.filter((paint) => paint.shapeId === id).at(-1)
+          // The lot keeps whatever it was painted (or nothing); only the printed ring goes.
+          if (brush === ERASE_RING) return [...rest, { ...(current ?? { shapeId: id }), eraseRing: true }]
+          // Repainting keeps a removed circle removed.
+          return brush === ORIGINAL ? rest : [...rest, { shapeId: id, ...brushPaint, ...(current?.eraseRing ? { eraseRing: true } : {}) }]
         }),
       )
     },
@@ -798,15 +1362,27 @@ export default function AnnotatedImagePreview({
     [paintShape],
   )
   function paintPoint(x, y) {
+    if (!brush) return
     const { found, index } = painter.locatePoint(x, y)
     setPaintMessage('')
     // A click off every lot — on a road, a line, the margin — simply does nothing.
     if (!found) return
     // Coloring an area again keeps the lot it was linked to.
     const lot = index >= 0 ? paints[index]?.lot : undefined
+    // Repainting keeps a removed circle removed.
+    const erased = index >= 0 && paints[index]?.eraseRing ? { eraseRing: true } : {}
+    if (brush === ERASE_RING) {
+      updatePaints((list) => {
+        const current = index >= 0 ? list[index] : null
+        return [...list.filter((_, n) => n !== index), { ...(current ?? { x, y }), eraseRing: true }]
+      })
+      // Its lot turns Available on saving, so a clicked area needs to know which lot it is.
+      if (canLink && !lot) openLinker(index >= 0 ? paints[index] : { x, y })
+      return
+    }
     updatePaints((list) => {
       const rest = list.filter((_, n) => n !== index)
-      return brush === ORIGINAL ? rest : [...rest, { x, y, ...brushPaint, ...(lot ? { lot } : {}) }]
+      return brush === ORIGINAL ? rest : [...rest, { x, y, ...brushPaint, ...erased, ...(lot ? { lot } : {}) }]
     })
     if (brush === ORIGINAL) setLinking(null)
     else if (canLink && !lot) openLinker({ x, y })
@@ -814,7 +1390,19 @@ export default function AnnotatedImagePreview({
   /** A click on the map itself, off every annotation: colour the lot under it. */
   function onDrawingClick(event) {
     // Every pointer-up resets `dragged`, so reading it is enough to skip the end of a pan.
-    if (!painting || !painter.ready || dragged.current || spaceHeld.current) return
+    if (!painting || dragged.current || spaceHeld.current) return
+    // The eyedropper (where the browser has none of its own): this click reads the map's colour.
+    if (pickingMark) {
+      const point = svgPoint(event.currentTarget, event)
+      const hex = point && painter.ready ? painter.sampleColor(...point) : null
+      if (hex) choosePicked(pickingMark, hex)
+      setPickingMark(null)
+      return
+    }
+    // Text goes where the map is clicked; a stroke was drawn by the press itself.
+    // Text boxes and strokes are made by the press itself, not the click after it.
+    if (marking(brush) && !picking.length) return
+    if (!painter.ready) return
     // Reading a legend swatch takes a click anywhere, over an annotation or not.
     if (!picking.length && event.target.tagName === 'polygon') return
     // The drawing is letterboxed into the svg box, as its viewBox is.
@@ -858,7 +1446,7 @@ export default function AnnotatedImagePreview({
     const [x, y] = drawingPoint(event)
     const { ring } = current
     ;[current.cx, current.cy] = clampRingCenter([ring.cx + x - current.x, ring.cy + y - current.y], ring.r, ring.bounds)
-    setRingDrag({ key: ring.key, cx: current.cx, cy: current.cy })
+    setRingDrag({ key: ring.key, cx: current.cx, cy: current.cy, r: ring.r })
   }
   function onRingPointerUp(event) {
     const current = ringDragRef.current
@@ -873,10 +1461,60 @@ export default function AnnotatedImagePreview({
       const { x0, y0, x1, y1 } = ring.bounds
       const ringOffset = { dx: current.cx - (x0 + x1) / 2, dy: current.cy - (y0 + y1) / 2 }
       updatePaints((list) => list.map((paint) => (paint === ring.paint ? { ...paint, ringOffset } : paint)))
-    } else if (brush !== ring.paint.status) {
+    } else if (brush && brush !== ring.paint.status) {
       if (ring.paint.shapeId !== undefined) paintShape(ring.paint.shapeId)
       else paintPoint(ring.paint.x, ring.paint.y)
     }
+  }
+
+  /*
+   * Resizing a ring: its round handle, shown while the pointer is on the ring,
+   * is dragged out or in — the ring's edge follows the pointer, about its
+   * centre — and on release its size is kept on the paint as `ringSize` (times
+   * its default), one step Undo can take back. A double-click sets it back.
+   */
+  const [hoverRing, setHoverRing] = useState(null) // the key of the ring the pointer is on
+  // The handle sits on the ring's lower right, as large as the ring is thick (and never too small to grab).
+  const ringHandle = (at, ring) => ({
+    x: at.cx + at.r * Math.SQRT1_2,
+    y: at.cy + at.r * Math.SQRT1_2,
+    r: Math.max(ring.strokeWidth * 0.8, 5 * screenPixel),
+  })
+  const ringResizeRef = useRef(null) // { ring, cx, cy, r }
+  const setRingSize = (ring, ringSize) =>
+    updatePaints((list) =>
+      list.map((paint) => {
+        if (paint !== ring.paint) return paint
+        const rest = { ...paint }
+        delete rest.ringSize
+        return Math.abs(ringSize - 1) < 0.02 ? rest : { ...rest, ringSize: +ringSize.toFixed(3) }
+      }),
+    )
+  function onRingResizeDown(event, ring) {
+    if (event.button !== 0 || spaceHeld.current || picking.length || !painter.ready) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    ringResizeRef.current = { ring, cx: ring.cx, cy: ring.cy, r: ring.r }
+  }
+  function onRingResizeMove(event) {
+    const current = ringResizeRef.current
+    if (!current) return
+    event.stopPropagation()
+    const [x, y] = drawingPoint(event)
+    const { ring } = current
+    current.r = Math.min(RING_SIZE_MAX, Math.max(RING_SIZE_MIN, Math.hypot(x - ring.cx, y - ring.cy) / ring.base)) * ring.base
+    ;[current.cx, current.cy] = clampRingCenter([ring.cx, ring.cy], current.r, ring.bounds)
+    setRingDrag({ key: ring.key, cx: current.cx, cy: current.cy, r: current.r })
+  }
+  function onRingResizeUp(event) {
+    const current = ringResizeRef.current
+    ringResizeRef.current = null
+    if (!current) return
+    event.stopPropagation()
+    dragged.current = true
+    setRingDrag(null)
+    if (current.r !== current.ring.r) setRingSize(current.ring, current.r / current.ring.base)
   }
 
   const fileNameBase = `${(title || 'map').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map'}-colored`
@@ -885,8 +1523,13 @@ export default function AnnotatedImagePreview({
 
   async function saveImage() {
     try {
+      // Text still being typed is kept first, and the download waits for it to be drawn in.
+      if (textDraftRef.current) {
+        commitText()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
       // PNG is lossless and uses the painter's full working dimensions, not the scaled preview.
-      const href = URL.createObjectURL(await painter.toPngBlob())
+      const href = URL.createObjectURL(await painterRef.current.toPngBlob())
       const link = document.createElement('a')
       link.href = href
       link.download = pngFileName
@@ -930,18 +1573,22 @@ export default function AnnotatedImagePreview({
   }, [open, painting, review, undo, redo])
 
   async function openReview() {
+    // Text still being typed goes onto the map that will be saved.
+    commitText()
     setPaintMessage('')
     setReview({ loading: true })
     try {
       // Every annotated lot's newest colour, as the saved map will show it.
       const labels = new Map(shapes.map((shape) => [shape.id, shape.label]))
-      const newest = new Map(paints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint]))
-      const linkedPaints = new Map(paints.filter((paint) => paint.shapeId === undefined && paint.lot).map((paint) => [paint.lot.id, paint]))
+      // A lot cleared of its printed (sold) circle turns Available in the table.
+      const statusPaints = paints.filter((paint) => paint.status || paint.eraseRing)
+      const newest = new Map(statusPaints.filter((paint) => paint.shapeId !== undefined).map((paint) => [paint.shapeId, paint]))
+      const linkedPaints = new Map(statusPaints.filter((paint) => paint.shapeId === undefined && paint.lot).map((paint) => [paint.lot.id, paint]))
       const painted = [
-        ...[...newest].map(([id, paint]) => ({ label: labels.get(id) ?? `Annotation ${id}`, fill: paint.status, paint })),
-        ...[...linkedPaints.values()].map((paint) => ({ label: paint.lot.lotNo, fill: paint.status, paint })),
+        ...[...newest].map(([id, paint]) => ({ label: labels.get(id) ?? `Annotation ${id}`, fill: paint.status ?? 'open', paint })),
+        ...[...linkedPaints.values()].map((paint) => ({ label: paint.lot.lotNo, fill: paint.status ?? 'open', paint })),
       ]
-      setReview({ plan: planStatusUpdate(shapes, paints, await loadLots()), painted })
+      setReview({ plan: planStatusUpdate(shapes, statusPaints, await loadLots()), painted })
     } catch (err) {
       setReview({ error: err.message })
     }
@@ -1015,6 +1662,11 @@ export default function AnnotatedImagePreview({
   // A pointer reports far more often than the screen redraws; coalescing to one
   // update per frame is the difference between a smooth pan and a stuttering one.
   const frame = useRef(0)
+  // Map units per screen pixel: the map is fitted to the frame, then zoomed by a CSS transform.
+  const screenPixel =
+    1 /
+    (Math.min((drawingRef.current?.offsetWidth || 1) / (canvas.width || 1), (drawingRef.current?.offsetHeight || 1) / (canvas.height || 1)) *
+      view.zoom)
 
   // A new picture starts from scratch rather than inheriting the last one's pan.
   useEffect(() => setView({ zoom: ZOOM_MIN, x: 0, y: 0 }), [url])
@@ -1099,6 +1751,8 @@ export default function AnnotatedImagePreview({
    */
   const spaceHeld = useRef(false)
   const [panKey, setPanKey] = useState(false)
+  // Alt held: a click on the map picks a colour instead (see onAltPick).
+  const [altHeld, setAltHeld] = useState(false)
   useEffect(() => {
     if (!open || !painting) return undefined
     const typing = (target) =>
@@ -1106,8 +1760,15 @@ export default function AnnotatedImagePreview({
     const release = () => {
       spaceHeld.current = false
       setPanKey(false)
+      setAltHeld(false)
     }
     function onKeyDown(event) {
+      if (event.key === 'Alt') {
+        // Nor does Alt alone open the browser's menu bar.
+        event.preventDefault()
+        setAltHeld(true)
+        return
+      }
       if (event.code !== 'Space' || typing(event.target)) return
       // Nor does Space press whatever button last had focus.
       event.preventDefault()
@@ -1116,6 +1777,11 @@ export default function AnnotatedImagePreview({
       setPanKey(true)
     }
     function onKeyUp(event) {
+      if (event.key === 'Alt') {
+        event.preventDefault()
+        setAltHeld(false)
+        return
+      }
       if (event.code !== 'Space') return
       if (!typing(event.target)) event.preventDefault()
       release()
@@ -1291,9 +1957,28 @@ export default function AnnotatedImagePreview({
                     display="flex"
                     alignItems="center"
                     justifyContent="center"
-                    cursor={dragging ? 'grabbing' : painting && !panKey ? 'crosshair' : 'grab'}
-                    // While moving the map, the lots' own pointer cursor gives way to the hand.
-                    css={painting && (panKey || dragging) ? { '& *': { cursor: 'inherit !important' } } : undefined}
+                    cursor={
+                      dragging
+                        ? 'grabbing'
+                        : painting && !panKey
+                          ? pickingMark || (altHeld && altTarget) || picking.length
+                            ? EYEDROPPER_CURSOR
+                            : brush === DRAW
+                              ? 'none'
+                              : brush
+                                ? 'crosshair'
+                                : 'default'
+                          : 'grab'
+                    }
+                    // While moving the map, drawing, or picking a colour, the lots' own pointer cursor gives way;
+                    // with Text, only the lots' does — the text box keeps its I-beam and its handles theirs.
+                    css={
+                      painting && (panKey || dragging || brush === DRAW || pickingMark || (altHeld && altTarget) || picking.length)
+                        ? { '& *': { cursor: 'inherit !important' } }
+                        : painting && (brush === TEXT || !brush)
+                          ? { '& polygon': { cursor: 'inherit !important' } }
+                          : undefined
+                    }
                     touchAction="none"
                     userSelect="none"
                     onPointerDown={onPointerDown}
@@ -1336,6 +2021,14 @@ export default function AnnotatedImagePreview({
                       h="100%"
                       display="block"
                       onClick={onDrawingClick}
+                      // Alt-click picks a colour, ahead of anything a press would otherwise start.
+                      onPointerDownCapture={onAltPick}
+                      onClickCapture={onAltClick}
+                      onPointerDown={onDrawPointerDown}
+                      onPointerMove={onDrawPointerMove}
+                      onPointerUp={onDrawPointerUp}
+                      onPointerCancel={onDrawPointerUp}
+                      onPointerLeave={hideBrushCursor}
                     >
                       <image
                         href={url}
@@ -1348,6 +2041,19 @@ export default function AnnotatedImagePreview({
                       {painting && !showOriginal ? (
                         <PaintLayers id={paintLayerId} url={url} width={canvas.width || 1} height={canvas.height || 1} layers={painter.layers} />
                       ) : null}
+                      {/* Printed red rings erased: flat patches of each lot's colour over them. */}
+                      {painting && !showOriginal
+                        ? painter.patches.map((patch) => (
+                            <path
+                              key={patch.key}
+                              d={patch.d}
+                              fill={patch.fill}
+                              transform={`scale(${1 / patch.scale[0]} ${1 / patch.scale[1]})`}
+                              shapeRendering="crispEdges"
+                              pointerEvents="none"
+                            />
+                          ))
+                        : null}
                       {showShapes || painting ? (
                         <Shapes
                           shapes={statusShapes}
@@ -1367,17 +2073,23 @@ export default function AnnotatedImagePreview({
                       {painting && !showOriginal
                         ? painter.circles.map((ring) => {
                             const at = ringDrag?.key === ring.key ? ringDrag : ring
+                            const handle = ringHandle(at, ring)
                             return (
-                              <g key={ring.key}>
-                                <circle cx={at.cx} cy={at.cy} r={ring.r} fill="none" stroke={LOT_RING_COLOR} strokeWidth={ring.strokeWidth} pointerEvents="none" />
+                              <g
+                                key={ring.key}
+                                onPointerEnter={() => setHoverRing(ring.key)}
+                                onPointerLeave={() => setHoverRing((key) => (key === ring.key ? null : key))}
+                              >
+                                {/* The ring itself is drawn after the strokes and text, over them. */}
                                 <circle
                                   cx={at.cx}
                                   cy={at.cy}
-                                  r={ring.r}
+                                  r={at.r}
                                   fill="none"
                                   stroke="transparent"
                                   strokeWidth={Math.max(ring.strokeWidth * 2.5, ring.r * 0.3)}
-                                  pointerEvents="stroke"
+                                  // Drawing and writing go straight through to the map.
+                                  pointerEvents={marking(brush) ? 'none' : 'stroke'}
                                   cursor="move"
                                   onPointerDown={(event) => onRingPointerDown(event, ring)}
                                   onPointerMove={onRingPointerMove}
@@ -1386,10 +2098,188 @@ export default function AnnotatedImagePreview({
                                 >
                                   <title>Drag to move this ring within its lot</title>
                                 </circle>
+                                {/* The resize handle's grip: wider than it shows, drawn over the ring below. */}
+                                {hoverRing === ring.key || ringDrag?.key === ring.key ? (
+                                  <circle
+                                    cx={handle.x}
+                                    cy={handle.y}
+                                    r={handle.r * 1.8}
+                                    fill="transparent"
+                                    pointerEvents={marking(brush) ? 'none' : 'all'}
+                                    cursor="nwse-resize"
+                                    onPointerDown={(event) => onRingResizeDown(event, ring)}
+                                    onPointerMove={onRingResizeMove}
+                                    onPointerUp={onRingResizeUp}
+                                    onPointerCancel={onRingResizeUp}
+                                    onClick={(event) => event.stopPropagation()}
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation()
+                                      setRingSize(ring, 1)
+                                    }}
+                                  >
+                                    <title>Drag to resize this ring · double-click for its default size</title>
+                                  </circle>
+                                ) : null}
                               </g>
                             )
                           })
                         : null}
+                      {painting && !showOriginal ? (
+                        <MarksLayer
+                          marks={marks}
+                          live={liveStroke ? { points: liveStroke, color: markColor, width: markSize * markUnit * 1.5 } : null}
+                          editing={textDraft?.replaces ?? null}
+                          onErase={brush === ORIGINAL ? eraseMark : null}
+                          onEditText={brush === TEXT ? editText : null}
+                          onMoveText={brush === TEXT ? moveText : null}
+                        />
+                      ) : null}
+                      {/* Rings over circled lots, on top of the strokes and text; grabbed by their bands above. */}
+                      {painting && !showOriginal
+                        ? painter.circles.map((ring) => {
+                            const at = ringDrag?.key === ring.key ? ringDrag : ring
+                            const handle = ringHandle(at, ring)
+                            return (
+                              <g key={ring.key} pointerEvents="none">
+                                <circle cx={at.cx} cy={at.cy} r={at.r} fill="none" stroke={ringColor} strokeWidth={ring.strokeWidth} />
+                                {(hoverRing === ring.key || ringDrag?.key === ring.key) && !marking(brush) ? (
+                                  <circle cx={handle.x} cy={handle.y} r={handle.r} fill="#FFFFFF" stroke="#1D4ED8" strokeWidth={2 * screenPixel} />
+                                ) : null}
+                              </g>
+                            )
+                          })
+                        : null}
+                      {textBoxDrag ? (
+                        <rect
+                          x={Math.min(textBoxDrag.start[0], textBoxDrag.end[0])}
+                          y={Math.min(textBoxDrag.start[1], textBoxDrag.end[1])}
+                          width={Math.abs(textBoxDrag.end[0] - textBoxDrag.start[0])}
+                          height={Math.abs(textBoxDrag.end[1] - textBoxDrag.start[1])}
+                          fill="rgba(29,78,216,0.06)"
+                          stroke="#1D4ED8"
+                          strokeWidth={screenPixel}
+                          strokeDasharray={`${4 * screenPixel} ${3 * screenPixel}`}
+                          pointerEvents="none"
+                        />
+                      ) : null}
+                      {/* The brush, as wide as it draws: one thin ring. */}
+                      {painting && brush === DRAW ? (
+                        <g ref={brushCursorRef} visibility="hidden" pointerEvents="none">
+                          <circle
+                            r={(markSize * markUnit * 1.5) / 2}
+                            fill="none"
+                            stroke={BRUSH_CURSOR_COLOR}
+                            strokeWidth={BRUSH_CURSOR_WIDTH * screenPixel}
+                          />
+                        </g>
+                      ) : null}
+                      {painting && textDraft ? (
+                        <g transform={textRotation(textDraft.angle, textDraft.x, textDraft.y)}>
+                        <foreignObject
+                          x={textDraft.x}
+                          y={textDraft.y - textDraft.size * 0.8}
+                          width={textBoxWidth(textDraft)}
+                          height={textDraft.size * 1.6}
+                        >
+                          <input
+                            // Focused as it opens, so typing starts at once.
+                            autoFocus
+                            value={textDraft.value}
+                            placeholder={TEXT_HINT}
+                            aria-label="Text to add to the map"
+                            onChange={(event) => setTextDraft((draft) => (draft ? { ...draft, value: event.target.value } : draft))}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') commitText()
+                              else if (event.key === 'Escape') {
+                                textDraftRef.current = null
+                                setTextDraft(null)
+                              }
+                            }}
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                            style={{
+                              width: '100%',
+                              height: '100%',
+                              boxSizing: 'border-box',
+                              padding: 0,
+                              // Inside the box, the I-beam of typing; outside it, the map's plus.
+                              cursor: 'text',
+                              border: `${screenPixel}px dashed #1D4ED8`,
+                              outline: 'none',
+                              background: isLightColor(textDraft.color) ? 'rgba(17,24,39,0.7)' : 'rgba(255,255,255,0.85)',
+                              color: textDraft.color,
+                              font: `${textDraft.weight ?? 'bold'} ${textDraft.size}px ${MARK_FONT}`,
+                            }}
+                          />
+                        </foreignObject>
+                        {/* Drag the top-left handle to move the box. */}
+                        <rect
+                          x={textDraft.x - textDraft.size * 0.25}
+                          y={textDraft.y - textDraft.size * 0.8 - textDraft.size * 0.25}
+                          width={textDraft.size * 0.5}
+                          height={textDraft.size * 0.5}
+                          fill="#1D4ED8"
+                          stroke="#FFFFFF"
+                          strokeWidth={textDraft.size * 0.06}
+                          cursor="move"
+                          onPointerDown={onTextMoveDown}
+                          onPointerMove={onTextMoveMove}
+                          onPointerUp={onTextMoveUp}
+                          onPointerCancel={onTextMoveUp}
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <title>Drag to move the text</title>
+                        </rect>
+                        {/* Drag the corner to make the text larger or smaller. */}
+                        <rect
+                          x={textDraft.x + textBoxWidth(textDraft) - textDraft.size * 0.25}
+                          y={textDraft.y + textDraft.size * 0.8 - textDraft.size * 0.25}
+                          width={textDraft.size * 0.5}
+                          height={textDraft.size * 0.5}
+                          fill="#FFFFFF"
+                          stroke="#1D4ED8"
+                          strokeWidth={textDraft.size * 0.06}
+                          cursor="nwse-resize"
+                          onPointerDown={onTextResizeDown}
+                          onPointerMove={onTextResizeMove}
+                          onPointerUp={onTextResizeUp}
+                          onPointerCancel={onTextResizeUp}
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <title>Drag to resize the text</title>
+                        </rect>
+                        {/* Drag the round handle off the box's right end to turn the text; double-click sets it level. */}
+                        <line
+                          x1={textDraft.x + textBoxWidth(textDraft)}
+                          y1={textDraft.y}
+                          x2={textDraft.x + textBoxWidth(textDraft) + textDraft.size * 0.9}
+                          y2={textDraft.y}
+                          stroke="#1D4ED8"
+                          strokeWidth={screenPixel}
+                          pointerEvents="none"
+                        />
+                        <circle
+                          cx={textDraft.x + textBoxWidth(textDraft) + textDraft.size * 0.9}
+                          cy={textDraft.y}
+                          r={textDraft.size * 0.28}
+                          fill="#FFFFFF"
+                          stroke="#1D4ED8"
+                          strokeWidth={textDraft.size * 0.06}
+                          cursor="grab"
+                          onPointerDown={onTextRotateDown}
+                          onPointerMove={onTextRotateMove}
+                          onPointerUp={onTextRotateUp}
+                          onPointerCancel={onTextRotateUp}
+                          onClick={(event) => event.stopPropagation()}
+                          onDoubleClick={(event) => {
+                            event.stopPropagation()
+                            setTextDraft((draft) => (draft ? { ...draft, angle: 0 } : draft))
+                          }}
+                        >
+                          <title>Drag to rotate the text (Shift snaps to 15°) · double-click to level it</title>
+                        </circle>
+                        </g>
+                      ) : null}
                     </Box>
                     {/*
                       * Hidden twin, only there to report the image's true pixel
@@ -1434,6 +2324,7 @@ export default function AnnotatedImagePreview({
                           setPicking((queue) => queue.filter((value) => value !== status))
                         }}
                         onRepick={(status) => setPicking([status])}
+                        onJump={pickLegendStatus}
                         onApply={() => endMatching(true)}
                         onCancel={() => endMatching(false)}
                       />
@@ -1608,7 +2499,22 @@ export default function AnnotatedImagePreview({
                   {painting ? (
                     <PaintToolbar
                       brush={brush}
-                      onBrush={setBrush}
+                      onBrush={(value) => {
+                        commitText()
+                        setPickingMark(null)
+                        // The brush in hand, clicked again, is put down: then a click on the map does nothing.
+                        setBrush((current) => (current === value ? null : value))
+                      }}
+                      pickingMarkColor={pickingMark === 'mark'}
+                      pickingRingColor={pickingMark === 'ring'}
+                      onPickRingColor={pickRingColor}
+                      onPickMarkColor={pickMarkColor}
+                      markColor={markColor}
+                      onMarkColor={chooseMarkColor}
+                      markSize={markSize}
+                      onMarkSize={chooseMarkSize}
+                      markWeight={markWeight}
+                      onMarkWeight={chooseMarkWeight}
                       reserveType={reserveType}
                       onReserveType={pickReserveType}
                       palette={palette}
@@ -1619,6 +2525,8 @@ export default function AnnotatedImagePreview({
                         setLegendDraft({ ...savedPalette })
                         setPicking(MAP_LOT_FILL.map(({ value }) => value))
                       }}
+                      pickingLegendStatus={picking[0] ?? null}
+                      onPickLegendStatus={pickLegendStatus}
                       onDefaultPalette={() => {
                         endMatching(false)
                         setColorDraft(null)
@@ -1660,6 +2568,7 @@ export default function AnnotatedImagePreview({
                       colorEditor={
                         colorDraft ? (
                           <PaletteEditor
+                            hidden={circled}
                             draft={colorDraft}
                             saved={savedPalette}
                             status={colorStatus}
@@ -1681,15 +2590,17 @@ export default function AnnotatedImagePreview({
                       circled={circled}
                       ringThickness={ringThickness}
                       onRingThickness={setRingThickness}
+                      ringColor={ringColor}
+                      onRingColor={setRingColor}
                       shapeMode={shapes.length ? shapeMode : null}
                       onShapeMode={setShapeMode}
-                      count={paints.length}
+                      count={paints.length + marks.length}
                       ready={painter.ready}
                       loadError={painter.error}
                       message={paintMessage}
                       saving={saving || Boolean(review?.loading)}
                       controlStyle={controlStyle}
-                      onReset={() => updatePaints(() => [])}
+                      onReset={() => setPaintState((prev) => withPaints(prev, url, () => []))}
                       showOriginal={showOriginal}
                       onToggleOriginal={toggleOriginal}
                       onUndo={undo}
@@ -2311,18 +3222,15 @@ const PANEL_BUTTONS = {
  * `draft` is the palette being edited; painted lots preview it as it changes,
  * and only Save colors keeps it.
  */
-function PaletteEditor({ draft, saved, status, onStatus, onChange, onSave, onCancel, mapName = '', otherMaps = [], onUseMap }) {
-  const current = MAP_LOT_FILL.find((option) => option.value === status) ?? MAP_LOT_FILL[0]
-  const changed = MAP_LOT_FILL.filter(({ value }) => draft[value] !== saved[value]).length
+function PaletteEditor({ draft, saved, status, onStatus, onChange, onSave, onCancel, mapName = '', otherMaps = [], onUseMap, hidden = [] }) {
+  // A ringed status (ERHD's Sold) paints no colour, so it has none to edit here.
+  const statuses = MAP_LOT_FILL.filter(({ value }) => !hidden.includes(value))
+  const current = statuses.find((option) => option.value === status) ?? statuses[0]
+  const changed = statuses.filter(({ value }) => draft[value] !== saved[value]).length
   return (
     <Flex mt="8px" direction="column" gap="8px" role="group" aria-label={mapName ? `Edit legend colors for ${mapName}` : 'Edit legend colors'}>
-      {mapName ? (
-        <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
-          Editing the colors of <PhaseBadge name={mapName} /> — other phases keep their own.
-        </Text>
-      ) : null}
       <Flex gap="6px" flexWrap="wrap" role="tablist" aria-label="Status to edit">
-        {MAP_LOT_FILL.map(({ value, label }) => {
+        {statuses.map(({ value, label }) => {
           const now = value === current.value
           return (
             <Flex
@@ -2584,7 +3492,7 @@ function ManualColorPanel({ label, value, original, onChange, onUse, onCancel, b
  * listing each colour before and after \u2014 nothing is saved until it is accepted,
  * and a status can be picked again from it.
  */
-function LegendPickBanner({ picking, palette, saved, onSkip, onDone, onPreview, onUse, onRepick, onApply, onCancel }) {
+function LegendPickBanner({ picking, palette, saved, onSkip, onDone, onPreview, onUse, onRepick, onJump, onApply, onCancel }) {
   const confirming = picking.length === 0
   const current = MAP_LOT_FILL.find((option) => option.value === picking[0])
   // The status open on the colour wheel, with its colour from before the wheel moved it.
@@ -2709,6 +3617,13 @@ function LegendPickBanner({ picking, palette, saved, onSkip, onDone, onPreview, 
               return (
                 <Flex
                   key={value}
+                  // Any status can be read next, done or not: its own eyedropper.
+                  as="button"
+                  type="button"
+                  cursor={now ? 'default' : 'pointer'}
+                  title={now ? undefined : `Pick ${label} now`}
+                  onClick={() => !now && onJump?.(value)}
+                  _hover={now ? undefined : { bg: COLORS.statusBg }}
                   align="center"
                   gap="5px"
                   h="26px"
@@ -2787,11 +3702,11 @@ function LotLinkPanel({ paint, lots, error, linkedIds, palette, onLink, onUnlink
   useEffect(() => inputRef.current?.focus(), [])
   const key = filter.toLowerCase().replace(/[^a-z0-9]/g, '')
   const shown = (lots ?? []).filter((lot) => !key || lot.key.includes(key)).slice(0, 60)
-  const status = FILL_BY_STATUS[paint.status]?.label ?? paint.status
+  const status = paint.status ? (FILL_BY_STATUS[paint.status]?.label ?? paint.status) : 'Available (circle removed)'
   return (
     <Box mt="10px" p="10px" border="1px solid" borderColor={COLORS.activeBg} borderRadius="10px" bg={COLORS.surface}>
       <Flex align="center" gap="8px" flexWrap="wrap" mb="8px">
-        <Box boxSize="12px" borderRadius="3px" bg={palette[paint.status]} border="1px solid rgba(0,0,0,0.25)" />
+        <Box boxSize="12px" borderRadius="3px" bg={palette[paint.status ?? 'open']} border="1px solid rgba(0,0,0,0.25)" />
         <Text fontFamily={FONT} fontSize="13px" fontWeight="600" color={COLORS.heading}>
           {paint.lot ? `Colored ${status} · linked to ${paint.lot.lotNo}` : `Colored ${status} — which lot is this?`}
         </Text>
@@ -2903,6 +3818,9 @@ function PaintToolbar({
   // Matching the map legend is under way (the banner on the map leads it).
   matching,
   onMatchLegend,
+  // One status's eyedropper: the status whose swatch is to be clicked now, and the picker for one.
+  pickingLegendStatus = null,
+  onPickLegendStatus,
   onDefaultPalette,
   // Edit colors: whether the wheel is open, its toggle, and the editor shown below the legend row.
   editingColors = false,
@@ -2920,10 +3838,26 @@ function PaintToolbar({
   onStopUsingPhase,
   tolerance,
   onTolerance,
-  // Statuses painted as a red ring rather than a colour (ERHD's Sold), and the rings' thickness.
+  // Drawing and writing on the map: the colour and size marks are made in.
+  markColor = MARK_COLORS[0],
+  onMarkColor,
+  markSize = MARK_SIZE_DEFAULT,
+  onMarkSize,
+  // How heavy text is written: 'normal' or 'bold'.
+  markWeight = 'bold',
+  onMarkWeight,
+  // The eyedropper for the mark colour: whether it is waiting for a click on the map, and its button.
+  pickingMarkColor = false,
+  onPickMarkColor,
+  // Statuses painted as a ring rather than a colour (ERHD's Sold), and the rings' thickness and colour.
   circled = [],
   ringThickness = 1,
   onRingThickness,
+  ringColor = LOT_RING_COLOR,
+  onRingColor,
+  // The eyedropper for the ring colour, and whether it waits for a click on the map.
+  pickingRingColor = false,
+  onPickRingColor,
   // 'polygon' | 'lines' for a map with annotations; null hides the choice.
   shapeMode,
   onShapeMode,
@@ -2984,10 +3918,69 @@ function PaintToolbar({
   const baseId = useId().replace(/[^a-zA-Z0-9]/g, '')
   const toleranceId = `${baseId}-tolerance`
   const ringId = `${baseId}-ring`
+  // The ringed statuses by name: "Sold ring".
+  const ringName = `${MAP_LOT_FILL.filter(({ value }) => circled.includes(value))
+    .map(({ label }) => label)
+    .join(' / ')} ring`
+  const legendStatuses = MAP_LOT_FILL.filter(({ value }) => !circled.includes(value))
   const moreId = `${baseId}-more`
   const [moreOpen, setMoreOpen] = useState(false)
   // Settings behind More options that are off their default.
   const changedCount = tolerance !== TOLERANCE_DEFAULT ? 1 : 0
+  // The ring and legend settings, hidden until asked for — or shown while in use.
+  const hasRings = circled.length > 0 && Boolean(onRingThickness)
+  const ringSectionId = `${baseId}-rings`
+  const legendId = `${baseId}-legend`
+  const [ringOpen, setRingOpen] = useState(false)
+  const [legendOpen, setLegendOpen] = useState(false)
+  const ringShown = ringOpen || pickingRingColor
+  const legendShown = legendOpen || matching || editingColors
+  // How the legend colours are set, said on its button.
+  const legendSummary = matching
+    ? 'picking…'
+    : editingColors
+      ? 'editing…'
+      : fromPhase
+        ? `from ${fromPhase.name}`
+        : isDefaultPalette(palette)
+          ? 'Default'
+          : 'From map legend'
+  // An open section, set in under its button row.
+  const sectionPanel = { mt: '8px', pl: '10px', borderLeft: '2px solid', borderColor: COLORS.border }
+  const sectionToggle = ({ id, open, onToggle, icon, label, summary }) => (
+    <Flex
+      key={id}
+      as="button"
+      type="button"
+      align="center"
+      gap="6px"
+      h="30px"
+      px="10px"
+      borderRadius="999px"
+      border="1px solid"
+      borderColor={open ? COLORS.heading : COLORS.border}
+      bg={open ? COLORS.hoverBg : COLORS.surface}
+      fontFamily={FONT}
+      fontSize="12px"
+      fontWeight="600"
+      color={COLORS.heading}
+      cursor="pointer"
+      aria-expanded={open}
+      aria-controls={id}
+      title={open ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
+      onClick={onToggle}
+      _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+    >
+      {icon}
+      {label}
+      {summary && !open ? (
+        <Text as="span" fontWeight="500" color={COLORS.subtle}>
+          · {summary}
+        </Text>
+      ) : null}
+      <Icon as={LuChevronDown} boxSize="13px" transform={open ? 'rotate(180deg)' : undefined} transition="transform 120ms ease" />
+    </Flex>
+  )
   const busy = !ready || saving
   const action = (props) => ({
     ...controlStyle,
@@ -2997,6 +3990,45 @@ function PaintToolbar({
     ...props,
     onClick: busy || count === 0 ? undefined : props.onClick,
   })
+  // Another phase's legend colours, copied onto this map.
+  const legendPhaseSelect =
+    onUsePhase && otherPhases.length ? (
+      <NativeSelect.Root size="sm" w="auto">
+        <NativeSelect.Field
+          value={fromPhase?.slot ?? ''}
+          onChange={(event) => {
+            const other = otherPhases.find((map) => map.slot === event.target.value)
+            if (other) onUsePhase(other)
+            else if (!event.target.value) onStopUsingPhase?.()
+          }}
+          aria-label={paletteFor ? `Use another phase's legend colors for ${paletteFor}` : "Use another phase's legend colors"}
+          title={fromPhase ? `This map uses ${fromPhase.name}'s legend colors` : "Copy another phase's legend colors onto this map"}
+          h="30px"
+          pr="28px"
+          bg={fromPhase ? COLORS.hoverBg : COLORS.surface}
+          border="1px solid"
+          borderColor={fromPhase ? COLORS.heading : COLORS.border}
+          borderRadius="999px"
+          fontFamily={FONT}
+          fontWeight={fromPhase ? '700' : '500'}
+          fontSize="12px"
+          color={COLORS.heading}
+          cursor="pointer"
+          _focusVisible={{ borderColor: COLORS.activeBg, outline: 'none' }}
+        >
+          {/* While another phase's colours are in use, the empty choice turns them off. */}
+          <option value="" disabled={!fromPhase || !onStopUsingPhase}>
+            {fromPhase && onStopUsingPhase ? "Don't use other phase colors" : 'Use colors from…'}
+          </option>
+          {otherPhases.map((map) => (
+            <option key={map.slot} value={map.slot}>
+              {map.slot === fromPhase?.slot ? `✓ Colors from ${map.name}` : map.name}
+            </option>
+          ))}
+        </NativeSelect.Field>
+        <NativeSelect.Indicator color={COLORS.subtle} />
+      </NativeSelect.Root>
+    ) : null
 
   return (
     <Box mt="10px" p="10px" border="1px solid" borderColor={COLORS.border} borderRadius="10px" bg={COLORS.canvas}>
@@ -3010,101 +4042,135 @@ function PaintToolbar({
             label,
             // A circled status shows the ring it draws, not a colour.
             circled.includes(value) ? (
-              <Box boxSize="13px" borderRadius="full" border="2.5px solid" borderColor={LOT_RING_COLOR} title="Marked with a red ring" />
+              <Box boxSize="13px" borderRadius="full" border="2.5px solid" borderColor={ringColor} title="Marked with a ring" />
             ) : (
               <Box boxSize="12px" borderRadius="3px" bg={palette[value]} border="1px solid rgba(0,0,0,0.25)" />
             ),
           ),
         )}
         {chip(ORIGINAL, 'Original', <Icon as={LuEraser} boxSize="13px" />)}
+        {/* Circles printed into the map picture itself (ERHD's sold marks) are taken off with this brush. */}
+        {circled.length
+          ? chip(
+              ERASE_RING,
+              'Remove Sold',
+              <Box position="relative" boxSize="13px" borderRadius="full" border="2px solid" borderColor={LOT_RING_COLOR} opacity={0.8}>
+                <Box position="absolute" left="50%" top="-3px" bottom="-3px" w="2px" bg={COLORS.heading} transform="translateX(-50%) rotate(45deg)" />
+              </Box>,
+            )
+          : null}
       </Flex>
-      {/*
-        * How thick the rings of circled lots are; painted rings follow at once.
-        * A ring is moved by dragging its line on the map.
-        */}
-      {circled.length && onRingThickness ? (
-        <Flex mt="8px" align="center" gap="8px" flexWrap="wrap">
-          <Flex as="label" htmlFor={ringId} align="center" gap="6px" fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
-            <Box boxSize="13px" borderRadius="full" border={`${Math.min(5, 1.5 + ringThickness)}px solid`} borderColor={LOT_RING_COLOR} />
-            Ring thickness
-          </Flex>
-          <input
-            id={ringId}
-            type="range"
-            min={Math.round(RING_THICKNESS_MIN * 100)}
-            max={Math.round(RING_THICKNESS_MAX * 100)}
-            step={10}
-            value={Math.round(ringThickness * 100)}
-            aria-valuetext={`${Math.round(ringThickness * 100)}%${ringThickness === 1 ? ', default' : ''}`}
-            onChange={(event) => onRingThickness(Number(event.target.value) / 100)}
-            style={{ width: '180px', accentColor: LOT_RING_COLOR, cursor: 'pointer' }}
-          />
-          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.heading} minW="92px">
-            {Math.round(ringThickness * 100)}%{ringThickness === 1 ? ' · Default' : ''}
+      {/* Marking up the map: freehand strokes and text, saved with it. */}
+      {onMarkColor ? (
+        <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Draw and write on the map">
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            Mark up
           </Text>
-          {ringThickness !== 1 ? chip('ring-default', 'Use default', null, false, () => onRingThickness(1)) : null}
-          <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
-            Drag a ring&apos;s line to move it within its lot.
-          </Text>
+          {chip(DRAW, 'Brush', <Icon as={LuPencil} boxSize="13px" />)}
+          {chip(TEXT, 'Text', <Icon as={LuType} boxSize="13px" />)}
+          {marking(brush) ? (
+            <>
+              <Flex align="center" gap="4px" ml="6px" role="radiogroup" aria-label="Mark color">
+                {MARK_COLORS.map((color) => (
+                  <Box
+                    key={color}
+                    as="button"
+                    type="button"
+                    role="radio"
+                    aria-checked={markColor === color}
+                    aria-label={`Color ${color}`}
+                    boxSize="20px"
+                    borderRadius="full"
+                    bg={color}
+                    border="2px solid"
+                    borderColor={markColor === color ? COLORS.heading : 'rgba(0,0,0,0.2)'}
+                    boxShadow={markColor === color ? `0 0 0 2px ${COLORS.surface} inset` : 'none'}
+                    cursor="pointer"
+                    onClick={() => onMarkColor(color)}
+                  />
+                ))}
+                <Box
+                  as="label"
+                  position="relative"
+                  boxSize="20px"
+                  borderRadius="full"
+                  overflow="hidden"
+                  border="2px solid"
+                  borderColor={MARK_COLORS.includes(markColor) ? 'rgba(0,0,0,0.2)' : COLORS.heading}
+                  bg={MARK_COLORS.includes(markColor) ? 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)' : markColor}
+                  cursor="pointer"
+                  title="Any color"
+                >
+                  <input
+                    type="color"
+                    value={markColor}
+                    onChange={(event) => onMarkColor(event.target.value.toUpperCase())}
+                    style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }}
+                  />
+                </Box>
+                {onPickMarkColor ? (
+                  <Flex
+                    as="button"
+                    type="button"
+                    align="center"
+                    justify="center"
+                    boxSize="26px"
+                    ml="2px"
+                    borderRadius="full"
+                    border="1px solid"
+                    borderColor={pickingMarkColor ? COLORS.heading : COLORS.border}
+                    bg={pickingMarkColor ? COLORS.hoverBg : COLORS.surface}
+                    color={COLORS.heading}
+                    cursor="pointer"
+                    aria-pressed={pickingMarkColor}
+                    aria-label="Pick a color from the map"
+                    title="Eyedropper: pick a color from the map (or hold Alt and click the map)"
+                    onClick={onPickMarkColor}
+                    _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+                  >
+                    <Icon as={LuPipette} boxSize="13px" />
+                  </Flex>
+                ) : null}
+              </Flex>
+              <Flex as="label" align="center" gap="6px" ml="8px" fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle}>
+                Size
+                <input
+                  type="range"
+                  min={MARK_SIZE_MIN}
+                  max={MARK_SIZE_MAX}
+                  step={1}
+                  value={markSize}
+                  onChange={(event) => onMarkSize(Number(event.target.value))}
+                  style={{ width: '120px', accentColor: markColor, cursor: 'pointer' }}
+                />
+                <Text as="span" color={COLORS.heading} minW="14px">
+                  {markSize}
+                </Text>
+              </Flex>
+              {brush === TEXT && onMarkWeight ? (
+                <Flex align="center" gap="4px" ml="8px" role="radiogroup" aria-label="Font weight">
+                  <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="2px">
+                    Weight
+                  </Text>
+                  {TEXT_WEIGHTS.map(({ value, label }) =>
+                    chip(`weight-${value}`, <Text as="span" fontWeight={value === 'bold' ? '800' : '400'}>{label}</Text>, null, markWeight === value, () => onMarkWeight(value)),
+                  )}
+                </Flex>
+              ) : null}
+            </>
+          ) : null}
         </Flex>
       ) : null}
-      {/*
-        * Which colours the statuses paint: the default legend, or the colours of
-        * the legend printed on this map, read by clicking each of its swatches.
-        */}
-      <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Legend colors">
-        <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
-          Legend colors
+      {!brush ? (
+        <Text mt="8px" fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+          Nothing selected — clicks on the map paint nothing. Choose a color or tool above to start.
         </Text>
-        {chip('palette-default', 'Default', null, !matching && !editingColors && isDefaultPalette(palette), onDefaultPalette)}
-        {chip(
-          'palette-legend',
-          'Custom',
-          <Icon as={LuPipette} boxSize="13px" />,
-          matching || (!editingColors && !fromPhase && !isDefaultPalette(palette)),
-          onMatchLegend,
-        )}
-        {onEditColors ? chip('palette-wheel', 'Edit colors', <Icon as={LuPalette} boxSize="13px" />, editingColors, onEditColors) : null}
-        {paletteFor ? <PhaseBadge name={paletteFor} title={`These colors are saved for ${paletteFor} only`} /> : null}
-        {onUsePhase && otherPhases.length ? (
-          <NativeSelect.Root size="sm" w="auto">
-            <NativeSelect.Field
-              value={fromPhase?.slot ?? ''}
-              onChange={(event) => {
-                const other = otherPhases.find((map) => map.slot === event.target.value)
-                if (other) onUsePhase(other)
-                else if (!event.target.value) onStopUsingPhase?.()
-              }}
-              aria-label={paletteFor ? `Use another phase's legend colors for ${paletteFor}` : "Use another phase's legend colors"}
-              title={fromPhase ? `This map uses ${fromPhase.name}'s legend colors` : "Copy another phase's legend colors onto this map"}
-              h="30px"
-              pr="28px"
-              bg={fromPhase ? COLORS.hoverBg : COLORS.surface}
-              border="1px solid"
-              borderColor={fromPhase ? COLORS.heading : COLORS.border}
-              borderRadius="999px"
-              fontFamily={FONT}
-              fontWeight={fromPhase ? '700' : '500'}
-              fontSize="12px"
-              color={COLORS.heading}
-              cursor="pointer"
-              _focusVisible={{ borderColor: COLORS.activeBg, outline: 'none' }}
-            >
-              {/* While another phase's colours are in use, the empty choice turns them off. */}
-              <option value="" disabled={!fromPhase || !onStopUsingPhase}>
-                {fromPhase && onStopUsingPhase ? "Don't use other phase colors" : 'Use colors from…'}
-              </option>
-              {otherPhases.map((map) => (
-                <option key={map.slot} value={map.slot}>
-                  {map.slot === fromPhase?.slot ? `✓ Colors from ${map.name}` : map.name}
-                </option>
-              ))}
-            </NativeSelect.Field>
-            <NativeSelect.Indicator color={COLORS.subtle} />
-          </NativeSelect.Root>
-        ) : null}
-      </Flex>
-      {colorEditor}
+      ) : null}
+      {brush === ERASE_RING ? (
+        <Text mt="8px" fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+          Click a lot to remove the red circle printed on the map without changing its status. Painting a lot with any color also removes its printed circle, in the lot&apos;s new color. Undo brings it back.
+        </Text>
+      ) : null}
       {brush === 'reserved' ? (
         <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Reserved for">
           <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
@@ -3116,43 +4182,215 @@ function PaintToolbar({
         </Flex>
       ) : null}
       {/*
-        * The finer settings — annotated-lot shapes and tolerance — sit behind
-        * More options so the everyday controls stay short. The toggle says when
-        * one of them is off its default, so a hidden change is not forgotten.
+        * The settings that are not needed on every click — the rings, the legend
+        * colours, and the finer options — each behind a show/hide button, with a
+        * word on how each is set so nothing hidden is forgotten. A section opens
+        * by itself while it is in use (an eyedropper waiting, colours being read).
         */}
-      <Flex mt="8px" align="center" gap="6px" flexWrap="wrap">
-        <Flex
-          as="button"
-          type="button"
-          align="center"
-          gap="6px"
-          h="30px"
-          px="10px"
-          borderRadius="999px"
-          border="1px solid"
-          borderColor={moreOpen ? COLORS.heading : COLORS.border}
-          bg={moreOpen ? COLORS.hoverBg : COLORS.surface}
-          fontFamily={FONT}
-          fontSize="12px"
-          fontWeight="600"
-          color={COLORS.heading}
-          cursor="pointer"
-          aria-expanded={moreOpen}
-          aria-controls={moreId}
-          onClick={() => setMoreOpen((open) => !open)}
-          _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
-        >
-          <Icon as={LuSlidersHorizontal} boxSize="13px" />
-          More options
-          {changedCount && !moreOpen ? (
-            <Text as="span" fontWeight="500" color={COLORS.subtle}>
-              · {changedCount} changed
-            </Text>
-          ) : null}
-          <Icon as={LuChevronDown} boxSize="13px" transform={moreOpen ? 'rotate(180deg)' : undefined} transition="transform 120ms ease" />
-        </Flex>
+      <Flex mt="10px" pt="10px" borderTop="1px solid" borderColor={COLORS.border} align="center" gap="6px" flexWrap="wrap">
+        {hasRings
+          ? sectionToggle({
+              id: ringSectionId,
+              open: ringShown,
+              onToggle: () => setRingOpen((open) => !open),
+              icon: <Box boxSize="12px" borderRadius="full" border={`${Math.min(4, 1.5 + ringThickness)}px solid`} borderColor={ringColor} />,
+              label: ringName,
+              summary: ringThickness !== 1 ? `${Math.round(ringThickness * 100)}%` : '',
+            })
+          : null}
+        {sectionToggle({
+          id: legendId,
+          open: legendShown,
+          onToggle: () => setLegendOpen((open) => !open),
+          icon: <Icon as={LuPalette} boxSize="13px" />,
+          label: 'Legend colors',
+          summary: legendSummary,
+        })}
+        {sectionToggle({
+          id: moreId,
+          open: moreOpen,
+          onToggle: () => setMoreOpen((open) => !open),
+          icon: <Icon as={LuSlidersHorizontal} boxSize="13px" />,
+          label: 'More options',
+          summary: changedCount ? `${changedCount} changed` : '',
+        })}
       </Flex>
-      <Box id={moreId} hidden={!moreOpen} mt="8px" pl="10px" borderLeft="2px solid" borderColor={COLORS.border}>
+      {/*
+        * How thick the rings of circled lots are; painted rings follow at once.
+        * A ring is moved by dragging its line on the map.
+        */}
+      {hasRings && ringShown ? (
+        <Flex id={ringSectionId} {...sectionPanel} direction="column" gap="4px" role="group" aria-label={ringName}>
+        <Flex align="center" gap="8px" flexWrap="wrap">
+          <Text as="label" htmlFor={ringId} fontFamily={FONT} fontSize="12px" color={COLORS.subtle}>
+            Thickness
+          </Text>
+          <input
+            id={ringId}
+            type="range"
+            min={Math.round(RING_THICKNESS_MIN * 100)}
+            max={Math.round(RING_THICKNESS_MAX * 100)}
+            step={10}
+            value={Math.round(ringThickness * 100)}
+            aria-valuetext={`${Math.round(ringThickness * 100)}%${ringThickness === 1 ? ', default' : ''}`}
+            onChange={(event) => onRingThickness(Number(event.target.value) / 100)}
+            style={{ width: '140px', accentColor: ringColor, cursor: 'pointer' }}
+          />
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.heading} minW="38px">
+            {Math.round(ringThickness * 100)}%
+          </Text>
+          {ringThickness !== 1 ? chip('ring-default', 'Reset', null, false, () => onRingThickness(1)) : null}
+          {onRingColor ? (
+            <Flex align="center" gap="4px" role="radiogroup" aria-label="Ring color">
+              <Box w="1px" h="20px" bg={COLORS.border} mx="6px" aria-hidden />
+              <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle} mr="2px">
+                Color
+              </Text>
+              {RING_COLORS.map((color) => (
+                <Box
+                  key={color}
+                  as="button"
+                  type="button"
+                  role="radio"
+                  aria-checked={ringColor === color}
+                  aria-label={`Ring color ${color}${color === LOT_RING_COLOR ? ', default' : ''}`}
+                  title={color === LOT_RING_COLOR ? 'Red (default)' : color}
+                  boxSize="20px"
+                  borderRadius="full"
+                  bg="transparent"
+                  border="4px solid"
+                  borderColor={color}
+                  boxShadow={ringColor === color ? `0 0 0 2px ${COLORS.surface}, 0 0 0 4px ${COLORS.heading}` : 'none'}
+                  cursor="pointer"
+                  onClick={() => onRingColor(color)}
+                />
+              ))}
+              <Box
+                as="label"
+                position="relative"
+                boxSize="20px"
+                borderRadius="full"
+                overflow="hidden"
+                border="2px solid"
+                borderColor={RING_COLORS.includes(ringColor) ? 'rgba(0,0,0,0.2)' : COLORS.heading}
+                bg={RING_COLORS.includes(ringColor) ? 'conic-gradient(red, yellow, lime, cyan, blue, magenta, red)' : ringColor}
+                cursor="pointer"
+                title="Any color"
+              >
+                <input
+                  type="color"
+                  aria-label="Any ring color"
+                  value={ringColor}
+                  onChange={(event) => onRingColor(event.target.value.toUpperCase())}
+                  style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }}
+                />
+              </Box>
+              {onPickRingColor ? (
+                <Flex
+                  as="button"
+                  type="button"
+                  align="center"
+                  justify="center"
+                  boxSize="26px"
+                  ml="2px"
+                  borderRadius="full"
+                  border="1px solid"
+                  borderColor={pickingRingColor ? COLORS.heading : COLORS.border}
+                  bg={pickingRingColor ? COLORS.hoverBg : COLORS.surface}
+                  color={COLORS.heading}
+                  cursor="pointer"
+                  aria-pressed={pickingRingColor}
+                  aria-label="Pick the ring color from the map"
+                  title="Eyedropper: pick the ring color from the map (or, with the Sold brush, hold Alt and click the map)"
+                  onClick={onPickRingColor}
+                  _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+                >
+                  <Icon as={LuPipette} boxSize="13px" />
+                </Flex>
+              ) : null}
+            </Flex>
+          ) : null}
+        </Flex>
+        <Text fontFamily={FONT} fontSize="12px" color={pickingRingColor ? COLORS.heading : COLORS.subtle}>
+          {pickingRingColor
+            ? 'Click the map to pick the ring color.'
+            : 'On the map, drag a ring to move it, or point at it and drag its round handle to resize it.'}
+        </Text>
+        </Flex>
+      ) : null}
+      {/*
+        * Which colours the statuses paint: the default legend, or the colours of
+        * the legend printed on this map, read by clicking each of its swatches.
+        */}
+      {legendShown ? (
+      <Flex id={legendId} {...sectionPanel} direction="column" gap="6px" role="group" aria-label="Legend colors">
+      <Flex align="center" gap="6px" flexWrap="wrap">
+        <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+          Legend colors
+        </Text>
+        {chip('palette-default', 'Default', null, !matching && !editingColors && isDefaultPalette(palette), onDefaultPalette)}
+        <Box as="span" title="Click each status's swatch in the map's legend, one after another" display="contents">
+          {chip(
+            'palette-legend',
+            'From map legend',
+            <Icon as={LuPipette} boxSize="13px" />,
+            matching || (!editingColors && !fromPhase && !isDefaultPalette(palette)),
+            onMatchLegend,
+          )}
+        </Box>
+        {onEditColors ? chip('palette-wheel', 'Edit by hand', <Icon as={LuPalette} boxSize="13px" />, editingColors, onEditColors) : null}
+        {paletteFor ? <PhaseBadge name={paletteFor} title={`These colors are saved for ${paletteFor} only`} /> : null}
+        {legendPhaseSelect}
+      </Flex>
+        {/*
+          * An eyedropper per status, to read just that swatch off the map's legend.
+          * Not for a ringed status (ERHD's Sold): it is drawn as a ring, whose colour has its own eyedropper.
+          */}
+        {onPickLegendStatus && !editingColors ? (
+          <Flex align="center" gap="4px" flexWrap="wrap" role="group" aria-label="Pick one legend color">
+            <Text fontFamily={FONT} fontSize="12px" color={COLORS.subtle} mr="4px">
+              Or pick just one from the legend:
+            </Text>
+            {legendStatuses.map(({ value, label }) => {
+              const now = pickingLegendStatus === value
+              return (
+                <Flex
+                  key={value}
+                  as="button"
+                  type="button"
+                  align="center"
+                  gap="4px"
+                  h="26px"
+                  px="7px"
+                  borderRadius="999px"
+                  border="1px solid"
+                  borderColor={now ? '#1D4ED8' : COLORS.border}
+                  bg={now ? '#1D4ED8' : COLORS.surface}
+                  color={now ? '#FFFFFF' : COLORS.heading}
+                  fontFamily={FONT}
+                  fontSize="12px"
+                  fontWeight="600"
+                  cursor="pointer"
+                  aria-pressed={now}
+                  aria-label={`Pick the ${label} color from the map's legend`}
+                  title={`Eyedropper: click the ${label} swatch in the map's legend (or, with the ${label} brush, hold Alt and click it)`}
+                  onClick={() => onPickLegendStatus(value)}
+                  _hover={now ? undefined : { bg: COLORS.hoverBg }}
+                  _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+                >
+                  <Swatch color={palette[value]} />
+                  {label}
+                  <Icon as={LuPipette} boxSize="12px" />
+                </Flex>
+              )
+            })}
+          </Flex>
+        ) : null}
+      {colorEditor}
+      </Flex>
+      ) : null}
+      {/* The finer settings — annotated-lot shapes and tolerance. */}
+      <Box id={moreId} hidden={!moreOpen} {...sectionPanel}>
       {shapeMode ? (
         <Flex align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Annotated lots">
           <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">

@@ -232,6 +232,8 @@ const NOT_DRAWN = new Set(['defs', 'style', 'title', 'desc', 'metadata'])
 /** The layer of recoloured lots, drawn over the map; each lot in it is a group of its own. */
 const COLORS_ATTR = 'data-bhri-lot-colors'
 const LOT_ATTR = 'data-bhri-lot'
+/** Marks a lot's group of printed rings painted out (see recolorSvg), which later saves keep. */
+const ERASE_ATTR = 'data-bhri-erase'
 /** The same marks under the names maps were saved with before the rename to BHRI. */
 const LEGACY_ATTRS = [
   ['data-vhbc-lot-colors', COLORS_ATTR],
@@ -293,13 +295,16 @@ export function lotShapes(region, width, rgb) {
     if (!byFill.has(fill)) byFill.set(fill, [])
     byFill.get(fill).push(pixels[n])
   }
-  return [...byFill].map(([fill, list]) => {
-    const { x0, y0, x1, y1 } = boundsOf({ pixels: list }, width)
-    const w = x1 - x0
-    const mask = new Uint8Array(w * (y1 - y0))
-    for (const i of list) mask[(((i / width) | 0) - y0) * w + (i % width) - x0] = 1
-    return { fill, d: maskPath({ x0, y0, w, h: y1 - y0, mask }) }
-  })
+  return [...byFill].map(([fill, list]) => ({ fill, d: pixelsPath(list, width) }))
+}
+
+/** Pixel indices of a canvas `width` wide, as one path of rectangles in canvas pixels. */
+export function pixelsPath(list, width) {
+  const { x0, y0, x1, y1 } = boundsOf({ pixels: list }, width)
+  const w = x1 - x0
+  const mask = new Uint8Array(w * (y1 - y0))
+  for (const i of list) mask[(((i / width) | 0) - y0) * w + (i % width) - x0] = 1
+  return maskPath({ x0, y0, w, h: y1 - y0, mask })
 }
 
 /**
@@ -319,7 +324,7 @@ export function lotShapes(region, width, rgb) {
  * Returns { text, shapes, drawn } — the new markup, and how many lots went
  * each way.
  */
-export function recolorSvg(text, { width, height, lots: painted }) {
+export function recolorSvg(text, { width, height, lots: painted, marks = [], markScale = [1, 1] }) {
   // A lot painted more than once takes its last colour only.
   const lots = []
   for (const lot of [...painted].reverse()) {
@@ -356,7 +361,8 @@ export function recolorSvg(text, { width, height, lots: painted }) {
     let shapes = 0
     let paths = 0
 
-    for (const { region, rgb, fill, ring } of lots) {
+    for (const { region, rgb, fill, ring, erase } of lots) {
+      const lotBounds = boundsOf({ pixels: region.fill ?? region.pixels }, width)
       // The map as seen already shows an earlier save's colour here: that one gives way.
       for (const group of earlier) {
         if (!group.parentNode) continue
@@ -364,10 +370,61 @@ export function recolorSvg(text, { width, height, lots: painted }) {
         // The seed is in the pixels of the copy it was found on, which may have been drawn at another size.
         const [w0, h0] = (group.getAttribute('data-canvas') ?? '').split('x').map(Number)
         if (!w0 || !h0) continue
-        const cx = Math.min(width - 1, Math.round(((x + 0.5) * width) / w0 - 0.5))
-        const cy = Math.min(height - 1, Math.round(((y + 0.5) * height) / h0 - 0.5))
-        if (regionContains(region, cy * width + cx)) group.remove()
+        /*
+         * An earlier save's printed rings painted out stay, always: the map is
+         * coloured on as that save shows it, ring already gone, so nothing
+         * painted now covers the printed ring under that patch again. (Older
+         * saves did not mark them, but only they were drawn with crisp edges.)
+         */
+        if (group.hasAttribute(ERASE_ATTR) || group.querySelector(':scope > path[shape-rendering="crispEdges"]')) continue
+        const toCanvas = (px, py) => [
+          Math.min(width - 1, Math.round(((px + 0.5) * width) / w0 - 0.5)),
+          Math.min(height - 1, Math.round(((py + 0.5) * height) / h0 - 0.5)),
+        ]
+        const [cx, cy] = toCanvas(x, y)
+        if (regionContains(region, cy * width + cx)) {
+          group.remove()
+          continue
+        }
+        /*
+         * An earlier ring goes too when its centre is in this lot's box: its seed
+         * may lie under lettering or a mark since drawn, yet the ring is this
+         * lot's — and the map as recoloured has already painted it out.
+         */
+        const circle = group.querySelector(':scope > circle')
+        if (!circle) continue
+        const [rx, ry] = toCanvas(parseFloat(circle.getAttribute('cx')), parseFloat(circle.getAttribute('cy')))
+        if (rx >= lotBounds.x0 && rx < lotBounds.x1 && ry >= lotBounds.y0 && ry < lotBounds.y1) group.remove()
       }
+
+      // Red rings printed on the map, erased: each pixel as the map shows without them, under any ring drawn below.
+      if (erase?.length) {
+        if (!layer) {
+          layer = doc.createElementNS(SVG_NS, 'g')
+          layer.setAttribute(COLORS_ATTR, '')
+        }
+        const group = doc.createElementNS(SVG_NS, 'g')
+        group.setAttribute(LOT_ATTR, '')
+        group.setAttribute(ERASE_ATTR, '')
+        group.setAttribute('transform', toUser)
+        group.setAttribute('data-seed', `${region.seed % width},${(region.seed / width) | 0}`)
+        group.setAttribute('data-canvas', `${width}x${height}`)
+        for (const part of erase) {
+          const path = doc.createElementNS(SVG_NS, 'path')
+          path.setAttribute('fill', part.fill)
+          path.setAttribute('d', pixelsPath(part.pixels, width))
+          // Pixel squares edge to edge: no soft edges for the red below to show through.
+          path.setAttribute('shape-rendering', 'crispEdges')
+          // flutter_svg ignores that and smooths every square's edge, so hairlines of red would show between them:
+          // a thin outline in the same colour closes those seams.
+          path.setAttribute('stroke', part.fill)
+          path.setAttribute('stroke-width', '0.8')
+          group.appendChild(path)
+        }
+        layer.appendChild(group)
+      }
+      // Only its printed ring erased: the lot keeps its colour.
+      if (!rgb && !ring) continue
 
       // A circled lot keeps its colour and gets a red ring drawn over it.
       if (ring) {
@@ -387,7 +444,7 @@ export function recolorSvg(text, { width, height, lots: painted }) {
         circle.setAttribute('cy', String(+cy.toFixed(2)))
         circle.setAttribute('r', String(+r.toFixed(2)))
         circle.setAttribute('fill', 'none')
-        circle.setAttribute('stroke', LOT_RING_COLOR)
+        circle.setAttribute('stroke', ring.color ?? LOT_RING_COLOR)
         circle.setAttribute('stroke-width', String(+strokeWidth.toFixed(2)))
         group.appendChild(circle)
         layer.appendChild(group)
@@ -445,6 +502,22 @@ export function recolorSvg(text, { width, height, lots: painted }) {
       paths += 1
     }
 
+    // Brush strokes and text drawn on the map, over everything (see markElements).
+    if (marks.length) {
+      if (!layer) {
+        layer = doc.createElementNS(SVG_NS, 'g')
+        layer.setAttribute(COLORS_ATTR, '')
+      }
+      const group = doc.createElementNS(SVG_NS, 'g')
+      group.setAttribute(MARKS_ATTR, '')
+      // Marks are in the annotations' coordinates: scaled to canvas pixels, then to the SVG's own units.
+      group.setAttribute('transform', `${toUser} scale(${markScale[0]} ${markScale[1]})`)
+      for (const el of markElements(doc, marks)) group.appendChild(el)
+      layer.appendChild(group)
+    }
+    // Rings over circled lots, this save's and earlier ones', go over the strokes and text.
+    if (layer) for (const group of [...layer.querySelectorAll(`:scope > g[${LOT_ATTR}]`)]) if (group.querySelector(':scope > circle')) layer.appendChild(group)
+
     if (layer) {
       if (layer.childNodes.length) root.appendChild(layer) // always last, so on top
       else layer.remove()
@@ -453,6 +526,145 @@ export function recolorSvg(text, { width, height, lots: painted }) {
   } finally {
     host.remove()
   }
+}
+
+/** Marks a saved map's group of brush strokes and text. */
+const MARKS_ATTR = 'data-marks'
+const XLINK_NS = 'http://www.w3.org/1999/xlink'
+/** How many picture pixels a flattened group of marks gets per pixel of the map, and the most it may take in all. */
+const FLAT_MARK_SCALE = 2
+const FLAT_MARK_MAX_PIXELS = 40e6
+
+/**
+ * Text marks drawn into the SVG `text` as pictures, exactly as this browser
+ * draws them. The Flutter app has no Arial and lays SVG text out its own way —
+ * wider, shifted — so text would not sit where it was placed, and text an
+ * earlier save covered with brush strokes would peek out. Each group of marks
+ * holding text (this save's and every earlier save's) becomes one PNG of the
+ * group, strokes included so their order is kept, in its place. Groups with
+ * only strokes stay vector. `canvasWidth` is the width lots were found at, in
+ * pixels, which sets how sharp the pictures are.
+ */
+export async function flattenMarkText(text, { canvasWidth }) {
+  const doc = parse(text)
+  const root = doc.documentElement
+  const groups = [...root.querySelectorAll(`g[${MARKS_ATTR}]`)].filter((group) => group.querySelector('text'))
+  if (!groups.length) return text
+  const [vx, vy, vw, vh] = ensureViewBox(root)
+  const perUnit = FLAT_MARK_SCALE * Math.max(1, canvasWidth / vw)
+
+  // Each group's box, measured on a live copy at one screen pixel per unit.
+  const host = document.createElement('div')
+  host.style.cssText = 'position:fixed;left:-200000px;top:0;visibility:hidden;pointer-events:none'
+  const live = document.createElementNS(SVG_NS, 'svg')
+  live.setAttribute('viewBox', `${vx} ${vy} ${vw} ${vh}`)
+  live.setAttribute('width', String(vw))
+  live.setAttribute('height', String(vh))
+  host.appendChild(live)
+  document.body.appendChild(host)
+  try {
+    for (const group of groups) {
+      const copy = document.importNode(group, true)
+      live.appendChild(copy)
+      const frame = live.getBoundingClientRect()
+      const box = copy.getBoundingClientRect()
+      const ctm = copy.getScreenCTM()
+      const rootCtm = live.getScreenCTM()
+      live.removeChild(copy)
+      if (!box.width || !box.height || !frame.width) continue
+      const unit = vw / frame.width
+      // The box leaves out stroke widths: room for the widest, in the map's units.
+      const strokeScale = ctm && rootCtm ? Math.hypot(ctm.a, ctm.b) / Math.hypot(rootCtm.a, rootCtm.b) : 1
+      const widest = Math.max(0, ...[...group.querySelectorAll('[stroke-width]')].map((el) => parseFloat(el.getAttribute('stroke-width')) || 0))
+      const pad = (widest * strokeScale) / 2 + 4
+      const x = vx + (box.left - frame.left) * unit - pad
+      const y = vy + (box.top - frame.top) * unit - pad
+      const w = box.width * unit + 2 * pad
+      const h = box.height * unit + 2 * pad
+      const scale = Math.min(perUnit, Math.sqrt(FLAT_MARK_MAX_PIXELS / (w * h)))
+      const pw = Math.max(1, Math.ceil(w * scale))
+      const ph = Math.max(1, Math.ceil(h * scale))
+
+      const standalone = `<svg xmlns="${SVG_NS}" xmlns:xlink="${XLINK_NS}" width="${pw}" height="${ph}" viewBox="${x} ${y} ${w} ${h}" preserveAspectRatio="none">${serialize(group)}</svg>`
+      const url = URL.createObjectURL(new Blob([standalone], { type: SVG_TYPE }))
+      let png
+      try {
+        const img = new Image()
+        img.src = url
+        await img.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = pw
+        canvas.height = ph
+        canvas.getContext('2d').drawImage(img, 0, 0, pw, ph)
+        png = canvas.toDataURL('image/png')
+      } finally {
+        URL.revokeObjectURL(url)
+      }
+
+      // The group keeps its place and attribute; its marks become the picture of them.
+      while (group.firstChild) group.removeChild(group.firstChild)
+      group.removeAttribute('transform')
+      const image = doc.createElementNS(SVG_NS, 'image')
+      image.setAttribute('x', String(+x.toFixed(2)))
+      image.setAttribute('y', String(+y.toFixed(2)))
+      image.setAttribute('width', String(+w.toFixed(2)))
+      image.setAttribute('height', String(+h.toFixed(2)))
+      image.setAttribute('preserveAspectRatio', 'none')
+      // Both spellings: flutter_svg reads xlink:href, browsers either.
+      image.setAttributeNS(XLINK_NS, 'xlink:href', png)
+      image.setAttribute('href', png)
+      group.appendChild(image)
+    }
+  } finally {
+    host.remove()
+  }
+  return serialize(doc)
+}
+/** The typeface text marks are written in — one every SVG reader has. */
+export const MARK_FONT = 'Arial, Helvetica, sans-serif'
+
+/** A brush stroke's points ([[x, y], …]) as a path: a lone point is a dot, drawn by its round cap. */
+export function strokePath(points) {
+  if (!points.length) return ''
+  const [first, ...rest] = points
+  const fmt = ([x, y]) => `${+x.toFixed(1)} ${+y.toFixed(1)}`
+  return `M${fmt(first)}${(rest.length ? rest : [first]).map((point) => `L${fmt(point)}`).join('')}`
+}
+
+/**
+ * Brush strokes ({ mark: 'stroke', points, color, width }) and text
+ * ({ mark: 'text', x, y, text, color, size, weight } — x, y its baseline's start) as
+ * plain SVG elements, which flutter_svg draws too.
+ */
+function markElements(doc, marks) {
+  return marks.map((mark) => {
+    if (mark.mark === 'text') {
+      const el = doc.createElementNS(SVG_NS, 'text')
+      el.setAttribute('x', String(+mark.x.toFixed(1)))
+      el.setAttribute('y', String(+mark.y.toFixed(1)))
+      el.setAttribute('fill', mark.color)
+      el.setAttribute('font-size', String(+mark.size.toFixed(2)))
+      el.setAttribute('font-family', MARK_FONT)
+      el.setAttribute('font-weight', mark.weight ?? 'bold')
+      // Turned about the left end of its middle line (0.35 sizes above the baseline), as the editor turns it.
+      if (mark.angle) {
+        const pivotY = mark.y - mark.size * 0.35
+        el.setAttribute('transform', `rotate(${+mark.angle.toFixed(1)} ${+mark.x.toFixed(1)} ${+pivotY.toFixed(1)})`)
+      }
+      // As a style as well, so a page showing the map inline cannot restyle it in its own font.
+      el.setAttribute('style', `font-family:${MARK_FONT};font-weight:${mark.weight ?? 'bold'};font-size:${+mark.size.toFixed(2)}px`)
+      el.textContent = mark.text
+      return el
+    }
+    const el = doc.createElementNS(SVG_NS, 'path')
+    el.setAttribute('d', strokePath(mark.points))
+    el.setAttribute('fill', 'none')
+    el.setAttribute('stroke', mark.color)
+    el.setAttribute('stroke-width', String(+mark.width.toFixed(2)))
+    el.setAttribute('stroke-linecap', 'round')
+    el.setAttribute('stroke-linejoin', 'round')
+    return el
+  })
 }
 
 /** Canvas pixels → the SVG's own units, as an SVG matrix, measured on the live copy at canvas size. */
@@ -498,6 +710,9 @@ export const LOT_RING_COLOR = '#E11D1D'
 /** How thick a ring can be set, as a multiple of its default thickness. */
 export const RING_THICKNESS_MIN = 0.5
 export const RING_THICKNESS_MAX = 3
+/** How large one lot's ring can be made, as a multiple of its default size. */
+export const RING_SIZE_MIN = 0.4
+export const RING_SIZE_MAX = 2
 
 /**
  * A ring's centre `[cx, cy]` kept inside its lot's `bounds`: the whole ring
@@ -514,14 +729,16 @@ export function clampRingCenter([cx, cy], r, { x0, y0, x1, y1 }) {
  * shorter side, so it rings the lot number and area as the printed maps do.
  * It is centred on the lot's own fill, moved by `offset` (canvas pixels) when it
  * has been dragged — never out of the lot — and `thickness` times as thick as
- * the default. `bounds` is the lot's box, which the ring is kept inside.
+ * the default, and `size` times as large (its thickness kept as at the default
+ * size). `bounds` is the lot's box, which the ring is kept inside.
  */
-export function lotRing(region, width, { thickness = 1, offset = null } = {}) {
+export function lotRing(region, width, { thickness = 1, offset = null, size = 1, color = LOT_RING_COLOR } = {}) {
   const bounds = boundsOf({ pixels: region.fill ?? region.pixels }, width)
   const { x0, y0, x1, y1 } = bounds
-  const r = 0.44 * Math.min(x1 - x0, y1 - y0)
+  const base = 0.44 * Math.min(x1 - x0, y1 - y0)
+  const r = base * Math.min(RING_SIZE_MAX, Math.max(RING_SIZE_MIN, size))
   const [cx, cy] = clampRingCenter([(x0 + x1) / 2 + (offset?.[0] ?? 0), (y0 + y1) / 2 + (offset?.[1] ?? 0)], r, bounds)
-  return { cx, cy, r, strokeWidth: Math.max(2.5, r * 0.14) * thickness, bounds }
+  return { cx, cy, r, base, color, strokeWidth: Math.max(2.5, base * 0.14) * thickness, bounds }
 }
 
 function boundsOf(region, width) {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { TOLERANCE_DEFAULT, createRegionFinder, hexToRgb, regionContains, sampleColor } from './lotRecolor'
+import { TOLERANCE_DEFAULT, createRegionFinder, findPrintedRings, hexToRgb, regionContains, regionIndexOf, ringPixelsIn, rgbToHex, sampleColor } from './lotRecolor'
 import { DEFAULT_PALETTE } from './legendPalette'
-import { SVG_TYPE, isSvgUrl, lotMask, lotRing, maskPath, pictureSvg, recolorMatrix, recolorSvg, sanitizeSvg } from '@/lib/svgMaps'
+import { LOT_RING_COLOR, SVG_TYPE, flattenMarkText, isSvgUrl, lotMask, lotRing, maskPath, pictureSvg, pixelsPath, recolorMatrix, recolorSvg, sanitizeSvg, shadeColor } from '@/lib/svgMaps'
 import { UPLOAD_RULES } from '@/lib/uploadRules'
 
 /*
@@ -28,9 +28,12 @@ function detailScale(url, width, height) {
 
 /**
  * The map's pixels: an SVG drawn at `width` × `height` (the annotations' size)
- * times `scale`; a picture at its own size, or smaller past the budget.
+ * times `scale`; a picture at its own size, or smaller past the budget. With
+ * `rings` (a map that marks lots with red rings, ERHD), the rings printed on it
+ * are found and painted out of this copy first (see findPrintedRings), so a lot
+ * under one is found whole; the untouched pixels are kept for reading colours.
  */
-function loadPixels(url, width, height, scale) {
+function loadPixels(url, width, height, scale, rings) {
   return new Promise((resolve, reject) => {
     const img = new Image()
     // Storage serves public files with CORS headers, which lets the canvas read them.
@@ -53,7 +56,19 @@ function loadPixels(url, width, height, scale) {
         const image = context.getImageData(0, 0, W, H)
         // How much sharper than the annotations' size this copy is; lot sizes are judged by it.
         const detail = Math.sqrt((W * H) / (width * height))
-        resolve({ image, finder: createRegionFinder(image, { scale: detail }), regions: new Map() })
+        const original = rings ? new ImageData(new Uint8ClampedArray(image.data), W, H) : image
+        const printed = rings ? findPrintedRings(image, { scale: detail }) : null
+        resolve({
+          image,
+          original,
+          printed,
+          finder: createRegionFinder(image, { scale: detail }),
+          regions: new Map(),
+          // Each region's printed rings, found once (see ringPixelsIn).
+          erased: new WeakMap(),
+          // Each region's own colour, its fill's median, for covering its rings.
+          lotColors: new WeakMap(),
+        })
       } catch {
         reject(new Error('This map image cannot be recolored — its host does not allow reading its pixels.'))
       }
@@ -73,6 +88,20 @@ const toDataUrl = (blob) =>
   })
 
 const NO_STATUSES = []
+
+/** How near the lot's own colour a painted-out ring pixel must be to take one flat colour. */
+const LOT_COLOR_MATCH = 60
+
+/** The per-channel median colour of `list`'s pixels (a sample of at most a few thousand). */
+function medianColor(data, list) {
+  const step = Math.max(1, Math.floor(list.length / 4000))
+  const channels = [[], [], []]
+  for (let n = 0; n < list.length; n += step) {
+    const o = list[n] * 4
+    for (let c = 0; c < 3; c += 1) channels[c].push(data[o + c])
+  }
+  return channels.map((values) => values.sort((a, b) => a - b)[values.length >> 1] ?? 0)
+}
 
 const keyOf = (paint) => (paint.shapeId !== undefined ? `s:${paint.shapeId}` : `p:${paint.x.toFixed(1)},${paint.y.toFixed(1)}`)
 
@@ -108,11 +137,17 @@ export default function useLotPainter({
   circled = NO_STATUSES,
   // How thick those rings are, as a multiple of the default.
   ringThickness = 1,
+  // Their colour.
+  ringColor = LOT_RING_COLOR,
+  // Brush strokes and text drawn on the map, in the annotations' coordinates; saved over everything.
+  marks = NO_STATUSES,
 }) {
   const [loaded, setLoaded] = useState(null) // { key, pixels }
   const [failed, setFailed] = useState(null) // { key, message }
   const scale = detailScale(url, width, height)
-  const loadKey = `${url}|${width}x${height}|${scale}`
+  // Maps that mark lots with red rings have the printed ones found when they load.
+  const findRings = circled.length > 0
+  const loadKey = `${url}|${width}x${height}|${scale}|${findRings}`
   const pixels = loaded?.key === loadKey ? loaded.pixels : null
   /*
    * Lots are found on a copy drawn W × H — a picture's own size, or the
@@ -132,14 +167,14 @@ export default function useLotPainter({
   useEffect(() => {
     if (!enabled || !url || !width || !height) return undefined
     let live = true
-    loadPixels(url, width, height, scale).then(
+    loadPixels(url, width, height, scale, findRings).then(
       (pixels) => live && setLoaded({ key: loadKey, pixels }),
       (err) => live && setFailed({ key: loadKey, message: err.message }),
     )
     return () => {
       live = false
     }
-  }, [enabled, url, width, height, scale, loadKey])
+  }, [enabled, url, width, height, scale, findRings, loadKey])
 
   const fillRgb = useMemo(() => Object.fromEntries(Object.entries(palette).map(([status, hex]) => [status, hexToRgb(hex)])), [palette])
 
@@ -178,19 +213,84 @@ export default function useLotPainter({
     const lots = []
     for (const paint of [...paints].reverse()) {
       const region = regionOf(paint)
-      if (!region || !fillRgb[paint.status]) continue
+      // A paint with no status only erases the lot's printed ring (the Remove circle brush).
+      if (!region || (paint.status ? !fillRgb[paint.status] : !paint.eraseRing)) continue
       if (lots.some((lot) => regionContains(lot.region, region.seed))) continue
       const o = region.seed * 4
       const ring = circled.includes(paint.status)
         ? lotRing(region, W, {
             thickness: ringThickness,
             offset: paint.ringOffset ? [paint.ringOffset.dx * sx, paint.ringOffset.dy * sy] : null,
+            size: paint.ringSize ?? 1,
+            color: ringColor,
           })
         : null
-      lots.unshift({ paint, region, rgb: fillRgb[paint.status], fill: [data[o], data[o + 1], data[o + 2]], ring })
+      const fill = [data[o], data[o + 1], data[o + 2]]
+      const rgb = paint.status ? fillRgb[paint.status] : null
+      /*
+       * Every painted lot on a map with printed rings (ERHD) loses the ones it
+       * carries: each ring pixel is drawn as the map shows it with the ring
+       * painted out, recoloured with the lot where it lies inside it — so the
+       * lot comes out as one even colour, and a border line or the road the ring
+       * crossed is put back. A lot with no ring finds nothing.
+       */
+      let erase = null
+      if (pixels.printed) {
+        if (!pixels.erased.has(region)) pixels.erased.set(region, ringPixelsIn(pixels.printed, lotMask(region, W, H), W))
+        const list = pixels.erased.get(region)
+        if (list.length) {
+          // A circled lot keeps its colour, so only the ring goes.
+          const recolor = ring ? null : rgb
+          /*
+           * Where the painted-out ring is near the lot's own colour it takes one
+           * flat colour — the lot's new one, or the colour it has — so no trace
+           * of the ring's shape is left; elsewhere (lettering, a line, the road)
+           * it is the map as filled in, recoloured with the lot where inside it.
+           */
+          if (!pixels.lotColors.has(region)) pixels.lotColors.set(region, medianColor(data, region.fill ?? region.pixels))
+          const lotColor = pixels.lotColors.get(region)
+          const flat = recolor ?? lotColor
+          const byFill = new Map()
+          for (const i of list) {
+            const q = i * 4
+            const dr = data[q] - lotColor[0]
+            const dg = data[q + 1] - lotColor[1]
+            const db = data[q + 2] - lotColor[2]
+            const n = recolor ? regionIndexOf(region, i) : -1
+            const color =
+              dr * dr + dg * dg + db * db <= LOT_COLOR_MATCH * LOT_COLOR_MATCH
+                ? flat
+                : (n >= 0 && shadeColor(recolor, region.shades[n])) || [data[q], data[q + 1], data[q + 2]]
+            // Near colours share one path, so a ring is a handful of shapes, not one per pixel.
+            const key = rgbToHex(color.map((value) => Math.min(255, Math.round(value / 8) * 8)))
+            if (!byFill.has(key)) byFill.set(key, [])
+            byFill.get(key).push(i)
+          }
+          /*
+           * First the whole ring in its commonest colour, then the other colours
+           * over it: where two shapes meet, the seam shows that colour, never the
+           * red underneath.
+           */
+          const [main] = [...byFill].reduce((best, entry) => (entry[1].length > best[1].length ? entry : best))
+          erase = [
+            { fill: main, pixels: list },
+            ...[...byFill].filter(([hex]) => hex !== main).map(([hex, pixelList]) => ({ fill: hex, pixels: pixelList })),
+          ]
+        }
+      }
+      lots.unshift({ paint, region, rgb, fill, ring, erase })
     }
     return lots
-  }, [pixels, paints, regionOf, fillRgb, circled, ringThickness, W, sx, sy])
+  }, [pixels, paints, regionOf, fillRgb, circled, ringThickness, ringColor, W, H, sx, sy])
+
+  /** The erased printed rings, as flat patches for the preview to draw over the map. */
+  const patches = useMemo(
+    () =>
+      painted.flatMap(({ region, erase }) =>
+        (erase ?? []).map((part, n) => ({ key: `${region.seed}-${n}`, d: pixelsPath(part.pixels, W), fill: part.fill, scale: [sx, sy] })),
+      ),
+    [painted, W, sx, sy],
+  )
 
   /**
    * The rings drawn over circled lots, in the preview's units: each with the
@@ -200,12 +300,14 @@ export default function useLotPainter({
     const s = Math.sqrt(sx * sy)
     return painted
       .filter((lot) => lot.ring)
-      .map(({ paint, region, ring: { cx, cy, r, strokeWidth, bounds } }) => ({
+      .map(({ paint, region, ring: { cx, cy, r, base, strokeWidth, bounds } }) => ({
         key: region.seed,
         paint,
         cx: cx / sx,
         cy: cy / sy,
         r: r / s,
+        // Its default radius, which the size it is resized to is measured against.
+        base: base / s,
         strokeWidth: strokeWidth / s,
         bounds: { x0: bounds.x0 / sx, y0: bounds.y0 / sy, x1: bounds.x1 / sx, y1: bounds.y1 / sy },
       }))
@@ -221,7 +323,7 @@ export default function useLotPainter({
   const layers = useMemo(() => {
     const byPair = new Map()
     for (const { region, rgb, fill, ring } of painted) {
-      if (ring) continue
+      if (ring || !rgb) continue
       const key = `${fill.join('-')}_${rgb.join('-')}`
       if (!byPair.has(key)) {
         byPair.set(key, { key, matrix: recolorMatrix(fill, rgb), paths: [], box: [Infinity, Infinity, -Infinity, -Infinity] })
@@ -257,7 +359,7 @@ export default function useLotPainter({
 
   /** The untouched map's colour at (x, y), in the annotations' coordinates — for reading a legend swatch. */
   const sample = useCallback(
-    (x, y) => (pixels ? sampleColor(pixels.image, x * sx, y * sy, Math.max(2, Math.round(3 * sx))) : null),
+    (x, y) => (pixels ? sampleColor(pixels.original, x * sx, y * sy, Math.max(2, Math.round(3 * sx))) : null),
     [pixels, sx, sy],
   )
 
@@ -284,13 +386,15 @@ export default function useLotPainter({
       original = new Blob([original], { type: `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}` })
     }
     const source = svg ? await original.text() : pictureSvg(await toDataUrl(original), width, height)
-    const { text } = recolorSvg(source, { width: W, height: H, lots: painted })
-    const blob = new Blob([sanitizeSvg(text)], { type: SVG_TYPE })
+    const { text } = recolorSvg(source, { width: W, height: H, lots: painted, marks, markScale: [sx, sy] })
+    // Text drawn as pictures, so the Flutter app shows it exactly as placed (see flattenMarkText).
+    const flat = await flattenMarkText(text, { canvasWidth: W })
+    const blob = new Blob([sanitizeSvg(flat)], { type: SVG_TYPE })
     if (blob.size > UPLOAD_RULES.map.maxBytes) {
       throw new Error(`The colored map comes to ${(blob.size / 1024 / 1024).toFixed(1)} MB, past the ${UPLOAD_RULES.map.maxBytes / 1024 / 1024} MB map limit.`)
     }
     return blob
-  }, [pixels, url, width, height, W, H, painted])
+  }, [pixels, url, width, height, W, H, painted, marks, sx, sy])
 
   /** The finished SVG rasterised losslessly at the same full size used to find and colour its lots. */
   const toPngBlob = useCallback(async () => {
@@ -328,6 +432,7 @@ export default function useLotPainter({
     error: enabled && failed?.key === loadKey ? failed.message : '',
     isSvg: isSvgUrl(url),
     layers: ready ? layers : [],
+    patches: ready ? patches : [],
     circles: ready ? circles : [],
     locatePoint,
     sampleColor: sample,

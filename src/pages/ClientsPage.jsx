@@ -22,7 +22,7 @@ import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
-import { CLIENTS_TABLE, deleteClient, fetchClients } from '@/data/clientsData'
+import { ACCOUNT_TYPE_KEY, CLIENTS_TABLE, SELLER_KINDS, deleteClient, fetchClients } from '@/data/clientsData'
 import { notifyFailed, notifySaved } from '@/lib/notify'
 import { contractTypeFromCsv, paymentTypeFromCsv } from '@/data/lotImportData'
 import { SUPABASE_ENV } from '@/data/supabase'
@@ -64,6 +64,12 @@ const TAG = {
 }
 
 const VIP_TAG = { fg: '#92400E', bg: '#FEF3E2' }
+// The kind of account a client belongs to, as a tag and a group dot.
+const ACCOUNT_TAG = {
+  Broker: { fg: '#1D4ED8', bg: '#E0EAFF' },
+  'Regular User': { fg: '#475569', bg: '#EEF1F5' },
+  'Sales Agent': { fg: '#047857', bg: '#DFF5EC' },
+}
 
 /*
  * Stage/status colours by what the word means, checked in order, so a free-text
@@ -172,6 +178,7 @@ function CellValue({ column, value, full = false }) {
   if (typeof value === 'number') return <Text as="span" fontVariantNumeric="tabular-nums">{value.toLocaleString('en-PH')}</Text>
   if (isDateColumn(key)) return <Text as="span" whiteSpace="nowrap">{formatDate(value)}</Text>
   const text = plainValue(value)
+  if (key === ACCOUNT_TYPE_KEY) return ACCOUNT_TAG[text] ? <Tag style={ACCOUNT_TAG[text]}>{text}</Tag> : <Text as="span" color={COLORS.subtle}>—</Text>
   if (isPhoneColumn(key)) return <Text as="span" whiteSpace="nowrap" fontVariantNumeric="tabular-nums">{text}</Text>
   if (full) return <Text as="span" whiteSpace="pre-wrap" wordBreak="break-word">{text}</Text>
   // Long text stays on one line in the table; the full value is in the tooltip and the details panel.
@@ -506,6 +513,8 @@ export default function ClientsPage() {
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
   const [tab, setTab] = useState('all')
+  // Whose clients: 'all' (overall), or one kind of account (SELLER_KINDS).
+  const [group, setGroup] = useState('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState(null)
   const [page, setPage] = useState(1)
@@ -547,6 +556,18 @@ export default function ClientsPage() {
   ]
   const openClient = openKey ? clients.find((client) => client._key === openKey) ?? null : null
 
+  // Grouped by the kind of account each client belongs to; clients of no known
+  // account get an Unlinked group, shown only when there are some.
+  const groupOf = (client) => SELLER_KINDS.find((kind) => kind.label === client[ACCOUNT_TYPE_KEY])?.value ?? 'unlinked'
+  const groupCount = (value) => (value === 'all' ? clients.length : clients.filter((client) => groupOf(client) === value).length)
+  const groups = [
+    { value: 'all', label: 'Overall' },
+    ...SELLER_KINDS.map((kind) => ({ value: kind.value, label: kind.plural, dot: ACCOUNT_TAG[kind.label].fg })),
+    ...(groupCount('unlinked') ? [{ value: 'unlinked', label: 'Unlinked', dot: COLORS.subtle }] : []),
+  ]
+  const activeGroup = groups.some((option) => option.value === group) ? group : 'all'
+  const grouped = activeGroup === 'all' ? clients : clients.filter((client) => groupOf(client) === activeGroup)
+
   const kindOf = (client) => (statusKey ? plainValue(client[statusKey]).toLowerCase() : '')
   // One tab per status/stage value the rows hold, in the order they first appear.
   const tabs = statusKey
@@ -557,10 +578,11 @@ export default function ClientsPage() {
     : []
   const hasTabs = tabs.length > 1
   const activeTab = hasTabs && tabs.some((option) => option.value === tab) ? tab : 'all'
-  const countOf = (value) => (value === 'all' ? clients.length : clients.filter((client) => kindOf(client) === value).length)
+  // Stage counts are within the chosen group.
+  const countOf = (value) => (value === 'all' ? grouped.length : grouped.filter((client) => kindOf(client) === value).length)
 
   const needle = search.trim().toLowerCase()
-  const matching = clients
+  const matching = grouped
     .filter((client) => activeTab === 'all' || kindOf(client) === activeTab)
     .filter((client) => !needle || columns.some((column) => plainValue(client[column.key]).toLowerCase().includes(needle)))
   if (sort) matching.sort((a, b) => compareValues(a[sort.key], b[sort.key]) * (sort.dir === 'asc' ? 1 : -1))
@@ -645,7 +667,7 @@ export default function ClientsPage() {
           </Flex>
           <ToolbarButton
             icon={LuDownload}
-            onClick={() => downloadClientsCsv(matching, columns, activeTab)}
+            onClick={() => downloadClientsCsv(matching, columns, activeGroup === 'all' ? activeTab : `${activeGroup}-${activeTab}`)}
             disabled={!matching.length}
             _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
           >
@@ -654,7 +676,31 @@ export default function ClientsPage() {
         </Flex>
 
         <Card as="section" p="0" overflow="hidden" aria-label="Clients">
-          <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '24px' }} py="16px">
+          <Flex
+            role="tablist"
+            aria-label="Clients by account type"
+            gap="8px"
+            flexWrap="wrap"
+            px={{ base: '16px', md: '24px' }}
+            pt="16px"
+            pb="4px"
+          >
+            {groups.map((option) => (
+              <Pill
+                key={option.value}
+                active={option.value === activeGroup}
+                dot={option.dot}
+                count={groupCount(option.value)}
+                onClick={() => {
+                  setGroup(option.value)
+                  setPage(1)
+                }}
+              >
+                {option.label}
+              </Pill>
+            ))}
+          </Flex>
+          <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '24px' }} py="12px">
             {hasTabs ? (
               <Flex role="tablist" aria-label="Client status" gap="8px" flexWrap="wrap">
                 {tabs.map((option) => (
@@ -674,7 +720,7 @@ export default function ClientsPage() {
               </Flex>
             ) : (
               <Text as="h2" fontFamily={HEADING_FONT} fontWeight="700" fontSize="17px" color={COLORS.heading}>
-                All Clients ({clients.length})
+                All Clients ({grouped.length})
               </Text>
             )}
             <RefreshButton onRefresh={refresh} label="Refresh clients" size="32px" />

@@ -18,6 +18,8 @@ const PAGE_TITLES = {
   announcements: 'Announcements',
   brokers: 'Add Brokers',
   salesAgents: 'Add Sales Agents',
+  regularUsers: 'Add Regular Users',
+  applications: 'Pending Applications',
   clients: 'Clients',
 }
 

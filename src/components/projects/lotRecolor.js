@@ -188,11 +188,6 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
     return -1
   }
 
-  /**
-   * The lot grown from `seeds`, all of fill colour [br, bg, bb]: the fill itself,
-   * the text it encloses, and its anti-aliased edge. `allowed(i)` fences the
-   * flood in; past `limit` pixels it gives up (the click was not in a lot).
-   */
   function grow(seeds, [br, bg, bb], { allowed = null, limit = Infinity, minPixels = minRegionPixels, tolerance = TOLERANCE_DEFAULT } = {}) {
     generation += 1
     const FILL = generation * 4 + 1
@@ -237,14 +232,6 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
     }
     if (fill.length < minPixels) return null
 
-    /*
-     * 1b. Islands: patches of the lot's own colour cut off from it by lines
-     * drawn over the lot — the hollow insides of large outlined lettering, say
-     * a "BLK 27" label written across the lot's border. Each is taken in if it
-     * lies nearer this lot than any other patch of the same colour that runs on
-     * past the search box (a neighbouring lot), so the letters' insides on the
-     * far side of the border line stay with the lot there.
-     */
     const mainSize = fill.length
     const bx0 = Math.max(0, minX - islandReach)
     const bx1 = Math.min(width - 1, maxX + islandReach)
@@ -613,18 +600,278 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
   return { at, inPolygon, inPolygonExact }
 }
 
-/** Whether pixel index `i` belongs to a region from createRegionFinder. */
-export function regionContains(region, i) {
+/** A pixel plainly the red of a printed ring: bright red, little green or blue. */
+const isRingRed = (r, g, b) => r >= 150 && g <= 110 && b <= 110 && r - Math.max(g, b) >= 80
+/** A pixel tinged with that red — the soft edge where a ring blends into the lot or white. */
+const isRingFringe = (r, g) => r >= 110 && r - g >= 12
+/** Plainly reddish however dark — where a ring runs under black lettering or a border line. */
+const isRingDark = (r, g, b) => r >= 50 && r - g >= 30 && r - b >= 30
+/** How far past the red its faintly tinged edge is followed. */
+const RING_FRINGE_REACH = 2
+/**
+ * Past that, a halo this wide of anything not dark is filled in too: the last
+ * blend of the ring into the lot is too faint to tell by colour, yet leaves a
+ * trace of the circle if kept (and would tint the fill taken from it).
+ */
+const RING_HALO = 2
+/** Darker than this, a pixel is lettering or a line, which the halo leaves alone. */
+const RING_HALO_DARK = 110
+/**
+ * Pieces of red this close are one ring: lettering or a border line drawn over
+ * a ring cuts it into pieces, which all go with the lot it rings.
+ */
+const RING_JOIN = 5
+/** Lighter than this, a pixel is lot or white — what a ring is filled in from. */
+const RING_LIGHT = 150
+/**
+ * A border line crossing a ring is put back across it: dark on both sides of
+ * the ring, within RING_BRIDGE pixels, and running on dark for RING_LINE_RUN
+ * pixels more — a line, not a speck of lettering.
+ */
+const RING_BRIDGE = 24
+const RING_LINE_RUN = 6
+
+/**
+ * The red rings printed on a map (ERHD marks sold lots so), found once for the
+ * whole image ({ data, width, height }) and painted out of it in place: each
+ * ring's pixels — the plain red and its tinged edge — are filled in from the
+ * colours around them, peeling inward, so the lot under a ring reads as one
+ * flat lot again and is found whole, inside the ring and out.
+ *
+ * Returns null when there is no red, else { comp, components }: per pixel the
+ * number of the ring it belongs to (0 for none), and each ring's pixels.
+ */
+export function findPrintedRings(image, { scale = 1 } = {}) {
+  const { data, width, height } = image
+  const total = width * height
+  const ring = new Uint8Array(total)
+  let frontier = []
+  for (let i = 0; i < total; i += 1) {
+    const o = i * 4
+    if (isRingRed(data[o], data[o + 1], data[o + 2])) {
+      ring[i] = 1
+      frontier.push(i)
+    }
+  }
+  if (!frontier.length) return null
+  const neighbours = (i, visit) => {
+    const x = i % width
+    const y = (i / width) | 0
+    for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        if (!dx && !dy) continue
+        const nx = x + dx
+        const ny = y + dy
+        if (nx >= 0 && ny >= 0 && nx < width && ny < height) visit(ny * width + nx)
+      }
+    }
+  }
+
+  // Dark red, where the ring meets lettering or lines: followed as far as it runs.
+  for (let head = 0; head < frontier.length; head += 1) {
+    neighbours(frontier[head], (n) => {
+      if (ring[n]) return
+      const o = n * 4
+      if (!isRingDark(data[o], data[o + 1], data[o + 2])) return
+      ring[n] = 1
+      frontier.push(n)
+    })
+  }
+  // The faintly tinged edge: pixels joined to the red through more tinged pixels, a step or two out.
+  const reach = Math.max(1, Math.round(RING_FRINGE_REACH * scale))
+  for (let step = 0; step < reach && frontier.length; step += 1) {
+    const next = []
+    for (const i of frontier) {
+      neighbours(i, (n) => {
+        if (ring[n]) return
+        const o = n * 4
+        if (!isRingFringe(data[o], data[o + 1])) return
+        ring[n] = 1
+        next.push(n)
+      })
+    }
+    frontier = next
+  }
+  // The halo: a pixel or two more all round, outside the tinged edge as well as the red.
+  frontier = []
+  for (let i = 0; i < total; i += 1) if (ring[i]) frontier.push(i)
+  const halo = Math.max(1, Math.round(RING_HALO * scale))
+  for (let step = 0; step < halo && frontier.length; step += 1) {
+    const next = []
+    for (const i of frontier) {
+      neighbours(i, (n) => {
+        if (ring[n] || luminance(data, n * 4) < RING_HALO_DARK) return
+        ring[n] = 1
+        next.push(n)
+      })
+    }
+    frontier = next
+  }
+
+  // Each ring on its own — its pieces joined across lettering — so a lot takes only the rings it touches.
+  const join = Math.max(2, Math.round(RING_JOIN * scale))
+  const comp = new Int32Array(total)
+  const components = []
+  for (let i = 0; i < total; i += 1) {
+    if (!ring[i] || comp[i]) continue
+    const id = components.length + 1
+    const members = [i]
+    comp[i] = id
+    for (let head = 0; head < members.length; head += 1) {
+      const m = members[head]
+      const mx = m % width
+      const my = (m / width) | 0
+      for (let ny = Math.max(0, my - join); ny <= Math.min(height - 1, my + join); ny += 1) {
+        for (let nx = Math.max(0, mx - join); nx <= Math.min(width - 1, mx + join); nx += 1) {
+          const n = ny * width + nx
+          if (!ring[n] || comp[n]) continue
+          comp[n] = id
+          members.push(n)
+        }
+      }
+    }
+    components.push(Int32Array.from(members))
+  }
+
+  /*
+   * Fill in, a layer at a time from the outside: each pixel takes the average
+   * of its light neighbours already known, so the lot's colour closes over the
+   * ring and lettering or a line beside it is not smeared into it. A pixel with
+   * only dark neighbours known waits for the light to reach it.
+   */
+  const known = new Uint8Array(total)
+  for (let i = 0; i < total; i += 1) known[i] = ring[i] ? 0 : 1
+  const queued = new Uint8Array(total)
+  let layer = []
+  for (let i = 0; i < total; i += 1) {
+    if (!ring[i]) continue
+    let edge = false
+    neighbours(i, (n) => {
+      if (known[n]) edge = true
+    })
+    if (edge) {
+      queued[i] = 1
+      layer.push(i)
+    }
+  }
+  const average = (i, lightOnly) => {
+    const sum = [0, 0, 0]
+    let count = 0
+    neighbours(i, (n) => {
+      if (!known[n]) return
+      const o = n * 4
+      if (lightOnly && luminance(data, o) < RING_LIGHT) return
+      sum[0] += data[o]
+      sum[1] += data[o + 1]
+      sum[2] += data[o + 2]
+      count += 1
+    })
+    return count ? sum.map((value) => value / count) : null
+  }
+  while (layer.length) {
+    let colors = layer.map((i) => average(i, true))
+    // Nothing light in reach anywhere (a ring wholly inside dark): take what there is.
+    if (colors.every((color) => !color)) colors = layer.map((i) => average(i, false))
+    const next = []
+    const done = []
+    layer.forEach((i, n) => {
+      const color = colors[n]
+      if (!color) {
+        next.push(i)
+        return
+      }
+      data.set(color, i * 4)
+      known[i] = 1
+      done.push(i)
+    })
+    for (const i of done) {
+      neighbours(i, (n) => {
+        if (known[n] || queued[n]) return
+        queued[n] = 1
+        next.push(n)
+      })
+    }
+    layer = next
+  }
+
+  // Border lines the ring crossed, put back straight across it.
+  const bridge = Math.round(RING_BRIDGE * scale)
+  const lineRun = Math.max(3, Math.round(RING_LINE_RUN * scale))
+  const isDark = (i) => !ring[i] && luminance(data, i * 4) < 110
+  const endOf = (i, dx, dy) => {
+    let x = i % width
+    let y = (i / width) | 0
+    for (let k = 0; k < bridge; k += 1) {
+      x += dx
+      y += dy
+      if (x < 0 || y < 0 || x >= width || y >= height) return -1
+      const p = y * width + x
+      if (ring[p]) continue
+      if (!isDark(p)) return -1
+      for (let m = 1; m <= lineRun; m += 1) {
+        const qx = x + m * dx
+        const qy = y + m * dy
+        if (qx < 0 || qy < 0 || qx >= width || qy >= height || !isDark(qy * width + qx)) return -1
+      }
+      return p
+    }
+    return -1
+  }
+  const bridged = []
+  for (const members of components) {
+    for (const i of members) {
+      for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+        const a = endOf(i, dx, dy)
+        if (a < 0) continue
+        const b = endOf(i, -dx, -dy)
+        if (b < 0) continue
+        bridged.push([i, a, b])
+        break
+      }
+    }
+  }
+  for (const [i, a, b] of bridged) {
+    data.set([0, 1, 2].map((c) => (data[a * 4 + c] + data[b * 4 + c]) / 2), i * 4)
+  }
+  return { comp, components }
+}
+
+/**
+ * The printed rings a lot carries: every ring (from findPrintedRings) with a
+ * pixel inside `lotBox` (a lotMask — the lot, its lettering, anything it
+ * encloses), whole, even where it runs past the lot's border line.
+ */
+export function ringPixelsIn({ comp, components }, { x0, y0, w, h, mask }, width) {
+  const ids = new Set()
+  for (let r = 0; r < h; r += 1) {
+    for (let c = 0; c < w; c += 1) {
+      if (!mask[r * w + c]) continue
+      const id = comp[(y0 + r) * width + x0 + c]
+      if (id) ids.add(id)
+    }
+  }
+  const out = []
+  for (const id of ids) for (const i of components[id - 1]) out.push(i)
+  return Int32Array.from(out)
+}
+
+/** Where pixel index `i` sits in a region's sorted pixels, or -1. */
+export function regionIndexOf(region, i) {
   const { pixels } = region
   let lo = 0
   let hi = pixels.length - 1
   while (lo <= hi) {
     const mid = (lo + hi) >> 1
-    if (pixels[mid] === i) return true
+    if (pixels[mid] === i) return mid
     if (pixels[mid] < i) lo = mid + 1
     else hi = mid - 1
   }
-  return false
+  return -1
+}
+
+/** Whether pixel index `i` belongs to a region from createRegionFinder. */
+export function regionContains(region, i) {
+  return regionIndexOf(region, i) >= 0
 }
 
 /**

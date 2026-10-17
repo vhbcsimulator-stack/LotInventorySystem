@@ -21,6 +21,8 @@ function normalize(row) {
     lastName: text(row.last_name),
     mobileNumber: text(row.mobile_number),
     email: text(row.email),
+    // Brokers only: the ID picture from their application, a URL or "bucket/path" (data/idPictures.js).
+    idPicture: text(row.id_picture).trim(),
     createdAt: text(row.created_at),
   }
 }
@@ -90,16 +92,17 @@ export function creditSales(accounts, lots) {
 }
 
 /**
- * The two kinds of seller the portal keeps, credited with sales the same way.
- * A broker is also a login for the mobile app (`hasLogin`), made and removed by
- * the create-broker / delete-broker Edge Functions; a sales agent is only a
- * record, added and removed here.
+ * The kinds of account the portal keeps. Brokers and sales agents are sellers
+ * (`sells`), credited with sales the same way. Each is also a login for the
+ * mobile app (`hasLogin`), made and removed by the create-broker / delete-broker
+ * Edge Functions. A regular user sells nothing.
  */
 export const ACCOUNT_KINDS = {
   broker: {
     kind: 'broker',
     table: 'brokers',
     hasLogin: true,
+    sells: true,
     singular: 'broker',
     plural: 'brokers',
     title: 'Broker',
@@ -108,20 +111,28 @@ export const ACCOUNT_KINDS = {
   sales_agent: {
     kind: 'sales_agent',
     table: 'sales_agents',
-    hasLogin: false,
+    hasLogin: true,
+    sells: true,
     singular: 'sales agent',
     plural: 'sales agents',
     title: 'Sales Agent',
     titlePlural: 'Sales Agents',
   },
+  regular_user: {
+    kind: 'regular_user',
+    table: 'regular_users',
+    hasLogin: true,
+    sells: false,
+    singular: 'user',
+    plural: 'users',
+    title: 'Regular User',
+    titlePlural: 'Regular Users',
+  },
 }
 
-const SALES_AGENTS_MISSING =
-  'The sales_agents table is not set up yet — run supabase/migrations/20261016_create_sales_agents.sql in the Supabase SQL Editor.'
-
 /**
- * One table's accounts as { id, authUserId, email, name }, A–Z. `authUserId` is a
- * broker's app login (null for sales agents, who have none). A table that
+ * One table's accounts as { id, authUserId, email, name }, A–Z. `authUserId` is the
+ * account's app login (null for a sales agent added before they had logins). A table that
  * cannot be read (not made yet) gives none.
  */
 async function accountNames(table) {
@@ -188,22 +199,24 @@ export function validateBroker(form) {
 
 /**
  * One kind's accounts (`query.kind`, 'broker' by default), newest first, each
- * with `lotsSold` and `totalTcp`: the sold lots whose `sold_by` names them.
+ * with `lotsSold` and `totalTcp`: the sold lots whose `sold_by` names them
+ * (always 0 for a kind that does not sell).
  * Resolves { accounts, source }. Never throws: failures resolve empty with a `source`.
  */
 export async function fetchAccounts({ kind = 'broker' } = {}) {
   if (!supabase) return { accounts: [], source: SOURCE.NOT_CONFIGURED }
-  const { table } = ACCOUNT_KINDS[kind]
+  const { table, sells } = ACCOUNT_KINDS[kind]
 
   try {
     const [{ data }, sales] = await Promise.all([
       supabase
         .from(table)
-        .select('id, first_name, last_name, mobile_number, email, created_at')
+        // '*' rather than a column list: id_picture exists only once 20261022 has run.
+        .select('*')
         .order('created_at', { ascending: false })
         .then(unwrap),
       // Brokers are credited by a lot's Sold By; sales agents by its separate sales agent.
-      fetchSoldLots(kind === 'sales_agent' ? 'sales_agent' : 'sold_by'),
+      sells ? fetchSoldLots(kind === 'sales_agent' ? 'sales_agent' : 'sold_by') : [],
     ])
     const people = data.map(normalize)
     const stats = creditSales(people, sales)
@@ -220,7 +233,8 @@ export async function fetchAccounts({ kind = 'broker' } = {}) {
 }
 
 /** The tables fetchAccounts reads, so its Refresh button knows what to check. */
-fetchAccounts.tables = ({ kind = 'broker' } = {}) => [ACCOUNT_KINDS[kind].table, ...Object.values(LOT_TABLES)]
+fetchAccounts.tables = ({ kind = 'broker' } = {}) =>
+  ACCOUNT_KINDS[kind].sells ? [ACCOUNT_KINDS[kind].table, ...Object.values(LOT_TABLES)] : [ACCOUNT_KINDS[kind].table]
 
 /** Brokers only, as { brokers, source }. */
 export async function fetchBrokers() {
@@ -231,48 +245,38 @@ export async function fetchBrokers() {
 fetchBrokers.tables = () => fetchAccounts.tables({ kind: 'broker' })
 
 /**
- * Add a broker or a sales agent. A broker gets their app login and row as one
- * step from the create-broker function, which emails the sign-in details and
- * resolves { id, authUserId, email, password } — `password` is returned only
- * here, so show it now. A sales agent is just a row, resolving { id, email }.
- * Throws with a readable message on failure.
+ * Add a broker, regular user, or sales agent: their app login and row as one
+ * step from the create-broker function (told which by `kind`), which emails the
+ * sign-in details and resolves { id, authUserId, email, password } — `password`
+ * is returned only here, so show it now. Throws with a readable message on failure.
  */
 export async function createAccount(kind, form) {
-  if (ACCOUNT_KINDS[kind].hasLogin) return invoke('create-broker', cleanBroker(form))
-  if (!supabase) throw new Error('No database connected — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
-  const agent = cleanBroker(form)
-  const { data: auth } = await supabase.auth.getUser()
-  const { data, error } = await supabase
-    .from('sales_agents')
-    .insert({
-      first_name: agent.firstName,
-      last_name: agent.lastName,
-      mobile_number: agent.mobileNumber,
-      email: agent.email,
-      user_id: auth?.user?.id ?? null,
-    })
-    .select('id, email')
-    .single()
-  if (error) {
-    if (error.code === '23505') throw new Error(`A sales agent with the email ${agent.email} already exists.`)
-    if (/sales_agents|row-level security/i.test(error.message)) throw new Error(SALES_AGENTS_MISSING)
-    throw new Error(error.message)
-  }
-  return data
+  return invoke('create-broker', { ...cleanBroker(form), kind })
 }
 
 /**
- * Remove a broker or a sales agent for good. A broker's app login goes first
- * (the delete-broker function), then their row; a sales agent is just a row.
- * Throws with a readable message on failure.
+ * Remove a broker, regular user, or sales agent for good: the delete-broker
+ * function removes the app login first, then the row. Throws with a readable
+ * message on failure.
  */
 export async function deleteAccount(kind, id) {
-  if (ACCOUNT_KINDS[kind].hasLogin) return invoke('delete-broker', { id })
+  return invoke('delete-broker', { id, kind })
+}
+
+/**
+ * Keep an ID picture (a URL or "bucket/path") on a broker's row, e.g. the one
+ * from the application the account was made from. Throws on failure.
+ */
+export async function setBrokerIdPicture(id, idPicture) {
   if (!supabase) throw new Error('No database connected.')
-  const { data, error } = await supabase.from('sales_agents').delete().eq('id', id).select('id')
-  if (error) throw new Error(error.message)
-  // Row-level security filters a delete it refuses, so nothing comes back.
-  if (!data?.length) throw new Error(SALES_AGENTS_MISSING)
+  const { data, error } = await supabase.from('brokers').update({ id_picture: idPicture }).eq('id', id).select('id')
+  if (error) {
+    if (/id_picture/i.test(error.message)) {
+      throw new Error('brokers has no id_picture column yet — run supabase/migrations/20261022_add_broker_id_picture.sql.')
+    }
+    throw new Error(error.message)
+  }
+  if (!data?.length) throw new Error('That broker could not be changed.')
 }
 
 export const createBroker = (form) => createAccount('broker', form)

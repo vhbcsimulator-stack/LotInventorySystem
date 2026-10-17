@@ -3,6 +3,7 @@ import { Box, CloseButton, Dialog, Flex, Grid, Icon, Input, Menu, NativeSelect, 
 import {
   LuAward,
   LuCheck,
+  LuClipboardCheck,
   LuCopy,
   LuDownload,
   LuEllipsisVertical,
@@ -23,7 +24,9 @@ import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
-import { ACCOUNT_KINDS, createAccount, deleteAccount, fetchAccounts, validateBroker } from '@/data/brokersData'
+import { ACCOUNT_KINDS, createAccount, deleteAccount, fetchAccounts, setBrokerIdPicture, validateBroker } from '@/data/brokersData'
+import IdPicture from '@/components/IdPicture'
+import { setApplicationStatus } from '@/data/applicationsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
@@ -36,7 +39,8 @@ const PAGE_SIZE = 10
 const TOP_PERFORMERS = 10
 const TINT = '#EEF3FF'
 
-// Profile | Lots sold | Total TCP | Actions. Narrow screens keep profile and actions.
+// Profile | Lots sold | Total TCP | Actions — or, for a kind that does not sell,
+// Profile | Mobile | Created | Actions. Narrow screens keep profile and actions.
 const TABLE_COLUMNS = { base: 'minmax(0, 1fr) auto', md: 'minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1.2fr) 150px' }
 
 // Spotlight styling by rank: #1 green, #2 blue, #3 slate.
@@ -47,8 +51,8 @@ const RANKS = [
 ]
 
 const SORTS = [
-  { value: 'tcp', label: 'Highest TCP (Total Volume)', compare: (a, b) => b.totalTcp - a.totalTcp || b.lotsSold - a.lotsSold },
-  { value: 'lots', label: 'Most Lots Sold', compare: (a, b) => b.lotsSold - a.lotsSold || b.totalTcp - a.totalTcp },
+  { value: 'tcp', label: 'Highest TCP (Total Volume)', sales: true, compare: (a, b) => b.totalTcp - a.totalTcp || b.lotsSold - a.lotsSold },
+  { value: 'lots', label: 'Most Lots Sold', sales: true, compare: (a, b) => b.lotsSold - a.lotsSold || b.totalTcp - a.totalTcp },
   { value: 'name', label: 'Name (A–Z)', compare: (a, b) => fullName(a).localeCompare(fullName(b)) },
   { value: 'newest', label: 'Newest Accounts', compare: (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) },
 ]
@@ -124,16 +128,21 @@ function csvCell(value) {
 }
 
 function downloadBrokersCsv(brokers, copy) {
-  const rows = [
-    ['first_name', 'last_name', 'email', 'mobile_number', 'lots_sold', 'total_tcp', 'created_at'],
-    ...brokers.map((b) => [b.firstName, b.lastName, b.email, b.mobileNumber, b.lotsSold, Math.round(b.totalTcp), b.createdAt]),
-  ]
+  const rows = copy.sells
+    ? [
+        ['first_name', 'last_name', 'email', 'mobile_number', 'lots_sold', 'total_tcp', 'created_at'],
+        ...brokers.map((b) => [b.firstName, b.lastName, b.email, b.mobileNumber, b.lotsSold, Math.round(b.totalTcp), b.createdAt]),
+      ]
+    : [
+        ['first_name', 'last_name', 'email', 'mobile_number', 'created_at'],
+        ...brokers.map((b) => [b.firstName, b.lastName, b.email, b.mobileNumber, b.createdAt]),
+      ]
   const csv = rows.map((row) => row.map(csvCell).join(',')).join('\r\n')
   // The byte-order mark makes Excel read accented names as UTF-8.
   const url = URL.createObjectURL(new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `${copy.plural.replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`
+  link.download = `${copy.titlePlural.toLowerCase().replace(/\s+/g, '-')}-${new Date().toISOString().slice(0, 10)}.csv`
   link.rel = 'noopener'
   // Firefox and Safari only follow the click for a link that is in the document.
   document.body.appendChild(link)
@@ -291,9 +300,10 @@ function CreatedCredentials({ account, copy, onDone }) {
 /**
  * The account form in a modal. Errors show per field once someone has tried to
  * submit. After a create it swaps to the one-time credentials until Done.
+ * `initialForm` fills it in on opening, e.g. from a pending application.
  */
-function AddBrokerDialog({ copy, open, disabled, onClose, onCreated }) {
-  const [form, setForm] = useState(EMPTY_FORM)
+function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, showIdPicture, onClose, onCreated }) {
+  const [form, setForm] = useState(() => ({ ...EMPTY_FORM, ...initialForm }))
   const [submitted, setSubmitted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -326,7 +336,7 @@ function AddBrokerDialog({ copy, open, disabled, onClose, onCreated }) {
       const name = `${form.firstName.trim()} ${form.lastName.trim()}`
       setForm(EMPTY_FORM)
       setSubmitted(false)
-      onCreated()
+      onCreated(account)
       if (!copy.hasLogin) {
         // A sales agent has no login, so there is nothing to show once they are saved.
         notifySaved(`${copy.title} added`, `${name} was added to ${copy.titlePlural}.`)
@@ -380,10 +390,33 @@ function AddBrokerDialog({ copy, open, disabled, onClose, onCreated }) {
               <form noValidate onSubmit={handleSubmit}>
                 <Dialog.Body py="18px">
                   <Flex direction="column" gap="14px">
+                    {note ? (
+                      <Flex align="flex-start" gap="8px" p="12px" borderRadius="8px" bg={COLORS.statusBg}>
+                        <Icon as={LuClipboardCheck} boxSize="16px" mt="2px" color={COLORS.activeBg} flexShrink={0} />
+                        <Text fontFamily={FONT} fontSize="13px" lineHeight="19px" color={COLORS.heading}>
+                          {note}
+                        </Text>
+                      </Flex>
+                    ) : null}
                     <Flex gap="14px" direction={{ base: 'column', sm: 'row' }}>
                       {FIELDS.slice(0, 2).map(field)}
                     </Flex>
                     {FIELDS.slice(2).map(field)}
+
+                    {/* A broker made from an application keeps its ID picture: check it against the details above. */}
+                    {showIdPicture ? (
+                      <Box>
+                        <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
+                          ID Picture
+                        </Text>
+                        <IdPicture value={idPicture} name={`${form.firstName} ${form.lastName}`.trim()} h="180px" />
+                        {idPicture ? (
+                          <Text mt="4px" fontFamily={FONT} fontSize="12px" color={COLORS.muted}>
+                            Saved to the broker&apos;s profile when the account is created.
+                          </Text>
+                        ) : null}
+                      </Box>
+                    ) : null}
 
                     {error ? (
                       <Text role="alert" fontFamily={FONT} fontSize="13px" color="#B91C1C">
@@ -478,11 +511,21 @@ function BrokerProfileDialog({ broker, copy, onClose }) {
                   <CloseButton size="sm" aria-label="Close profile" />
                 </Dialog.CloseTrigger>
                 <Dialog.Body py="18px">
-                  <Flex justify="space-between" gap="12px" p="14px" borderRadius="10px" bg={TINT}>
-                    <StatBlock label="Total TCP" value={formatPeso(broker.totalTcp)} color={COLORS.brandGreen} />
-                    <StatBlock label="Lots Closed" value={broker.lotsSold} suffix={broker.lotsSold === 1 ? 'lot' : 'lots'} align="right" />
-                  </Flex>
-                  <Flex mt="16px" direction="column" gap="12px">
+                  {copy.sells ? (
+                    <Flex justify="space-between" gap="12px" p="14px" mb="16px" borderRadius="10px" bg={TINT}>
+                      <StatBlock label="Total TCP" value={formatPeso(broker.totalTcp)} color={COLORS.brandGreen} />
+                      <StatBlock label="Lots Closed" value={broker.lotsSold} suffix={broker.lotsSold === 1 ? 'lot' : 'lots'} align="right" />
+                    </Flex>
+                  ) : null}
+                  <Flex direction="column" gap="12px">
+                    {copy.kind === 'broker' ? (
+                      <Box>
+                        <Text mb="6px" fontFamily={FONT} fontSize="11.5px" color={COLORS.subtle}>
+                          ID Picture
+                        </Text>
+                        <IdPicture value={broker.idPicture} name={fullName(broker)} />
+                      </Box>
+                    ) : null}
                     {details.map((detail) => (
                       <Flex key={detail.label} align="center" gap="10px">
                         <Icon as={detail.icon} boxSize="15px" color={COLORS.subtle} flexShrink={0} />
@@ -775,7 +818,7 @@ function HeaderCell({ children, ...rest }) {
   )
 }
 
-function BrokerRow({ broker, onProfile, onRemove }) {
+function BrokerRow({ broker, sells, onProfile, onRemove }) {
   return (
     <Grid
       role="row"
@@ -800,15 +843,23 @@ function BrokerRow({ broker, onProfile, onRemove }) {
           </Text>
           {/* Narrow screens drop the figure columns, so they ride under the email. */}
           <Text mt="4px" fontFamily={FONT} fontSize="12.5px" color={COLORS.heading} display={{ base: 'block', md: 'none' }}>
-            {lotsLabel(broker.lotsSold)} · {formatPeso(broker.totalTcp)}
+            {sells ? `${lotsLabel(broker.lotsSold)} · ${formatPeso(broker.totalTcp)}` : broker.mobileNumber || '—'}
           </Text>
         </Box>
       </Flex>
-      <Text role="cell" fontFamily={FONT} fontWeight="500" fontSize="14.5px" color={COLORS.heading} display={{ base: 'none', md: 'block' }} pl="12px">
-        {lotsLabel(broker.lotsSold)}
+      <Text role="cell" fontFamily={FONT} fontWeight="500" fontSize="14.5px" color={COLORS.heading} display={{ base: 'none', md: 'block' }}>
+        {sells ? lotsLabel(broker.lotsSold) : broker.mobileNumber || '—'}
       </Text>
-      <Text role="cell" fontFamily={FONT} fontWeight="600" fontSize="16px" color={COLORS.heading} display={{ base: 'none', md: 'block' }} textAlign="right" pr={{ md: '8px', lg: '40px' }}>
-        {formatPeso(broker.totalTcp)}
+      <Text
+        role="cell"
+        fontFamily={FONT}
+        fontWeight={sells ? '600' : '500'}
+        fontSize={sells ? '16px' : '14.5px'}
+        color={COLORS.heading}
+        display={{ base: 'none', md: 'block' }}
+        textAlign={sells ? 'right' : 'center'}
+      >
+        {sells ? formatPeso(broker.totalTcp) : formatShortDate(broker.createdAt)}
       </Text>
       <Flex role="cell" align="center" justify="center" gap="6px">
         <Box
@@ -890,18 +941,26 @@ function Pager({ page, pageCount, onChange }) {
 }
 
 /**
- * The directory of one kind of app account — brokers or sales agents (`kind`,
- * see ACCOUNT_KINDS): their logins, lots closed, and TCP credited to them.
+ * The directory of one kind of account — brokers, sales agents, or regular
+ * users (`kind`, see ACCOUNT_KINDS): their logins and, for the kinds that sell,
+ * the lots closed and TCP credited to them.
+ *
+ * Opened from Pending Applications, `prefill` (the form's fields) opens the
+ * create dialog filled in, and the application (`applicationId`) is marked
+ * approved once the account is made. A broker also keeps the application's
+ * ID picture (`idPicture`).
  */
-export function AccountsPage({ kind = 'broker' }) {
+export function AccountsPage({ kind = 'broker', prefill, applicationId, idPicture }) {
   const copy = ACCOUNT_KINDS[kind]
   const { data, loading, reload, refresh } = useApiQuery(fetchAccounts, { kind })
   const [removing, setRemoving] = useState(null)
   const [viewing, setViewing] = useState(null)
-  const [adding, setAdding] = useState(false)
+  const [adding, setAdding] = useState(Boolean(prefill))
+  // The application being turned into an account; cleared once it is marked or the dialog closes.
+  const [application, setApplication] = useState(prefill && applicationId ? applicationId : null)
   const [search, setSearch] = useState('')
   const [segment, setSegment] = useState('all')
-  const [sort, setSort] = useState('tcp')
+  const [sort, setSort] = useState(copy.sells ? 'tcp' : 'newest')
   const [reversed, setReversed] = useState(false)
   const [page, setPage] = useState(1)
 
@@ -913,10 +972,11 @@ export function AccountsPage({ kind = 'broker' }) {
   const topIds = new Set(producers.slice(0, TOP_PERFORMERS).map((broker) => broker.id))
   const segments = [
     { value: 'all', label: `All ${copy.titlePlural}`, count: brokers.length },
-    { value: 'top', label: 'Top Performers', count: topIds.size },
+    ...(copy.sells ? [{ value: 'top', label: 'Top Performers', count: topIds.size }] : []),
   ]
+  const sorts = SORTS.filter((option) => copy.sells || !option.sales)
 
-  const compare = SORTS.find((option) => option.value === sort)?.compare ?? SORTS[0].compare
+  const compare = sorts.find((option) => option.value === sort)?.compare ?? sorts[0].compare
   const matching = brokers
     .filter((broker) => (segment === 'top' ? topIds.has(broker.id) : true))
     .filter((broker) => matchesSearch(broker, search))
@@ -939,10 +999,12 @@ export function AccountsPage({ kind = 'broker' }) {
             letterSpacing="-0.8px"
             color={COLORS.heading}
           >
-            {copy.titlePlural} &amp; Performance Directory
+            {copy.sells ? `${copy.titlePlural} & Performance Directory` : `${copy.titlePlural} Directory`}
           </Text>
           <Text mt="6px" maxW="560px" fontFamily={FONT} fontSize="14px" lineHeight="20px" color={COLORS.muted}>
-            {copy.title} accounts, lots closed, and gross contract volumes (TCP) credited from the project lot tables.
+            {copy.sells
+              ? `${copy.title} accounts, lots closed, and gross contract volumes (TCP) credited from the project lot tables.`
+              : `${copy.title} accounts for the mobile app: who can sign in, and how to reach them.`}
           </Text>
         </Box>
 
@@ -998,7 +1060,7 @@ export function AccountsPage({ kind = 'broker' }) {
           </Flex>
         </Flex>
 
-        <Spotlight producers={producers.slice(0, 3)} copy={copy} />
+        {copy.sells ? <Spotlight producers={producers.slice(0, 3)} copy={copy} /> : null}
 
         <Card as="section" p="0" overflow="hidden" aria-label={`${copy.title} directory`}>
           <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '18px' }} py="18px">
@@ -1034,7 +1096,7 @@ export function AccountsPage({ kind = 'broker' }) {
                     fontSize="13px"
                     color={COLORS.heading}
                   >
-                    {SORTS.map((option) => (
+                    {sorts.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -1068,13 +1130,24 @@ export function AccountsPage({ kind = 'broker' }) {
 
           <Box role="table" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
             <Grid role="row" templateColumns={TABLE_COLUMNS} alignItems="center" gap="16px" px={{ base: '16px', md: '24px' }} py="14px" bg={TINT}>
-              <HeaderCell textAlign={{ base: 'left', lg: 'center' }}>{copy.title} Profile</HeaderCell>
-              <HeaderCell display={{ base: 'none', md: 'block' }}>Lots Sold</HeaderCell>
-              <HeaderCell display={{ base: 'none', md: 'block' }} textAlign="center">
-                Total TCP
-                <br />
-                Generated
-              </HeaderCell>
+              <HeaderCell pl={{ base: 0, lg: '56px' }}>{copy.title} Profile</HeaderCell>
+              {copy.sells ? (
+                <>
+                  <HeaderCell display={{ base: 'none', md: 'block' }}>Lots Sold</HeaderCell>
+                  <HeaderCell display={{ base: 'none', md: 'block' }} textAlign="right">
+                    Total TCP
+                    <br />
+                    Generated
+                  </HeaderCell>
+                </>
+              ) : (
+                <>
+                  <HeaderCell display={{ base: 'none', md: 'block' }}>Mobile Number</HeaderCell>
+                  <HeaderCell display={{ base: 'none', md: 'block' }} textAlign="center">
+                    Account Created
+                  </HeaderCell>
+                </>
+              )}
               <HeaderCell textAlign="center">Actions</HeaderCell>
             </Grid>
 
@@ -1083,6 +1156,7 @@ export function AccountsPage({ kind = 'broker' }) {
                 <BrokerRow
                   key={broker.id}
                   broker={broker}
+                  sells={copy.sells}
                   onProfile={() => setViewing(broker)}
                   onRemove={connected ? () => setRemoving(broker) : undefined}
                 />
@@ -1109,7 +1183,37 @@ export function AccountsPage({ kind = 'broker' }) {
         </Card>
       </Flex>
 
-      <AddBrokerDialog copy={copy} open={adding} disabled={!connected} onClose={() => setAdding(false)} onCreated={reload} />
+      <AddBrokerDialog
+        copy={copy}
+        open={adding}
+        disabled={!connected}
+        initialForm={prefill}
+        note={application ? 'Filled in from a pending application. Check the details before creating the account.' : ''}
+        idPicture={application ? idPicture : null}
+        showIdPicture={Boolean(application) && kind === 'broker'}
+        onClose={() => {
+          setAdding(false)
+          setApplication(null)
+        }}
+        onCreated={async (account) => {
+          if (application && kind === 'broker' && idPicture && account?.id) {
+            try {
+              await setBrokerIdPicture(account.id, idPicture)
+            } catch (err) {
+              notifyFailed('Account created, but its ID picture was not saved', err)
+            }
+          }
+          if (application) {
+            setApplication(null)
+            try {
+              await setApplicationStatus(application, 'approved', kind)
+            } catch (err) {
+              notifyFailed('Account created, but the application is still pending', err)
+            }
+          }
+          reload()
+        }}
+      />
 
       <BrokerProfileDialog broker={viewing} copy={copy} onClose={() => setViewing(null)} />
 
@@ -1126,6 +1230,6 @@ export function AccountsPage({ kind = 'broker' }) {
   )
 }
 
-export default function BrokersPage() {
-  return <AccountsPage kind="broker" />
+export default function BrokersPage({ prefill, applicationId, idPicture }) {
+  return <AccountsPage kind="broker" prefill={prefill} applicationId={applicationId} idPicture={idPicture} />
 }

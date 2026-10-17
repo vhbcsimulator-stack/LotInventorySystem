@@ -46,21 +46,45 @@ export function publicClient() {
 }
 
 /**
+ * The kinds of app account these functions manage, from the request's `kind`
+ * (a broker when it is missing): the table holding the account's row, the role
+ * stamped on its login, and how to name it in messages and the welcome email.
+ */
+export const APP_ACCOUNTS = {
+  broker: { table: 'brokers', role: 'broker', label: 'broker' },
+  regular_user: { table: 'regular_users', role: 'regular_user', label: 'user' },
+  sales_agent: { table: 'sales_agents', role: 'sales_agent', label: 'sales agent' },
+} as const
+
+export type AppAccount = (typeof APP_ACCOUNTS)[keyof typeof APP_ACCOUNTS]
+
+/** The account kind a request names, or null when it names one that does not exist. */
+export function appAccount(kind: unknown): AppAccount | null {
+  const key = String(kind ?? 'broker')
+  return Object.hasOwn(APP_ACCOUNTS, key) ? APP_ACCOUNTS[key as keyof typeof APP_ACCOUNTS] : null
+}
+
+/**
  * The signed-in portal user making the request, or the reply refusing them.
- * Brokers sign in to the same project from the app, so being signed in is not
- * enough: a broker's own login is turned away.
+ * Brokers, regular users, and sales agents sign in to the same project from the app, so being
+ * signed in is not enough: an app account's own login is turned away.
  */
 export async function portalUser(req: Request, admin: SupabaseClient): Promise<User | Response> {
   const token = (req.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '')
   const { data } = await admin.auth.getUser(token)
-  if (!data?.user) return reply(401, { error: 'Sign in to the portal to manage broker accounts.' })
+  if (!data?.user) return reply(401, { error: 'Sign in to the portal to manage app accounts.' })
 
-  const { count } = await admin
-    .from('brokers')
-    .select('id', { count: 'exact', head: true })
-    .eq('auth_user_id', data.user.id)
-  if (data.user.user_metadata?.role === 'broker' || count) {
-    return reply(403, { error: 'Broker accounts cannot manage other brokers.' })
+  const roles: string[] = Object.values(APP_ACCOUNTS).map((account) => account.role)
+  if (roles.includes(data.user.user_metadata?.role)) {
+    return reply(403, { error: 'App accounts cannot manage other accounts.' })
+  }
+  // A table or column not made yet (before its migration) counts nothing.
+  for (const { table } of Object.values(APP_ACCOUNTS)) {
+    const { count } = await admin
+      .from(table)
+      .select('id', { count: 'exact', head: true })
+      .eq('auth_user_id', data.user.id)
+    if (count) return reply(403, { error: 'App accounts cannot manage other accounts.' })
   }
   return data.user
 }

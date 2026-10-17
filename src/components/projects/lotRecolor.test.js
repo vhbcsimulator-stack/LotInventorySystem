@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { TOLERANCE_DEFAULT, createRegionFinder, paintRegion, regionContains, sampleColor } from './lotRecolor'
+import { TOLERANCE_DEFAULT, createRegionFinder, findPrintedRings, paintRegion, regionContains, ringPixelsIn, sampleColor } from './lotRecolor'
 
 const YELLOW = [250, 247, 166]
 const GREY = [90, 90, 90]
@@ -242,5 +242,106 @@ describe('sampleColor', () => {
   it('returns null off the image', () => {
     const data = new Uint8ClampedArray(4)
     expect(sampleColor({ data, width: 1, height: 1 }, 5, 0)).toBeNull()
+  })
+})
+
+describe('findPrintedRings', () => {
+  // Big enough that a 40 × 40 lot is a small share of it, as on a real map.
+  const SIZE = 120
+  // A 40 × 40 yellow lot with a red ring that runs over its top edge, a black bar inside, and a grey border.
+  function ringedLot() {
+    const width = SIZE
+    const height = SIZE
+    const data = new Uint8ClampedArray(width * height * 4)
+    const set = (x, y, [r, g, b]) => data.set([r, g, b, 255], (y * width + x) * 4)
+    for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) set(x, y, GREY)
+    for (let y = 4; y < 44; y += 1) for (let x = 4; x < 44; x += 1) set(x, y, YELLOW)
+    const ring = []
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const d = Math.hypot(x - 24, y - 20)
+        if (d >= 15 && d <= 17.5) {
+          set(x, y, [225, 30, 30])
+          ring.push(y * width + x)
+        } else if (d > 17.5 && d < 18.5 && x >= 4 && x < 44 && y >= 4 && y < 44) {
+          set(x, y, [250, 200, 140]) // the pink edge where the ring fades into the lot
+        }
+      }
+    }
+    for (let x = 20; x < 28; x += 1) set(x, 22, [0, 0, 0])
+    return { image: { data, width, height }, ring }
+  }
+  const lotBox = { x0: 4, y0: 4, w: 40, h: 40, mask: new Uint8Array(1600).fill(1) }
+
+  it('finds the whole ring, past the lot edge, and paints it out in the lot colour', () => {
+    const { image, ring } = ringedLot()
+    const printed = findPrintedRings(image)
+    const found = new Set(ringPixelsIn(printed, lotBox, SIZE))
+    expect(ring.every((i) => found.has(i))).toBe(true)
+    expect(found.has(22 * SIZE + 24)).toBe(false) // the black bar
+    // Inside the lot, where the ring was, is the lot's yellow again (pink edge included).
+    const at = (x, y) => [...image.data.slice((y * SIZE + x) * 4, (y * SIZE + x) * 4 + 3)]
+    for (const [x, y] of [[24, 36], [9, 20], [24 + 18, 20]]) {
+      at(x, y).forEach((value, c) => expect(Math.abs(value - YELLOW[c])).toBeLessThan(12))
+    }
+    // The black bar is left as it was.
+    expect(at(24, 22)).toEqual([0, 0, 0])
+  })
+
+  it('paints out the faintest blend of the ring into the lot, leaving no trace of the circle', () => {
+    const { image } = ringedLot()
+    const faint = []
+    for (let y = 4; y < 44; y += 1) {
+      for (let x = 4; x < 44; x += 1) {
+        const d = Math.hypot(x - 24, y - 20)
+        // Barely pinker than the lot: too faint to be told as red by colour.
+        if (d >= 18.5 && d < 19.5) {
+          image.data.set([250, 240, 158, 255], (y * SIZE + x) * 4)
+          faint.push(y * SIZE + x)
+        }
+      }
+    }
+    findPrintedRings(image)
+    for (const i of faint) {
+      ;[0, 1, 2].forEach((c) => expect(Math.abs(image.data[i * 4 + c] - YELLOW[c])).toBeLessThan(4))
+    }
+  })
+
+  it('lets a click inside the ring find the whole lot once it is painted out', () => {
+    const { image } = ringedLot()
+    findPrintedRings(image)
+    const region = createRegionFinder(image).at(24 / (SIZE - 1), 20 / (SIZE - 1))
+    expect(regionContains(region, 40 * SIZE + 8)).toBe(true) // a corner outside the ring
+  })
+
+  it('keeps a ring whole where lettering drawn over it cuts it into pieces', () => {
+    const { image, ring } = ringedLot()
+    // Black lettering, with a dark red soft edge, across the ring's bottom — and the piece past it lies outside the lot.
+    for (let y = 33; y <= 39; y += 1) {
+      for (let x = 20; x <= 23; x += 1) image.data.set([0, 0, 0, 255], (y * SIZE + x) * 4)
+      image.data.set([110, 15, 15, 255], (y * SIZE + 24) * 4)
+    }
+    const printed = findPrintedRings(image)
+    const smallLot = { x0: 26, y0: 30, w: 10, h: 10, mask: new Uint8Array(100).fill(1) }
+    const found = new Set(ringPixelsIn(printed, smallLot, SIZE))
+    expect(found.has(36 * SIZE + 24)).toBe(true) // the dark red edge of the lettering
+    expect(ring.filter((i) => i % SIZE < 20).every((i) => found.has(i))).toBe(true) // the ring past the lettering
+  })
+
+  it('puts a border line the ring crossed back across it, and keeps lettering from smearing', () => {
+    const { image } = ringedLot()
+    const px = (x, y) => (y * SIZE + x) * 4
+    // A black line down x = 30 under the ring (the ring covers it at y 34–37).
+    for (let y = 4; y < 44; y += 1) if (image.data[px(30, y) + 1] !== 30) image.data.set([0, 0, 0, 255], px(30, y))
+    findPrintedRings(image)
+    for (let y = 33; y <= 38; y += 1) expect(image.data[px(30, y)]).toBeLessThan(60)
+    // Beside the line, where the ring was, it is the lot's yellow — not smeared dark.
+    expect(image.data[px(26, 36) + 2]).toBeGreaterThan(140)
+  })
+
+  it('finds nothing on a map with no red', () => {
+    const { image } = ringedLot()
+    for (let o = 0; o < image.data.length; o += 4) if (image.data[o + 1] === 30 || image.data[o + 1] === 200) image.data.set(YELLOW, o)
+    expect(findPrintedRings(image)).toBeNull()
   })
 })

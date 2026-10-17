@@ -1,5 +1,6 @@
-// Creates a broker's login for the mobile app, which shares this database, and
-// the matching `brokers` row the portal lists.
+// Creates a broker's, regular user's, or sales agent's login for the mobile
+// app, which shares this database, and the matching `brokers` /
+// `regular_users` / `sales_agents` row the portal lists. The body's `kind` says which ('broker' when missing).
 //
 // The portal cannot do this itself: creating a user from the browser signs the
 // admin out, and the service-role key that can create users must never ship to
@@ -10,7 +11,7 @@
 // to change the temporary password after signing in.
 //
 // Deploy: supabase functions deploy create-broker
-import { adminClient, CORS, jsonBody, portalUser, reply } from '../_shared/portal.ts'
+import { adminClient, appAccount, type AppAccount, CORS, jsonBody, portalUser, reply } from '../_shared/portal.ts'
 import { escapeHtml, sendEmail } from '../_shared/resend.ts'
 
 // Keep this function type-checkable when the project does not include Deno's
@@ -40,13 +41,13 @@ function generatePassword() {
 
 const clean = (value: unknown) => String(value ?? '').trim()
 
-/** The welcome email: the broker's sign-in details, and a request to change the password. */
-function welcomeEmail(firstName: string, email: string, password: string) {
-  const subject = 'Your BHRI broker account'
+/** The welcome email: the account's sign-in details, and a request to change the password. */
+function welcomeEmail(account: AppAccount, firstName: string, email: string, password: string) {
+  const subject = `Your BHRI ${account.label} account`
   const text = [
     `Hi ${firstName},`,
     '',
-    'A broker account was created for you in the BHRI app. Sign in with:',
+    `A ${account.label} account was created for you in the BHRI app. Sign in with:`,
     '',
     `Email: ${email}`,
     `Temporary password: ${password}`,
@@ -64,7 +65,7 @@ function welcomeEmail(firstName: string, email: string, password: string) {
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:28px">
       <tr><td>
         <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to BHRI, ${name}</h1>
-        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A broker account was created for you in the BHRI app. Sign in with:</p>
+        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A ${account.label} account was created for you in the BHRI app. Sign in with:</p>
         <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;background:#f3f4f6;border-radius:8px;padding:14px;font-size:14px">
           <tr><td style="padding:4px 0;color:#6b7280;width:150px">Email</td><td style="padding:4px 0;font-weight:600">${escapeHtml(email)}</td></tr>
           <tr><td style="padding:4px 0;color:#6b7280">Temporary password</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(password)}</td></tr>
@@ -90,7 +91,9 @@ Deno.serve(async (req: Request) => {
   if (caller instanceof Response) return caller
 
   const body = await jsonBody(req)
-  if (!body) return reply(400, { error: 'Send the broker details as JSON.' })
+  if (!body) return reply(400, { error: 'Send the account details as JSON.' })
+  const account = appAccount(body.kind)
+  if (!account) return reply(400, { error: 'Unknown account kind.' })
   const firstName = clean(body.firstName)
   const lastName = clean(body.lastName)
   const mobileNumber = clean(body.mobileNumber)
@@ -115,7 +118,7 @@ Deno.serve(async (req: Request) => {
       last_name: lastName,
       full_name: `${firstName} ${lastName}`,
       mobile_number: mobileNumber,
-      role: 'broker',
+      role: account.role,
       must_change_password: true,
     },
   })
@@ -127,7 +130,7 @@ Deno.serve(async (req: Request) => {
   }
 
   const { data: row, error: insertError } = await admin
-    .from('brokers')
+    .from(account.table)
     .insert({
       first_name: firstName,
       last_name: lastName,
@@ -139,21 +142,21 @@ Deno.serve(async (req: Request) => {
     .select('id')
     .single()
 
-  // No half-made brokers: without its row, the login is removed again.
+  // No half-made accounts: without its row, the login is removed again.
   if (insertError) {
     await admin.auth.admin.deleteUser(created.user.id)
     const taken = insertError.code === '23505'
     return reply(taken ? 409 : 500, {
-      error: taken ? `A broker with the email ${email} already exists.` : insertError.message,
+      error: taken ? `A ${account.label} with the email ${email} already exists.` : insertError.message,
     })
   }
 
-  // The broker's sign-in details, sent through Resend. Without them the broker
+  // The sign-in details, sent through Resend. Without them the new account
   // has no way in, so if the email cannot be sent nothing is kept.
   try {
-    await sendEmail({ to: email, ...welcomeEmail(firstName, email, password) })
+    await sendEmail({ to: email, ...welcomeEmail(account, firstName, email, password) })
   } catch (err) {
-    await admin.from('brokers').delete().eq('id', row.id)
+    await admin.from(account.table).delete().eq('id', row.id)
     await admin.auth.admin.deleteUser(created.user.id)
     const message = err instanceof Error ? err.message : String(err)
     return reply(/too many/i.test(message) ? 429 : 502, {

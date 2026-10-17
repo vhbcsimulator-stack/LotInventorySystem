@@ -102,7 +102,8 @@ export function planStatusUpdate(shapes, paints, lotsByKey) {
   const claimed = new Map() // lot id → label that set it, so two shapes cannot fight over one lot
   for (const { label, paint, matches, missing } of entries) {
     const { status: fill, reserveType } = paint
-    const status = LOT_STATUS_BY_FILL[fill]
+    // A lot only cleared of its printed (sold) circle is open again: Available.
+    const status = fill ? LOT_STATUS_BY_FILL[fill] : paint.eraseRing ? 'available' : undefined
     if (!status) {
       skipped.push({ label, reason: 'This color has no matching status — the status is not changed.' })
       continue

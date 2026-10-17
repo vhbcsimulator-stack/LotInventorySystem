@@ -28,6 +28,24 @@ describe('planStatusUpdate', () => {
     expect(plan.skipped).toEqual([])
   })
 
+  it('turns a lot cleared of its printed sold circle Available', () => {
+    const plan = planStatusUpdate(
+      shapes,
+      [{ shapeId: 1, eraseRing: true }],
+      lots([['b1l3', [{ id: 10, lotNo: 'B1 L3', status: 'sold' }]]]),
+    )
+    expect(plan.changes).toEqual([{ id: 10, lotNo: 'B1 L3', label: 'B1 L3', from: 'sold', status: 'available' }])
+  })
+
+  it('keeps the colour painted on a lot whose circle was also removed', () => {
+    const plan = planStatusUpdate(
+      shapes,
+      [{ shapeId: 1, status: 'reserved', eraseRing: true }],
+      lots([['b1l3', [{ id: 10, lotNo: 'B1 L3', status: 'sold' }]]]),
+    )
+    expect(plan.changes[0].status).toBe('reserved')
+  })
+
   it('reads a "C L1" label as the C-prefixed commercial lot', () => {
     const commercialShapes = [
       { id: 1, label: 'C L1' },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { frameMisfit, lotShapes, parseTransform, pictureSvg, shadeColor } from './svgMaps'
+import { frameMisfit, lotShapes, parseTransform, pictureSvg, shadeColor, strokePath } from './svgMaps'
 
 // The start of the MVLC Phase 2 East map as exported: one picture at a rounded scale.
 const PHASE_2_EAST = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" id="Layer_1" version="1.1" viewBox="0 0 2048 1448" width="2048" height="1448"><metadata>
@@ -83,5 +83,15 @@ describe('pictureSvg', () => {
   it('refuses anything but an embedded picture', () => {
     expect(() => pictureSvg('https://example.com/map.png', 10, 10)).toThrow()
     expect(() => pictureSvg(jpeg, 0, 10)).toThrow()
+  })
+})
+
+describe('strokePath', () => {
+  it('draws a brush stroke through its points', () => {
+    expect(strokePath([[1, 2], [3.25, 4], [5, 6.06]])).toBe('M1 2L3.3 4L5 6.1')
+  })
+
+  it('draws a single click as a dot its round cap makes visible', () => {
+    expect(strokePath([[7, 8]])).toBe('M7 8L7 8')
   })
 })

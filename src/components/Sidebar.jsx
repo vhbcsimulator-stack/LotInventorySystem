@@ -8,15 +8,19 @@ import {
   LuMegaphone,
   LuBriefcaseBusiness,
   LuContactRound,
+  LuInbox,
   LuUsers,
+  LuUsersRound
 } from 'react-icons/lu'
 
 const DEFAULT_NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: LuLayoutDashboard },
   { key: 'projects', label: 'Projects & Lots', icon: LuBuilding2 },
   { key: 'clients', label: 'Clients', icon: LuUsers },
+  { key: 'applications', label: 'Pending Applications', icon: LuInbox },
   { key: 'brokers', label: 'Brokers', icon: LuContactRound },
   { key: 'salesAgents', label: 'Sales Agents', icon: LuBriefcaseBusiness },
+  { key: 'regularUsers', label: 'Regular Users', icon: LuUsersRound },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
 ]
 

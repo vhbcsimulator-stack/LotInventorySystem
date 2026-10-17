@@ -18,6 +18,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 export function columnLabel(key) {
   if (/^cts_?doas$/i.test(key)) return 'CTS/DOAS'
   if (/^created_at$/i.test(key)) return 'Date Added'
+  if (/^broker_name$/i.test(key)) return 'Account Name'
   return key
     .replace(/_/g, ' ')
     .replace(/\b(tcp|id|cts|doas|sqm)\b/gi, (word) => word.toUpperCase())
@@ -40,9 +41,74 @@ function visibleColumns(rows) {
 }
 
 /**
- * Every client row, newest first when the table has created_at. Resolves
- * { clients, columns, source }, where `columns` is [{ key, label }]. Never
- * throws: failures resolve empty with a `source` and the database's message.
+ * The kinds of app account a client can belong to, as the Clients page groups
+ * them, with the table each is kept in.
+ */
+export const SELLER_KINDS = [
+  { value: 'broker', label: 'Broker', plural: 'Brokers', table: 'brokers' },
+  { value: 'regular_user', label: 'Regular User', plural: 'Regular Users', table: 'regular_users' },
+  { value: 'sales_agent', label: 'Sales Agent', plural: 'Sales Agents', table: 'sales_agents' },
+]
+
+// The column added to each client for the kind of account it belongs to.
+export const ACCOUNT_TYPE_KEY = 'account_type'
+
+/** A name or email reduced for matching: no accents, case, or punctuation. */
+const matchKey = (value) =>
+  String(value ?? '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9@.]+/g, ' ')
+    .trim()
+
+/**
+ * Every app account as { kind, authUserId, name, email }. A table that cannot
+ * be read (not made yet, or its login column missing) gives none.
+ */
+async function fetchSellerAccounts() {
+  const perKind = await Promise.all(
+    SELLER_KINDS.map(async ({ value, table }) => {
+      try {
+        const { data } = unwrap(await supabase.from(table).select('*'))
+        return data.map((row) => ({
+          kind: value,
+          authUserId: row.auth_user_id ?? null,
+          name: `${String(row.first_name ?? '').trim()} ${String(row.last_name ?? '').trim()}`.trim(),
+          email: String(row.email ?? '').trim(),
+        }))
+      } catch (err) {
+        console.error(`[clients] no ${table} to group by:`, err)
+        return []
+      }
+    }),
+  )
+  return perKind.flat()
+}
+
+/**
+ * The kind of account a client belongs to ('broker', 'regular_user',
+ * 'sales_agent'), or '' when it cannot be told. `broker_id` is the account's
+ * app login, so it decides; without it, `broker_name` is matched to an
+ * account's name or email, but only when exactly one account has it.
+ */
+export function sellerKindOf(client, accounts) {
+  if (client.broker_id) {
+    const linked = accounts.find((account) => account.authUserId && account.authUserId === client.broker_id)
+    if (linked) return linked.kind
+  }
+  const name = matchKey(client.broker_name)
+  if (!name) return ''
+  const named = accounts.filter((account) => matchKey(account.name) === name || matchKey(account.email) === name)
+  return named.length === 1 ? named[0].kind : ''
+}
+
+/**
+ * Every client row, newest first when the table has created_at, each with an
+ * `account_type` ("Broker", "Regular User", "Sales Agent", or '') shown beside
+ * Broker Name. Resolves { clients, columns, source }, where `columns` is
+ * [{ key, label }]. Never throws: failures resolve empty with a `source` and
+ * the database's message.
  */
 export async function fetchClients() {
   if (!supabase) return { clients: [], columns: [], source: SOURCE.NOT_CONFIGURED }
@@ -58,6 +124,7 @@ export async function fetchClients() {
       () => fetchAllRows(CLIENTS_TABLE, '*'),
       async () => unwrap(await supabase.from(CLIENTS_TABLE).select('*').limit(1000)).data,
     ]
+    const accountsRequest = fetchSellerAccounts()
     let rows
     for (const [index, attempt] of attempts.entries()) {
       try {
@@ -67,8 +134,17 @@ export async function fetchClients() {
         if (index === attempts.length - 1 || !/created_at|\bid\b/.test(err.message)) throw err
       }
     }
-    const clients = rows.map((row, index) => ({ ...row, _key: String(row.id ?? row.uuid ?? index) }))
+    const accounts = await accountsRequest
+    const labels = Object.fromEntries(SELLER_KINDS.map((kind) => [kind.value, kind.label]))
+    const clients = rows.map((row, index) => ({
+      ...row,
+      [ACCOUNT_TYPE_KEY]: labels[sellerKindOf(row, accounts)] ?? '',
+      _key: String(row.id ?? row.uuid ?? index),
+    }))
     const columns = visibleColumns(rows).map((key) => ({ key, label: columnLabel(key) }))
+    // Account Type sits right after Broker Name (or last, when there is none).
+    const after = columns.findIndex((column) => column.key === 'broker_name')
+    columns.splice(after === -1 ? columns.length : after + 1, 0, { key: ACCOUNT_TYPE_KEY, label: 'Account Type' })
     return { clients, columns, source: SOURCE.DATABASE }
   } catch (err) {
     console.error('[clients] falling back to an empty list:', err)
@@ -77,7 +153,7 @@ export async function fetchClients() {
 }
 
 /** The tables fetchClients reads, so its Refresh button knows what to check. */
-fetchClients.tables = () => [CLIENTS_TABLE]
+fetchClients.tables = () => [CLIENTS_TABLE, ...SELLER_KINDS.map((kind) => kind.table)]
 
 /**
  * Who a sold lot can be sold to: every client, A–Z, as { clients: [{ id, name,
