@@ -151,8 +151,8 @@ function rasterizeRings(rings, x0, y0, bw, bh) {
  * getImageData). It keeps scratch buffers between calls, so finding every lot
  * on a large map costs no large allocations after the first.
  *
- * Returns { at(fx, fy, { tolerance }), inPolygon(rings, { tolerance }),
- * inPolygonExact(rings, { tolerance }) }, the
+ * Returns { at(fx, fy, { tolerance }), bucket(rings, { tolerance }),
+ * inPolygon(rings, { tolerance }), inPolygonExact(rings, { tolerance }) }, the
  * tolerance defaulting to TOLERANCE_DEFAULT. Each resolves the lot as
  * { seed, pixels: Int32Array (sorted), shades: Float32Array } — the pixel
  * indices to repaint and each one's brightness factor k — or null when there is
@@ -412,7 +412,7 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
    * the flood may run past it by the polygon reach (see POLYGON_REACH), since
    * hand-drawn outlines rarely sit exactly on the printed lot lines.
    */
-  function inPolygon(rings, { tolerance = TOLERANCE_DEFAULT } = {}) {
+  function inPolygon(rings, { tolerance = TOLERANCE_DEFAULT, bounded = true } = {}) {
     const points = rings.flat()
     if (points.length < 3) return null
     let area = 0
@@ -513,6 +513,16 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
     }
     const color = sum.map((value) => value / seeds.length)
 
+    /*
+     * Unbounded, like a paint bucket: the flood runs through every pixel of the
+     * lot's colour joined to it, however far past the outline, and stops only at
+     * the printed lines. One that leaks out over the map (a gap in a line onto a
+     * background of the same colour) falls back to the outline's reach.
+     */
+    if (!bounded) {
+      const flooded = grow(seeds, color, { limit: total * MAX_REGION_SHARE, minPixels: 1, tolerance })
+      if (flooded) return flooded
+    }
     const allowed = (i) => {
       const c = (i % width) - x0
       const r = ((i / width) | 0) - y0
@@ -520,6 +530,9 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
     }
     return grow(seeds, color, { allowed, minPixels: 1, tolerance })
   }
+
+  /** The lot an annotation sits in, filled like a paint bucket from inside its outline (see inPolygon). */
+  const bucketFill = (rings, { tolerance = TOLERANCE_DEFAULT } = {}) => inPolygon(rings, { tolerance, bounded: false })
 
   /**
    * The lot exactly as an annotation outlines it: only pixels inside the
@@ -597,7 +610,7 @@ export function createRegionFinder(image, { scale = 1 } = {}) {
     return { seed: fill[0], pixels: Int32Array.from(pixels), shades: Float32Array.from(shades), fill: Int32Array.from(fill) }
   }
 
-  return { at, inPolygon, inPolygonExact }
+  return { at, bucket: bucketFill, inPolygon, inPolygonExact }
 }
 
 /** A pixel plainly the red of a printed ring: bright red, little green or blue. */

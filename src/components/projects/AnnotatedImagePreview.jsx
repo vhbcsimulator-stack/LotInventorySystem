@@ -15,6 +15,7 @@ import {
   LuPipette,
   LuSave,
   LuShapes,
+  LuPaintBucket,
   LuSlidersHorizontal,
   LuRedo2,
   LuTriangleAlert,
@@ -87,6 +88,9 @@ const EYEDROPPER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
 const MARK_COLORS = ['#111827', '#E11D1D', '#1D4ED8', '#16A34A', '#F59E0B', '#FFFFFF']
 /** The colours offered for the rings of circled lots, red (the default) first; any other can be picked too. */
 const RING_COLORS = [LOT_RING_COLOR, '#111827', '#1D4ED8', '#16A34A', '#F59E0B', '#7C3AED']
+// A circled lot's background under its ring: Regular lots are white, Prime ones the legend's yellow.
+const REGULAR_BACKGROUND = '#FFFFFF'
+const PRIME_BACKGROUND = MAP_LOT_FILL.find(({ value }) => value === 'prime').color
 /** Every new text box starts in black, whatever colour the brush was last in. */
 const TEXT_DEFAULT_COLOR = '#111827'
 /** The size marks start at: small. */
@@ -671,20 +675,30 @@ export default function AnnotatedImagePreview({
   // How far each painted lot's colour reaches; see the toolbar's Tolerance control.
   const [tolerance, setTolerance] = useState(TOLERANCE_DEFAULT)
   /*
-   * How an annotated lot is colored: exactly inside its polygon (the default),
-   * or following the printed lot lines out from it — better when outlines were
-   * drawn well inside the lines. Clicked lots always follow the printed lines.
+   * How an annotated lot is colored: like a paint bucket (the default) — its
+   * whole colour flooded out to the printed lot lines — or following those
+   * lines only near its outline, or exactly inside its polygon. Clicked lots
+   * are always bucket-filled.
    */
-  const [shapeMode, setShapeMode] = useState('polygon')
+  const [shapeMode, setShapeMode] = useState('bucket')
   // Statuses this project marks with a red ring rather than a colour (ERHD's Sold), and how thick the rings are.
   const circled = lotTermsFor(projectCode).circled
   const [ringThickness, setRingThickness] = useState(1)
   const [ringColor, setRingColor] = useState(LOT_RING_COLOR)
   const [reserveType, setReserveType] = useState(initialPaints.at(-1)?.reserveType ?? RESERVE_TYPES[0].value)
-  // What a click paints: the brush's colour, and for Reserved who it is held for.
+  // Whether a painted lot is covered whole, its lettering too, rather than keeping its words.
+  const [coverText, setCoverText] = useState(false)
+  // The colour a circled lot (ERHD's Sold) is filled with under its ring: Regular white by default.
+  const [ringBackground, setRingBackground] = useState(REGULAR_BACKGROUND)
+  // What a click paints: the brush's colour, for Reserved who it is held for, a circled lot's background, and whether it covers the words.
   const brushPaint = useMemo(
-    () => (brush === 'reserved' ? { status: brush, reserveType } : { status: brush }),
-    [brush, reserveType],
+    () => ({
+      status: brush,
+      ...(brush === 'reserved' ? { reserveType } : {}),
+      ...(circled.includes(brush) ? { background: ringBackground } : {}),
+      ...(coverText ? { solid: true } : {}),
+    }),
+    [brush, reserveType, coverText, circled, ringBackground],
   )
   /*
    * The colour each status paints: the default legend, or the colours read off
@@ -2592,6 +2606,10 @@ export default function AnnotatedImagePreview({
                       onRingThickness={setRingThickness}
                       ringColor={ringColor}
                       onRingColor={setRingColor}
+                      coverText={coverText}
+                      onCoverText={setCoverText}
+                      ringBackground={ringBackground}
+                      onRingBackground={setRingBackground}
                       shapeMode={shapes.length ? shapeMode : null}
                       onShapeMode={setShapeMode}
                       count={paints.length + marks.length}
@@ -3858,7 +3876,13 @@ function PaintToolbar({
   // The eyedropper for the ring colour, and whether it waits for a click on the map.
   pickingRingColor = false,
   onPickRingColor,
-  // 'polygon' | 'lines' for a map with annotations; null hides the choice.
+  // Whether painted lots are covered whole, lettering too, and its toggle.
+  coverText = false,
+  onCoverText,
+  // The colour a circled lot is filled with under its ring, and its picker.
+  ringBackground = REGULAR_BACKGROUND,
+  onRingBackground,
+  // 'bucket' | 'polygon' | 'lines' for a map with annotations; null hides the choice.
   shapeMode,
   onShapeMode,
   count,
@@ -4181,6 +4205,40 @@ function PaintToolbar({
           )}
         </Flex>
       ) : null}
+      {/* A circled lot's background: Regular (white), Prime (the map's yellow), or any colour. */}
+      {onRingBackground && circled.includes(brush) ? (
+        <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Background">
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            Background
+          </Text>
+          {[
+            { value: REGULAR_BACKGROUND, label: 'Regular' },
+            { value: palette.prime ?? PRIME_BACKGROUND, label: 'Prime' },
+          ].map(({ value, label }) =>
+            chip(`background-${label}`, label, <Swatch color={value} />, ringBackground.toUpperCase() === value.toUpperCase(), () => onRingBackground(value)),
+          )}
+          <Flex as="label" align="center" gap="6px" ml="4px" fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} cursor="pointer">
+            Custom
+            <input
+              type="color"
+              value={ringBackground.toLowerCase()}
+              onChange={(event) => onRingBackground(event.target.value.toUpperCase())}
+              aria-label="Custom background color"
+              style={{ width: '30px', height: '24px', padding: 0, border: 'none', background: 'none', cursor: 'pointer' }}
+            />
+          </Flex>
+        </Flex>
+      ) : null}
+      {/* A colour brush (not a mark or eraser) can cover the lot's words too. */}
+      {onCoverText && palette[brush] ? (
+        <Flex mt="8px" align="center" gap="6px" flexWrap="wrap" role="group" aria-label="Lettering">
+          <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
+            Lettering
+          </Text>
+          {chip('keep-text', 'Keep words', null, !coverText, () => onCoverText(false))}
+          {chip('cover-text', 'Color over words', <Icon as={LuPaintBucket} boxSize="13px" />, coverText, () => onCoverText(true))}
+        </Flex>
+      ) : null}
       {/*
         * The settings that are not needed on every click — the rings, the legend
         * colours, and the finer options — each behind a show/hide button, with a
@@ -4396,6 +4454,7 @@ function PaintToolbar({
           <Text fontFamily={FONT} fontSize="12px" fontWeight="600" color={COLORS.subtle} mr="4px">
             Annotated lots (optional)
           </Text>
+          {chip('bucket', 'Bucket fill', <Icon as={LuPaintBucket} boxSize="13px" />, shapeMode === 'bucket', onShapeMode)}
           {chip('polygon', 'Follow polygon', <Icon as={LuShapes} boxSize="13px" />, shapeMode === 'polygon', onShapeMode)}
           {chip('lines', 'Follow lot lines', null, shapeMode === 'lines', onShapeMode)}
         </Flex>

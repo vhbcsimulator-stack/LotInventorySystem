@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { TOLERANCE_DEFAULT, createRegionFinder, findPrintedRings, paintRegion, regionContains, ringPixelsIn, sampleColor } from './lotRecolor'
+import { lotMask } from '@/lib/svgMaps'
 
 const YELLOW = [250, 247, 166]
 const GREY = [90, 90, 90]
@@ -186,6 +187,53 @@ describe('lot recolouring', () => {
     expect(pixelAt(painted, 14, 17)).toEqual([0, 0, 0]) // text stays black
     expect(pixelAt(painted, 30, 20)).toEqual(GREY) // border line untouched
     expect(pixelAt(painted, 31, 20)).toEqual(YELLOW) // the next lot is not bled into
+  })
+})
+
+describe('bucket', () => {
+  /** One long lot, its annotation covering only its left end, on a map large enough that it is a lot's share. */
+  function longLot() {
+    const width = 400
+    const height = 300
+    const data = new Uint8ClampedArray(width * height * 4)
+    const set = (x, y, [r, g, b]) => data.set([r, g, b, 255], (y * width + x) * 4)
+    for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) set(x, y, WOOD)
+    for (let y = 10; y <= 50; y += 1) {
+      for (let x = 10; x <= 180; x += 1) set(x, y, x === 10 || x === 180 || y === 10 || y === 50 ? BLACK : YELLOW)
+    }
+    return { data, width, height }
+  }
+  const outline = [[[20, 20], [50, 20], [50, 40], [20, 40]]]
+
+  it('floods the whole lot from a small annotation, out to the printed lines', () => {
+    const image = longLot()
+    const region = createRegionFinder(image).bucket(outline)
+    expect(regionContains(region, 30 * image.width + 175)).toBe(true) // far end of the lot
+    expect(regionContains(region, 30 * image.width + 190)).toBe(false) // past the line
+    // Bounded by the outline's reach, the far end is left as it was.
+    expect(regionContains(createRegionFinder(image).inPolygon(outline), 30 * image.width + 175)).toBe(false)
+  })
+
+  it('covers the words when painted solid, leaving the border line whole', () => {
+    const image = longLot()
+    const { width, height } = image
+    for (let y = 25; y < 35; y += 1) for (let x = 60; x < 70; x += 1) image.data.set([...BLACK, 255], (y * width + x) * 4)
+    const region = createRegionFinder(image).bucket(outline)
+    const inside = ({ x0, y0, w, mask }, x, y) => mask[(y - y0) * w + x - x0] === 1
+    const solid = lotMask(region, width, height, { solid: true })
+    expect(inside(solid, 65, 30)).toBe(true) // the lettering is covered
+    expect(inside(solid, 100, 30)).toBe(true) // and the lot
+    expect(inside(solid, 180, 30)).toBe(false) // the border line is not
+    expect(inside(lotMask(region, width, height), 180, 30)).toBe(true) // as the usual recolour's clip takes it
+  })
+
+  it('falls back to the outline when the flood leaks over the map', () => {
+    const image = makeMap()
+    // An outline on the open wood: flooding would take the whole picture.
+    const region = createRegionFinder(image).bucket([[[100, 60], [130, 60], [130, 90], [100, 90]]])
+    expect(region).not.toBeNull()
+    expect(regionContains(region, 75 * image.width + 115)).toBe(true)
+    expect(regionContains(region, 110 * image.width + 190)).toBe(false)
   })
 })
 

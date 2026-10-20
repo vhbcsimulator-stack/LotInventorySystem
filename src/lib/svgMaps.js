@@ -311,9 +311,10 @@ export function pixelsPath(list, width) {
  * Recolour lots in an SVG map, keeping it a vector the Flutter app can draw.
  *
  * `width` × `height` is the canvas the regions were found on. Each of `lots` is
- * { region, rgb, fill, ring }: a region from lotRecolor, the new colour, the
- * lot's colour as it appears on the map, and — for a circled lot, which keeps
- * its colour — the ring drawn over it ({ cx, cy, r, strokeWidth }, see lotRing).
+ * { region, rgb, fill, ring, solid }: a region from lotRecolor, the new colour,
+ * the lot's colour as it appears on the map, — for a circled lot, which keeps
+ * its colour — the ring drawn over it ({ cx, cy, r, strokeWidth }, see lotRing),
+ * and whether it is painted solid over its lettering.
  *
  * A lot drawn as its own shape has that shape's fill changed. Any other lot
  * (one shape covers many lots, or the SVG wraps a picture) gets its new colour
@@ -361,7 +362,7 @@ export function recolorSvg(text, { width, height, lots: painted, marks = [], mar
     let shapes = 0
     let paths = 0
 
-    for (const { region, rgb, fill, ring, erase } of lots) {
+    for (const { region, rgb, fill, ring, erase, solid } of lots) {
       const lotBounds = boundsOf({ pixels: region.fill ?? region.pixels }, width)
       // The map as seen already shows an earlier save's colour here: that one gives way.
       for (const group of earlier) {
@@ -426,7 +427,11 @@ export function recolorSvg(text, { width, height, lots: painted, marks = [], mar
       // Only its printed ring erased: the lot keeps its colour.
       if (!rgb && !ring) continue
 
-      // A circled lot keeps its colour and gets a red ring drawn over it.
+      /*
+       * A circled lot gets a red ring drawn over it, and keeps its colour — or,
+       * with a background chosen (`rgb`), is recoloured below as any lot is; the
+       * rings are moved over everything at the end.
+       */
       if (ring) {
         if (!layer) {
           layer = doc.createElementNS(SVG_NS, 'g')
@@ -447,6 +452,26 @@ export function recolorSvg(text, { width, height, lots: painted, marks = [], mar
         circle.setAttribute('stroke', ring.color ?? LOT_RING_COLOR)
         circle.setAttribute('stroke-width', String(+strokeWidth.toFixed(2)))
         group.appendChild(circle)
+        layer.appendChild(group)
+        paths += 1
+        if (!rgb) continue
+      }
+
+      // Painted over its lettering: one flat shape over the whole lot, words and all.
+      if (solid) {
+        if (!layer) {
+          layer = doc.createElementNS(SVG_NS, 'g')
+          layer.setAttribute(COLORS_ATTR, '')
+        }
+        const group = doc.createElementNS(SVG_NS, 'g')
+        group.setAttribute(LOT_ATTR, '')
+        group.setAttribute('transform', toUser)
+        group.setAttribute('data-seed', `${region.seed % width},${(region.seed / width) | 0}`)
+        group.setAttribute('data-canvas', `${width}x${height}`)
+        const path = doc.createElementNS(SVG_NS, 'path')
+        path.setAttribute('fill', hex(rgb))
+        path.setAttribute('d', maskPath(lotMask(region, width, height, { solid: true })))
+        group.appendChild(path)
         layer.appendChild(group)
         paths += 1
         continue
@@ -766,9 +791,13 @@ function boundsOf(region, width) {
  * even of the same colour, are left out, and a neighbouring lot or the road is
  * never tinted.
  *
+ * With `solid` (a lot painted over its lettering), the edge takes in only the
+ * soft, light pixels of the border line, not its dark core, so a lot filled
+ * solid up to its mask keeps its border line whole.
+ *
  * Returns { x0, y0, w, h, mask } — mask is 1 inside, row by row.
  */
-export function lotMask(region, width, height) {
+export function lotMask(region, width, height, { solid = false } = {}) {
   const bounds = boundsOf(region, width)
   const pad = 1
   const x0 = Math.max(0, bounds.x0 - pad)
@@ -781,7 +810,8 @@ export function lotMask(region, width, height) {
   for (const i of region.fill ?? region.pixels) mask[cell(i)] = 1
   // The border line's soft inside edge: region pixels sharing a side with the fill.
   const edge = []
-  region.pixels.forEach((i) => {
+  region.pixels.forEach((i, n) => {
+    if (solid && region.shades && region.shades[n] < DARK_SKIP) return
     const c = cell(i)
     const x = c % w
     if ((x > 0 && mask[c - 1] === 1) || (x < w - 1 && mask[c + 1] === 1) || mask[c - w] === 1 || mask[c + w] === 1) edge.push(c)

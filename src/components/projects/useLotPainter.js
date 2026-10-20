@@ -131,8 +131,13 @@ export default function useLotPainter({
   paints,
   tolerance = TOLERANCE_DEFAULT,
   palette = DEFAULT_PALETTE,
-  // How an annotated lot is found: 'polygon' colors exactly inside its outline; 'lines' follows the printed lot lines from it.
-  shapeMode = 'polygon',
+  /*
+   * How an annotated lot is found: 'bucket' floods its whole colour like a
+   * paint bucket, stopping only at the printed lines; 'lines' follows the
+   * printed lines but no further than near its outline; 'polygon' colors
+   * exactly inside its outline.
+   */
+  shapeMode = 'bucket',
   // Statuses marked with a red ring around the lot rather than recoloured (ERHD's Sold).
   circled = NO_STATUSES,
   // How thick those rings are, as a multiple of the default.
@@ -187,7 +192,7 @@ export default function useLotPainter({
       const shape = paint.shapeId !== undefined
       const key = `${keyOf(paint)}@${tolerance}${shape ? `/${shapeMode}` : ''}`
       if (!pixels.regions.has(key)) {
-        const findShape = shapeMode === 'lines' ? pixels.finder.inPolygon : pixels.finder.inPolygonExact
+        const findShape = { bucket: pixels.finder.bucket, lines: pixels.finder.inPolygon }[shapeMode] ?? pixels.finder.inPolygonExact
         const region =
           shape
             ? rings.has(paint.shapeId)
@@ -226,7 +231,8 @@ export default function useLotPainter({
           })
         : null
       const fill = [data[o], data[o + 1], data[o + 2]]
-      const rgb = paint.status ? fillRgb[paint.status] : null
+      // A circled lot takes its chosen background (Regular white, Prime yellow…) under the ring, or keeps its colour.
+      const rgb = ring ? (paint.background ? hexToRgb(paint.background) : null) : paint.status ? fillRgb[paint.status] : null
       /*
        * Every painted lot on a map with printed rings (ERHD) loses the ones it
        * carries: each ring pixel is drawn as the map shows it with the ring
@@ -239,8 +245,8 @@ export default function useLotPainter({
         if (!pixels.erased.has(region)) pixels.erased.set(region, ringPixelsIn(pixels.printed, lotMask(region, W, H), W))
         const list = pixels.erased.get(region)
         if (list.length) {
-          // A circled lot keeps its colour, so only the ring goes.
-          const recolor = ring ? null : rgb
+          // A circled lot with no background keeps its colour, so only the ring goes.
+          const recolor = rgb
           /*
            * Where the painted-out ring is near the lot's own colour it takes one
            * flat colour — the lot's new one, or the colour it has — so no trace
@@ -278,18 +284,26 @@ export default function useLotPainter({
           ]
         }
       }
-      lots.unshift({ paint, region, rgb, fill, ring, erase })
+      // Painted over its lettering too: one flat colour, words and all.
+      const solid = Boolean(paint.solid && rgb)
+      lots.unshift({ paint, region, rgb, fill, ring, erase, solid })
     }
     return lots
   }, [pixels, paints, regionOf, fillRgb, circled, ringThickness, ringColor, W, H, sx, sy])
 
-  /** The erased printed rings, as flat patches for the preview to draw over the map. */
+  /**
+   * The erased printed rings, and lots painted solid over their lettering, as
+   * flat patches for the preview to draw over the map.
+   */
   const patches = useMemo(
     () =>
-      painted.flatMap(({ region, erase }) =>
-        (erase ?? []).map((part, n) => ({ key: `${region.seed}-${n}`, d: pixelsPath(part.pixels, W), fill: part.fill, scale: [sx, sy] })),
-      ),
-    [painted, W, sx, sy],
+      painted.flatMap(({ region, erase, solid, rgb }) => [
+        ...(erase ?? []).map((part, n) => ({ key: `${region.seed}-${n}`, d: pixelsPath(part.pixels, W), fill: part.fill, scale: [sx, sy] })),
+        ...(solid
+          ? [{ key: `${region.seed}-solid`, d: maskPath(lotMask(region, W, H, { solid: true })), fill: rgbToHex(rgb), scale: [sx, sy] }]
+          : []),
+      ]),
+    [painted, W, H, sx, sy],
   )
 
   /**
@@ -322,8 +336,9 @@ export default function useLotPainter({
    */
   const layers = useMemo(() => {
     const byPair = new Map()
-    for (const { region, rgb, fill, ring } of painted) {
-      if (ring || !rgb) continue
+    for (const { region, rgb, fill, solid } of painted) {
+      // A solid lot is drawn as a flat patch instead (see patches).
+      if (!rgb || solid) continue
       const key = `${fill.join('-')}_${rgb.join('-')}`
       if (!byPair.has(key)) {
         byPair.set(key, { key, matrix: recolorMatrix(fill, rgb), paths: [], box: [Infinity, Infinity, -Infinity, -Infinity] })
