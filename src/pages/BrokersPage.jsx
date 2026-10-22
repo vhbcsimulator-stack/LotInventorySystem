@@ -22,6 +22,8 @@ import EmptyState from '@/components/EmptyState'
 import { Card } from '@/components/ui-kit/Card'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
+import Controlled, { ControlledMenuItem } from '@/components/Controlled'
+import { ACCOUNT_PAGE, buttonControl } from '@/lib/portalControls'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
 import { ACCOUNT_KINDS, createAccount, deleteAccount, fetchAccounts, setBrokerIdPicture, validateBroker } from '@/data/brokersData'
@@ -551,7 +553,7 @@ function BrokerProfileDialog({ broker, copy, onClose }) {
 }
 
 /** Row actions behind a three-dot button, the same menu the announcements and lots use. */
-function BrokerActions({ broker, onRemove }) {
+function BrokerActions({ broker, page, onRemove }) {
   return (
     <Menu.Root onSelect={({ value }) => value === 'remove' && onRemove()}>
       <Menu.Trigger
@@ -574,10 +576,10 @@ function BrokerActions({ broker, onRemove }) {
       <Portal>
         <Menu.Positioner>
           <Menu.Content minW="170px">
-            <Menu.Item value="remove" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+            <ControlledMenuItem control={buttonControl(page, 'remove')} value="remove" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
               <Icon as={LuUserMinus} boxSize="14px" />
               Remove
-            </Menu.Item>
+            </ControlledMenuItem>
           </Menu.Content>
         </Menu.Positioner>
       </Portal>
@@ -818,7 +820,7 @@ function HeaderCell({ children, ...rest }) {
   )
 }
 
-function BrokerRow({ broker, sells, onProfile, onRemove }) {
+function BrokerRow({ broker, page, sells, onProfile, onRemove }) {
   return (
     <Grid
       role="row"
@@ -862,6 +864,7 @@ function BrokerRow({ broker, sells, onProfile, onRemove }) {
         {sells ? formatPeso(broker.totalTcp) : formatShortDate(broker.createdAt)}
       </Text>
       <Flex role="cell" align="center" justify="center" gap="6px">
+        <Controlled id={buttonControl(page, 'profile')}>
         <Box
           as="button"
           type="button"
@@ -881,7 +884,8 @@ function BrokerRow({ broker, sells, onProfile, onRemove }) {
         >
           Profile
         </Box>
-        {onRemove ? <BrokerActions broker={broker} onRemove={onRemove} /> : null}
+        </Controlled>
+        {onRemove ? <BrokerActions broker={broker} page={page} onRemove={onRemove} /> : null}
       </Flex>
     </Grid>
   )
@@ -1040,23 +1044,27 @@ export function AccountsPage({ kind = 'broker', prefill, applicationId, idPictur
             />
           </Flex>
           <Flex align="center" gap="8px">
-            <ToolbarButton
-              variant="primary"
-              icon={LuUserPlus}
-              onClick={() => setAdding(true)}
-              disabled={!connected}
-              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
-            >
-              Add {copy.titlePlural}
-            </ToolbarButton>
-            <ToolbarButton
-              icon={LuDownload}
-              onClick={() => downloadBrokersCsv(matching, copy)}
-              disabled={!matching.length}
-              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
-            >
-              Export CSV
-            </ToolbarButton>
+            <Controlled id={buttonControl(ACCOUNT_PAGE[kind], 'add')}>
+              <ToolbarButton
+                variant="primary"
+                icon={LuUserPlus}
+                onClick={() => setAdding(true)}
+                disabled={!connected}
+                _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+              >
+                Add {copy.titlePlural}
+              </ToolbarButton>
+            </Controlled>
+            <Controlled id={buttonControl(ACCOUNT_PAGE[kind], 'export')}>
+              <ToolbarButton
+                icon={LuDownload}
+                onClick={() => downloadBrokersCsv(matching, copy)}
+                disabled={!matching.length}
+                _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+              >
+                Export CSV
+              </ToolbarButton>
+            </Controlled>
           </Flex>
         </Flex>
 
@@ -1154,6 +1162,7 @@ export function AccountsPage({ kind = 'broker', prefill, applicationId, idPictur
             {visible.length ? (
               visible.map((broker) => (
                 <BrokerRow
+                  page={ACCOUNT_PAGE[kind]}
                   key={broker.id}
                   broker={broker}
                   sells={copy.sells}

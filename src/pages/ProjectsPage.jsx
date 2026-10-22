@@ -12,6 +12,9 @@ import {
 } from '@/components/projects/LotDialogs'
 import { Reveal } from '@/components/ui-kit/Reveal'
 import useDebouncedValue from '@/hooks/useDebouncedValue'
+import usePortalControls, { useControls } from '@/hooks/usePortalControls'
+import Controlled from '@/components/Controlled'
+import { CONTROL_STATE, buttonControl, controlState } from '@/lib/portalControls'
 import useProjectLots from '@/hooks/useProjectLots'
 import ProjectHeader from '@/components/projects/ProjectHeader'
 import ProjectMapView from '@/components/projects/ProjectMapView'
@@ -75,6 +78,10 @@ export default function ProjectsPage({
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const { controls, developer } = usePortalControls()
+  // Developer Controls: whether a Projects & Lots button may be pressed (button.projects.<name>).
+  const control = useControls()
+  const can = (name) => control(buttonControl('projects', name)).usable
 
   // The input updates instantly; the database is only asked once typing pauses.
   const debouncedSearch = useDebouncedValue(search.trim(), 300)
@@ -288,6 +295,7 @@ export default function ProjectsPage({
   }
 
   function handleRowAction(action, lot) {
+    if (!can(`lot-${action}`)) return
     if (action === 'copy-row') {
       copyRow(lot)
       return
@@ -379,6 +387,8 @@ export default function ProjectsPage({
 
   /** Run a Project Actions item, whether picked from the menu or from search. */
   function runAction(action) {
+    // Switched off in Developer Controls: not even quick access can run it.
+    if (!can(action)) return
     if (action === 'featured-project') setFeaturedOpen(true)
     if (['project-dev', 'future-dev', 'flyers'].includes(action)) setGalleryOpen(action)
     if (action === 'future-projects') setFutureProjectsOpen(true)
@@ -425,6 +435,9 @@ export default function ProjectsPage({
   // The skeleton table shows the page size in view, so no rows shift on arrival.
   if (loading && !data) return <ProjectsSkeleton rows={pageSize} />
 
+  // A Map tab switched off in Developer Controls leaves the table showing.
+  const shownView = view === 'map' && !can('view-map') ? 'table' : view
+
   // Reflects what the database was actually asked, not the half-typed input.
   const hasFilters = Boolean(debouncedSearch || filters.status || filters.phase || filters.category || filters.block || filters.lot || filters.floor)
 
@@ -437,17 +450,26 @@ export default function ProjectsPage({
         projects={data.projects}
         onProjectChange={handleProjectChange}
         onAction={runAction}
-        view={view}
+        view={shownView}
         onViewChange={handleViewChange}
         // The lot actions follow the project's wording (MSCC: "Add unit", "Export units").
-        actions={PROJECT_ACTIONS.filter((item) => item.value !== 'export-mscc-report' || data.project.code === 'MSCC').map((item) => {
-          const one = data.terms.item.toLowerCase()
-          if (item.value === 'add-lot') return { ...item, label: `Add ${one}` }
-          if (item.value === 'import-lots') return { ...item, label: `Import ${one}s (CSV)` }
-          if (item.value === 'export-lots') return { ...item, label: `Export ${one}s` }
-          if (item.value === 'pause-project' && data.project.paused) return { ...item, label: 'Resume project', icon: LuCirclePlay }
-          return item
-        })}
+        actions={PROJECT_ACTIONS.filter((item) => item.value !== 'export-mscc-report' || data.project.code === 'MSCC')
+          .map((item) => {
+            const one = data.terms.item.toLowerCase()
+            if (item.value === 'add-lot') return { ...item, label: `Add ${one}` }
+            if (item.value === 'import-lots') return { ...item, label: `Import ${one}s (CSV)` }
+            if (item.value === 'export-lots') return { ...item, label: `Export ${one}s` }
+            if (item.value === 'pause-project' && data.project.paused) return { ...item, label: 'Resume project', icon: LuCirclePlay }
+            return item
+          })
+          // Developer Controls: hidden items go, items under maintenance stay but cannot be picked.
+          .map((item) => ({ ...item, control: controlState(controls, buttonControl('projects', item.value)) }))
+          .filter((item) => developer || item.control !== CONTROL_STATE.HIDDEN)
+          .map(({ control, ...item }) => {
+            if (control === CONTROL_STATE.VISIBLE) return item
+            const tag = control === CONTROL_STATE.HIDDEN ? 'hidden' : 'maintenance'
+            return { ...item, label: `${item.label} (${tag})`, disabled: item.disabled || !developer }
+          })}
       />
 
       <PauseProjectDialog
@@ -593,15 +615,15 @@ export default function ProjectsPage({
       ) : null}
 
       {/* The Phase filter lives in the lot table's bar, so the map tab shows every lot. */}
-      <LotStatsRow key={data.project.code} stats={data.stats} phase={view === 'map' ? '' : filters.phase} terms={data.terms} />
+      <LotStatsRow key={data.project.code} stats={data.stats} phase={shownView === 'map' ? '' : filters.phase} terms={data.terms} />
 
       {/*
         * The tab panel. `key` is the tab, so switching tabs remounts this and the
         * reveal replays; the flex column keeps the table view's stacked blocks
         * spaced as they were when they sat directly in the page.
         */}
-      <Reveal key={view} animate={tabSwitched} display="flex" flexDirection="column" gap="16px">
-      {view === 'map' ? (
+      <Reveal key={shownView} animate={tabSwitched} display="flex" flexDirection="column" gap="16px">
+      {shownView === 'map' ? (
         <ProjectMapView
           projectCode={data.project.code}
           projectName={data.project.name}
@@ -675,6 +697,7 @@ export default function ProjectsPage({
                   Clear selection
                 </Flex>
 
+                <Controlled id={buttonControl('projects', 'bulk-delete')}>
                 <Flex
                   as="button"
                   type="button"
@@ -700,6 +723,7 @@ export default function ProjectsPage({
                   <Icon as={LuTrash2} boxSize="14px" />
                   Delete selected
                 </Flex>
+                </Controlled>
               </Flex>
             </Flex>
           ) : null}
@@ -715,7 +739,7 @@ export default function ProjectsPage({
             onSort={handleSort}
             onRowAction={handleRowAction}
             onDetails={(lot) => handleRowAction('details', lot)}
-            onStatusChange={handleStatusChange}
+            onStatusChange={can('lot-status') ? handleStatusChange : undefined}
             savingIds={savingIds}
             total={data.total}
             page={page}

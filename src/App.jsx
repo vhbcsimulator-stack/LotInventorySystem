@@ -5,9 +5,20 @@ import { SkeletonKeyframes } from '@/components/ui-kit/Skeleton'
 import { RevealKeyframes } from '@/components/ui-kit/Reveal'
 import { ChartKeyframes } from '@/components/ui-kit/ChartKeyframes'
 import LogoutDialog from '@/components/LogoutDialog'
+import MaintenanceScreen from '@/components/MaintenanceScreen'
+import PortalControlsProvider from '@/components/PortalControlsProvider'
 import Sidebar from '@/components/Sidebar'
 import TopBar from '@/components/TopBar'
 import useAuth from '@/hooks/useAuth'
+import usePortalControls from '@/hooks/usePortalControls'
+import {
+  CONTROL_STATE,
+  PAGE_CONTROLS,
+  PORTAL_CONTROL,
+  controlMessage,
+  controlState,
+  pageControl,
+} from '@/lib/portalControls'
 import { PAGES, PAGE_FALLBACKS, preloadPages } from '@/pages'
 import SignInPage from '@/pages/SignInPage'
 import { COLORS } from '@/theme/colors'
@@ -21,6 +32,29 @@ const PAGE_TITLES = {
   regularUsers: 'Add Regular Users',
   applications: 'Pending Applications',
   clients: 'Clients',
+  devControls: 'Developer Controls',
+}
+
+const PAGE_ORDER = PAGE_CONTROLS.map((item) => item.page)
+
+/** A thin strip telling a developer what everyone else is not seeing. */
+function DevNotice({ children }) {
+  return (
+    <Box
+      role="status"
+      mb="12px"
+      px="12px"
+      py="8px"
+      borderRadius="8px"
+      bg="#FEF3E2"
+      color="#92400E"
+      fontFamily="Inter, system-ui, sans-serif"
+      fontSize="13px"
+      fontWeight="600"
+    >
+      {children}
+    </Box>
+  )
 }
 
 /** Name and role for the top bar, from the Supabase user's metadata when present. */
@@ -34,12 +68,25 @@ function displayUser(user) {
 }
 
 function App() {
+  const auth = useAuth()
+  // The controls load before sign-in too, so the sign-in page can say the portal is down.
+  return (
+    <PortalControlsProvider user={auth.user}>
+      <PortalShell auth={auth} />
+    </PortalControlsProvider>
+  )
+}
+
+function PortalShell({ auth }) {
   const [active, setActive] = useState('dashboard')
   const [menuOpen, setMenuOpen] = useState(false)
   /* Props the page being opened starts with — e.g. the dashboard's View Map
      opens Projects & Lots already on its map tab. */
   const [pageProps, setPageProps] = useState({})
-  const { user, loading, signIn, signOut } = useAuth()
+  const { user, loading, signIn, signOut } = auth
+  const { controls, developer } = usePortalControls()
+  const portalState = controlState(controls, PORTAL_CONTROL)
+  const portalMessage = controlMessage(controls, PORTAL_CONTROL)
   // Logout asks first; `loggingOut` holds the dialog open until the session has ended.
   const [logoutOpen, setLogoutOpen] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
@@ -65,7 +112,29 @@ function App() {
     )
   }
 
-  if (!user) return <SignInPage onSignIn={signIn} />
+  if (!user) {
+    return (
+      <SignInPage
+        onSignIn={signIn}
+        maintenance={portalState === CONTROL_STATE.MAINTENANCE ? { message: portalMessage } : null}
+      />
+    )
+  }
+
+  // Whole portal under maintenance: everyone but a developer stops here.
+  if (portalState === CONTROL_STATE.MAINTENANCE && !developer) {
+    return (
+      <>
+        <LogoutDialog open={logoutOpen} busy={loggingOut} onCancel={() => setLogoutOpen(false)} onConfirm={handleLogout} />
+        <MaintenanceScreen
+          fullScreen
+          title="The portal is under maintenance"
+          message={portalMessage}
+          onLogout={() => setLogoutOpen(true)}
+        />
+      </>
+    )
+  }
 
   function handleNavigate(item) {
     setMenuOpen(false)
@@ -102,8 +171,54 @@ function App() {
     setActive(command.page)
   }
 
-  const ActivePage = PAGES[active] ?? PAGES.dashboard
-  const PageFallback = PAGE_FALLBACKS[active] ?? PAGE_FALLBACKS.dashboard
+  /*
+   * A hidden page cannot be opened — from the menu, a dashboard card, or quick
+   * access — except by a developer; landing on one shows the first page that is
+   * still visible instead. Developer Controls is for developers only.
+   */
+  const pageState = (key) => controlState(controls, pageControl(key))
+  const canOpen = (key) =>
+    key === 'devControls' ? developer : Boolean(PAGES[key]) && (developer || pageState(key) !== CONTROL_STATE.HIDDEN)
+  const shown = canOpen(active) ? active : PAGE_ORDER.find(canOpen)
+  const shownState = shown && shown !== 'devControls' ? pageState(shown) : CONTROL_STATE.VISIBLE
+
+  const ActivePage = PAGES[shown] ?? PAGES.dashboard
+  const PageFallback = PAGE_FALLBACKS[shown] ?? PAGE_FALLBACKS.dashboard
+
+  let content
+  if (!shown) {
+    content = <MaintenanceScreen title="Nothing to show right now" message="Every page is switched off for the moment. Please check back shortly." />
+  } else if (shownState === CONTROL_STATE.MAINTENANCE && !developer) {
+    content = (
+      <MaintenanceScreen
+        title={`${PAGE_TITLES[shown] ?? 'This page'} is under maintenance`}
+        message={controlMessage(controls, pageControl(shown))}
+      />
+    )
+  } else {
+    content = (
+      <>
+        {developer && portalState === CONTROL_STATE.MAINTENANCE ? (
+          <DevNotice>The whole portal is under maintenance</DevNotice>
+        ) : null}
+        {developer && shownState !== CONTROL_STATE.VISIBLE ? (
+          <DevNotice>
+            This page is {shownState === CONTROL_STATE.HIDDEN ? 'hidden from' : 'under maintenance for'} everyone but developers.
+          </DevNotice>
+        ) : null}
+        <Suspense fallback={<PageFallback />}>
+          <ActivePage
+            key={`${shown}:${pageProps.commandRun ?? ''}`}
+            {...pageProps}
+            onNavigate={(key, props) => {
+              setPageProps(props ?? {})
+              setActive(key)
+            }}
+          />
+        </Suspense>
+      </>
+    )
+  }
 
   return (
     <Flex h="100dvh" bg={COLORS.canvas} overflow="hidden">
@@ -111,7 +226,7 @@ function App() {
       <RevealKeyframes />
       <ChartKeyframes />
       <LogoutDialog open={logoutOpen} busy={loggingOut} onCancel={() => setLogoutOpen(false)} onConfirm={handleLogout} />
-      <Sidebar activeKey={active} onNavigate={handleNavigate} minH="auto" h="100%" display={{ base: 'none', lg: 'flex' }} />
+      <Sidebar activeKey={shown} onNavigate={handleNavigate} minH="auto" h="100%" display={{ base: 'none', lg: 'flex' }} />
       <Drawer.Root open={menuOpen} onOpenChange={({ open }) => setMenuOpen(open)} placement="start">
         <Portal>
           <Drawer.Backdrop display={{ base: 'block', lg: 'none' }} />
@@ -121,14 +236,14 @@ function App() {
               <Drawer.CloseTrigger asChild>
                 <CloseButton position="absolute" top="12px" right="12px" zIndex={2} aria-label="Close navigation" />
               </Drawer.CloseTrigger>
-              <Sidebar activeKey={active} onNavigate={handleNavigate} minH="auto" h="100%" w="100%" overflowY="auto" />
+              <Sidebar activeKey={shown} onNavigate={handleNavigate} minH="auto" h="100%" w="100%" overflowY="auto" />
             </Drawer.Content>
           </Drawer.Positioner>
         </Portal>
       </Drawer.Root>
       <Flex direction="column" flex="1" minW={0}>
         <TopBar
-          title={PAGE_TITLES[active] ?? ''}
+          title={PAGE_TITLES[shown] ?? ''}
           user={displayUser(user)}
           onMenuOpen={() => setMenuOpen(true)}
           onRunCommand={handleRunCommand}
@@ -137,16 +252,7 @@ function App() {
           {/* A page can send the reader to another one: the dashboard's cards
               link through to what they summarise. */}
           {/* Each page reveals its own content once loaded — see Reveal. */}
-          <Suspense fallback={<PageFallback />}>
-            <ActivePage
-              key={`${active}:${pageProps.commandRun ?? ''}`}
-              {...pageProps}
-              onNavigate={(key, props) => {
-                setPageProps(props ?? {})
-                setActive(key)
-              }}
-            />
-          </Suspense>
+          {content}
         </Box>
       </Flex>
     </Flex>

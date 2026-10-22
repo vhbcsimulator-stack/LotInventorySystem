@@ -1,4 +1,5 @@
 import { Box, Flex, Icon, Text } from '@chakra-ui/react'
+import Controlled from '@/components/Controlled'
 import { LuArrowRight, LuMegaphone } from 'react-icons/lu'
 import { Card, CardHeading } from '@/components/ui-kit/Card'
 import { COLORS } from '@/theme/colors'
@@ -50,6 +51,7 @@ export default function AnnouncementsCard({ announcements, onOpen }) {
         description={total ? `${total} posted${more ? ` · newest ${items.length} shown` : ''}` : 'Nothing posted yet'}
         actions={
           onOpen ? (
+            <Controlled id="button.dashboard.open-announcement">
             <Flex
               as="button"
               type="button"
@@ -67,6 +69,7 @@ export default function AnnouncementsCard({ announcements, onOpen }) {
               View all
               <Icon as={LuArrowRight} boxSize="13px" />
             </Flex>
+            </Controlled>
           ) : null
         }
       />

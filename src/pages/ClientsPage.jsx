@@ -20,6 +20,9 @@ import { Card } from '@/components/ui-kit/Card'
 import Pagination from '@/components/ui-kit/Pagination'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
+import Controlled, { ControlledMenuItem } from '@/components/Controlled'
+import { useControl } from '@/hooks/usePortalControls'
+import { buttonControl } from '@/lib/portalControls'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
 import { ACCOUNT_TYPE_KEY, CLIENTS_TABLE, SELLER_KINDS, deleteClient, fetchClients } from '@/data/clientsData'
@@ -417,14 +420,14 @@ function ClientActions({ name, onEdit, onDelete }) {
       <Portal>
         <Menu.Positioner>
           <Menu.Content minW="150px">
-            <Menu.Item value="edit" gap="8px" fontSize="13px">
+            <ControlledMenuItem control="button.clients.edit" value="edit" gap="8px" fontSize="13px">
               <Icon as={LuPencil} boxSize="14px" />
               Edit
-            </Menu.Item>
-            <Menu.Item value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+            </ControlledMenuItem>
+            <ControlledMenuItem control="button.clients.delete" value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
               <Icon as={LuTrash2} boxSize="14px" />
               Delete
-            </Menu.Item>
+            </ControlledMenuItem>
           </Menu.Content>
         </Menu.Positioner>
       </Portal>
@@ -509,6 +512,8 @@ function DeleteClientDialog({ client, name, onClose, onDeleted }) {
 
 export default function ClientsPage() {
   const { data, loading, refresh, reload } = useApiQuery(fetchClients)
+  // Developer Controls: a row click opens the client's details only while this is usable.
+  const viewControl = useControl('button.clients.view')
   // The client being edited or deleted from its row's menu.
   const [editing, setEditing] = useState(null)
   const [deleting, setDeleting] = useState(null)
@@ -665,14 +670,16 @@ export default function ClientsPage() {
               color={COLORS.heading}
             />
           </Flex>
-          <ToolbarButton
-            icon={LuDownload}
-            onClick={() => downloadClientsCsv(matching, columns, activeGroup === 'all' ? activeTab : `${activeGroup}-${activeTab}`)}
-            disabled={!matching.length}
-            _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
-          >
-            Export CSV
-          </ToolbarButton>
+          <Controlled id={buttonControl('clients', 'export')}>
+            <ToolbarButton
+              icon={LuDownload}
+              onClick={() => downloadClientsCsv(matching, columns, activeGroup === 'all' ? activeTab : `${activeGroup}-${activeTab}`)}
+              disabled={!matching.length}
+              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+            >
+              Export CSV
+            </ToolbarButton>
+          </Controlled>
         </Flex>
 
         <Card as="section" p="0" overflow="hidden" aria-label="Clients">
@@ -866,7 +873,7 @@ export default function ClientsPage() {
         </Card>
       </Flex>
 
-      <ClientDrawer client={openClient} columns={columns} parts={parts} onClose={() => setOpenKey(null)} />
+      <ClientDrawer client={viewControl.usable ? openClient : null} columns={columns} parts={parts} onClose={() => setOpenKey(null)} />
       {editing ? (
         <ClientFormDialog
           key={editing._key}

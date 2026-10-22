@@ -20,6 +20,7 @@ import { Reveal } from '@/components/ui-kit/Reveal'
 import AnnotatedImagesPanel from '@/components/projects/AnnotatedImagesPanel'
 import EmptyState from '@/components/EmptyState'
 import useApiQuery from '@/hooks/useApiQuery'
+import Controlled from '@/components/Controlled'
 import { fetchProjectMaps, mapTabValue, saveProjectMap, usesFloors } from '@/data/projectMapsData'
 import { refreshTables } from '@/data/queryClient'
 import { COLORS } from '@/theme/colors'
@@ -601,6 +602,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
           />
         ) : null}
         {canEdit ? (
+          <Controlled id="button.projects.add-map">
           <ActionButton
             tone="primary"
             icon={LuImagePlus}
@@ -612,6 +614,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
           >
             Add map
           </ActionButton>
+          </Controlled>
         ) : null}
         </Flex>
         <input ref={replaceInput} type="file" accept={acceptFor('map')} hidden onChange={handleReplaceFile} />
@@ -635,6 +638,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
                   {active.maps.length > 1 ? map.caption : ''}
                 </Text>
                 <Flex align="center" gap="8px" flexWrap="wrap">
+                  <Controlled id="button.projects.map-fullsize">
                   <ActionButton
                     icon={LuExpand}
                     onClick={() => {
@@ -652,6 +656,8 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
                   >
                     Open full size
                   </ActionButton>
+                  </Controlled>
+                  <Controlled id="button.projects.map-download">
                   <ActionButton
                     icon={LuDownload}
                     loading={downloading === map.id}
@@ -661,7 +667,9 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
                   >
                     Download image
                   </ActionButton>
+                  </Controlled>
                   {canEdit ? (
+                    <Controlled id="button.projects.map-replace">
                     <ActionButton
                       icon={LuRefreshCw}
                       loading={busy === map.id}
@@ -670,6 +678,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
                     >
                       Replace image
                     </ActionButton>
+                    </Controlled>
                   ) : null}
                 </Flex>
               </Flex>

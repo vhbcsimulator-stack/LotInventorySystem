@@ -19,6 +19,8 @@ const loaders = {
   regularUsers: () => import('./RegularUsersPage'),
   applications: () => import('./PendingApplicationsPage'),
   clients: () => import('./ClientsPage'),
+  // Developer accounts only — App.jsx routes nobody else here.
+  devControls: () => import('./DevControlsPage'),
 }
 
 /*
@@ -38,6 +40,7 @@ export const PAGE_FALLBACKS = {
   regularUsers: BrokersSkeleton,
   applications: BrokersSkeleton,
   clients: ClientsSkeleton,
+  devControls: BrokersSkeleton,
 }
 
 export function preloadPages() {

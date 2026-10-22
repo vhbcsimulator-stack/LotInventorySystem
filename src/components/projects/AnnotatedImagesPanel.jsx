@@ -3,6 +3,8 @@ import { Box, CloseButton, Dialog, Flex, Icon, Menu, NativeSelect, Portal, Text 
 import { LuChevronDown, LuMousePointerClick, LuPaintbrush, LuShapes, LuTrash2, LuTriangleAlert, LuUpload, LuX } from 'react-icons/lu'
 import AnnotatedImagePreview from '@/components/projects/AnnotatedImagePreview'
 import useApiQuery from '@/hooks/useApiQuery'
+import { useControls } from '@/hooks/usePortalControls'
+import Controlled, { ControlledMenuItem } from '@/components/Controlled'
 import {
   deleteAnnotatedImage,
   fetchAnnotatedImages,
@@ -73,6 +75,9 @@ export default function AnnotatedImagesPanel({
   // Receives { previewOutlines(url) } for the map tab's Open full size.
   previewRef,
 }) {
+  // Developer Controls (button.projects.<name>): Color lots and the Annotations menu.
+  const control = useControls()
+  const can = (name) => control(`button.projects.${name}`).usable
   const query = useMemo(() => ({ projectCode }), [projectCode])
   const { data, loading, reload } = useApiQuery(fetchAnnotatedImages, query)
   const [editing, setEditing] = useState(null) // null | { image, slot } — image null when adding
@@ -122,7 +127,7 @@ export default function AnnotatedImagesPanel({
 
   // Opened from the command palette: this tab's map if it has outlines, else the first that does.
   useEffect(() => {
-    if (!startColoring || autoColorRun.current || loading || !data) return
+    if (!startColoring || !can('color-lots') || autoColorRun.current || loading || !data) return
     autoColorRun.current = true
     const image = images.find((entry) => entry.slot === slot) ?? images.find((entry) => entry.slot === 'whole') ?? images[0]
     if (!image) return
@@ -158,6 +163,7 @@ export default function AnnotatedImagesPanel({
   if (loading && !data) return null
 
   function colorLots() {
+    if (!can('color-lots')) return
     if (current?.coco) {
       openPreview(current, true)
       return
@@ -319,6 +325,7 @@ export default function AnnotatedImagesPanel({
 
   return (
     <>
+      <Controlled id="button.projects.color-lots">
       <ActionButton
         icon={LuPaintbrush}
         disabled={Boolean(busy)}
@@ -327,9 +334,10 @@ export default function AnnotatedImagesPanel({
       >
         Color lots
       </ActionButton>
+      </Controlled>
 
       {/* Upload, replace and delete are all edits, so the menu is for editors only. */}
-      {canEdit ? (
+      {canEdit && (!control('button.projects.annotations-upload').hidden || (current && !control('button.projects.annotations-delete').hidden)) ? (
         <Menu.Root
           positioning={{ placement: 'bottom-end' }}
           onSelect={({ value }) => {
@@ -367,15 +375,15 @@ export default function AnnotatedImagesPanel({
           <Portal>
             <Menu.Positioner>
               <Menu.Content minW="200px">
-                <Menu.Item value="upload" {...menuItem}>
+                <ControlledMenuItem control="button.projects.annotations-upload" value="upload" {...menuItem}>
                   <Icon as={LuUpload} boxSize="14px" />
                   {current ? 'Replace COCO JSON' : 'Upload COCO JSON'}
-                </Menu.Item>
+                </ControlledMenuItem>
                 {current ? (
-                  <Menu.Item value="delete" {...menuItem} color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+                  <ControlledMenuItem control="button.projects.annotations-delete" value="delete" {...menuItem} color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
                     <Icon as={LuTrash2} boxSize="14px" />
                     Delete outlines
-                  </Menu.Item>
+                  </ControlledMenuItem>
                 ) : null}
               </Menu.Content>
             </Menu.Positioner>

@@ -1,5 +1,7 @@
 import { Box, Flex, Icon, Image, Text } from '@chakra-ui/react'
 import bhriLogo from '@/assets/BHRI OFFICIAL LOGO TRANSPARENT.png'
+import usePortalControls from '@/hooks/usePortalControls'
+import { CONTROL_STATE, controlState, pageControl } from '@/lib/portalControls'
 import { COLORS } from '@/theme/colors'
 import {
   LuBuilding2,
@@ -9,6 +11,7 @@ import {
   LuBriefcaseBusiness,
   LuContactRound,
   LuInbox,
+  LuSlidersHorizontal,
   LuUsers,
   LuUsersRound
 } from 'react-icons/lu'
@@ -23,6 +26,30 @@ const DEFAULT_NAV_ITEMS = [
   { key: 'regularUsers', label: 'Regular Users', icon: LuUsersRound },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
 ]
+
+/** Shown to developer accounts only, after the pages. */
+const DEV_CONTROLS_ITEM = { key: 'devControls', label: 'Developer Controls', icon: LuSlidersHorizontal }
+
+const BADGES = {
+  [CONTROL_STATE.HIDDEN]: { label: 'Hidden', fg: '#374151', bg: '#E5E7EB' },
+  [CONTROL_STATE.MAINTENANCE]: { label: 'Maint.', fg: '#92400E', bg: '#FEF3E2' },
+}
+
+/**
+ * The nav as the signed-in user may see it (lib/portalControls.js): hidden pages
+ * drop out and pages under maintenance carry a badge. Developers keep every page,
+ * badged with its state, plus Developer Controls.
+ */
+function useControlledNav(navItems) {
+  const { controls, developer } = usePortalControls()
+  const items = navItems
+    .map((item) => {
+      const state = controlState(controls, pageControl(item.key))
+      return state === CONTROL_STATE.VISIBLE ? item : { ...item, badge: BADGES[state], hidden: state === CONTROL_STATE.HIDDEN }
+    })
+    .filter((item) => developer || !item.hidden)
+  return developer ? [...items, DEV_CONTROLS_ITEM] : items
+}
 
 const DEFAULT_FOOTER_ITEMS = [
   { key: 'logout', label: 'Logout', icon: LuLogOut, tone: 'danger' },
@@ -68,6 +95,23 @@ function NavLink({ item, isActive, onSelect }) {
       >
         {item.label}
       </Text>
+      {item.badge ? (
+        <Text
+          as="span"
+          ml="auto"
+          px="6px"
+          borderRadius="999px"
+          bg={item.badge.bg}
+          color={item.badge.fg}
+          fontFamily="Inter, system-ui, sans-serif"
+          fontWeight="600"
+          fontSize="10.5px"
+          lineHeight="18px"
+          flexShrink={0}
+        >
+          {item.badge.label}
+        </Text>
+      ) : null}
     </Flex>
   )
 }
@@ -91,6 +135,7 @@ export default function Sidebar({
   onNavigate,
   ...rest
 }) {
+  const shownItems = useControlledNav(navItems)
   return (
     <Flex
       as="aside"
@@ -186,7 +231,7 @@ export default function Sidebar({
           </Text>
         ) : null}
         <Flex as="nav" direction="column" gap="4px" pt="4px" px="16px">
-          {navItems.map((item) => (
+          {shownItems.map((item) => (
             <NavLink
               key={item.key}
               item={item}

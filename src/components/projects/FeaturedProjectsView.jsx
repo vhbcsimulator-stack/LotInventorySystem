@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import Controlled from '@/components/Controlled'
 import { Box, CloseButton, Dialog, Flex, Icon, Image, Input, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
 import { LuImagePlus, LuMapPin, LuPencil, LuStar, LuTrash2 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
@@ -224,9 +225,11 @@ export default function FeaturedProjectsView({ projects = [], initialProjectCode
             </Box>
             {error ? <Text role="alert" fontFamily={FONT} fontSize="13px" color="#B91C1C">{error}</Text> : null}
             <Flex>
+              <Controlled id="button.projects.featured-save">
               <Button tone="primary" icon={LuStar} loading={busy === 'save'} disabled={!canEdit || Boolean(busy) || !projectCode || !location.trim() || (!selected && !file)} onClick={save}>
                 {selected ? 'Save changes' : feature ? 'Replace featured project' : 'Feature project'}
               </Button>
+              </Controlled>
             </Flex>
           </Flex>
           <Flex align="center" justify="center" alignSelf="flex-start" w={{ base: 'full', lg: '42%' }} minH={preview || selected?.imageUrl ? undefined : '190px'} border="1px dashed" borderColor={COLORS.border} borderRadius="10px" bg={COLORS.canvas} overflow="hidden">
@@ -261,8 +264,12 @@ export default function FeaturedProjectsView({ projects = [], initialProjectCode
               <Text fontFamily={FONT} fontSize="13px" overflowWrap="anywhere">{feature.location}</Text>
             </Flex>
             <Flex mt="14px" gap="8px" flexWrap="wrap">
+              <Controlled id="button.projects.featured-edit">
               <Button icon={LuPencil} disabled={Boolean(busy)} onClick={() => { chooseProject(feature.projectCode); formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }) }}>Edit</Button>
+              </Controlled>
+              <Controlled id="button.projects.featured-remove">
               <Button icon={LuTrash2} disabled={Boolean(busy)} onClick={() => setRemoving(feature)}>Remove</Button>
+              </Controlled>
             </Flex>
           </Box>
         </Card>

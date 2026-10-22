@@ -1,4 +1,5 @@
 import { Box, Flex, Menu, Portal, Text } from '@chakra-ui/react'
+import Controlled from '@/components/Controlled'
 import { LuDownload, LuSlidersHorizontal } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
@@ -83,9 +84,11 @@ export default function PortfolioHero({ projects = [], project = 'overall', onPr
             </Portal>
           </Menu.Root>
 
+          <Controlled id="button.dashboard.export">
           <ToolbarButton icon={LuDownload} variant="primary" onClick={onExport} disabled={exporting}>
             {exporting ? 'Exporting…' : 'Export'}
           </ToolbarButton>
+          </Controlled>
         </Flex>
       </Flex>
     </Card>

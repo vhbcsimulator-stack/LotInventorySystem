@@ -41,8 +41,11 @@ const inputProps = {
   _focusVisible: { borderColor: COLORS.activeBg, bg: COLORS.surface, outline: 'none' },
 }
 
-/** Email + password sign-in against Supabase Auth. */
-export default function SignInPage({ onSignIn }) {
+/**
+ * Email + password sign-in against Supabase Auth. `maintenance` ({ message })
+ * says the portal is down; sign-in stays open so a developer can still get in.
+ */
+export default function SignInPage({ onSignIn, maintenance = null }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -83,6 +86,17 @@ export default function SignInPage({ onSignIn }) {
             Use the email and password for your BHRI account.
           </Text>
         </Flex>
+
+        {maintenance ? (
+          <Box role="status" mb="20px" p="12px" borderRadius="8px" bg="#" color="#92400E">
+            <Text fontFamily="Inter, system-ui, sans-serif" fontWeight="700" fontSize="13px">
+              The portal is under maintenance
+            </Text>
+            <Text mt="2px" fontFamily="Inter, system-ui, sans-serif" fontSize="13px" whiteSpace="pre-line">
+              {maintenance.message || 'Please check back shortly. Developer accounts can still sign in.'}
+            </Text>
+          </Box>
+        ) : null}
 
         <Flex direction="column" gap="16px">
           <Field id="signin-email" label="Email" icon={LuMail}>

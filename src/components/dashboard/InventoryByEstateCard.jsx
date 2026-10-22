@@ -1,4 +1,5 @@
 import { Box, Flex, Icon, Text } from '@chakra-ui/react'
+import Controlled from '@/components/Controlled'
 import { LuArrowRight } from 'react-icons/lu'
 import { Card, CardHeading } from '@/components/ui-kit/Card'
 import { COLORS, CHART } from '@/theme/colors'
@@ -127,6 +128,7 @@ export default function InventoryByEstateCard({ estates, totalUnits, onExplore }
         >
           Portfolio: {formatNumber(totalUnits)} Units
         </Text>
+        <Controlled id="button.dashboard.explore-inventory">
         <Flex
           as="button"
           type="button"
@@ -148,6 +150,7 @@ export default function InventoryByEstateCard({ estates, totalUnits, onExplore }
           </Text>
           <Icon as={LuArrowRight} boxSize="13px" />
         </Flex>
+        </Controlled>
       </Flex>
     </Card>
   )

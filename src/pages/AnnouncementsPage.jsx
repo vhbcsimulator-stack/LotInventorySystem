@@ -28,6 +28,8 @@ import EmptyState from '@/components/EmptyState'
 import { Card } from '@/components/ui-kit/Card'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
 import SourceNotice from '@/components/SourceNotice'
+import Controlled, { ControlledMenuItem } from '@/components/Controlled'
+import { buttonControl } from '@/lib/portalControls'
 import useApiQuery from '@/hooks/useApiQuery'
 import useAuth from '@/hooks/useAuth'
 import useDebouncedValue from '@/hooks/useDebouncedValue'
@@ -147,14 +149,14 @@ function ItemActions({ title, onEdit, onDelete }) {
       <Portal>
         <Menu.Positioner>
           <Menu.Content minW="150px">
-            <Menu.Item value="edit" gap="8px" fontSize="13px">
+            <ControlledMenuItem control="button.announcements.edit" value="edit" gap="8px" fontSize="13px">
               <Icon as={LuPencil} boxSize="14px" />
               Edit
-            </Menu.Item>
-            <Menu.Item value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+            </ControlledMenuItem>
+            <ControlledMenuItem control="button.announcements.delete" value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
               <Icon as={LuTrash2} boxSize="14px" />
               Delete
-            </Menu.Item>
+            </ControlledMenuItem>
           </Menu.Content>
         </Menu.Positioner>
       </Portal>
@@ -506,10 +508,12 @@ export default function AnnouncementsPage() {
             </Text>
           ) : null}
         </Box>
-        <PrimaryButton onClick={() => setPosting(true)} disabled={data?.source !== 'database'}>
-          <Icon as={LuPlus} boxSize="16px" />
-          Post New Announcement
-        </PrimaryButton>
+        <Controlled id={buttonControl('announcements', 'post')}>
+          <PrimaryButton onClick={() => setPosting(true)} disabled={data?.source !== 'database'}>
+            <Icon as={LuPlus} boxSize="16px" />
+            Post New Announcement
+          </PrimaryButton>
+        </Controlled>
       </Flex>
 
       {data ? <SourceNotice source={data.source} envVar={SUPABASE_ENV} /> : null}

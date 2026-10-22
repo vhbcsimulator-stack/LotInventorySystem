@@ -1,4 +1,5 @@
 import { Box, Flex, Icon, SimpleGrid, Text } from '@chakra-ui/react'
+import Controlled from '@/components/Controlled'
 import { LuBuilding2, LuCircleCheck, LuFileClock, LuTrendingUp, LuWallet } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
 import { COLORS, CHART } from '@/theme/colors'
@@ -138,6 +139,7 @@ export default function KpiRow({ headline, onViewMap }) {
           <Caption>
             {formatPct(portfolioSharePct)} share · {formatNumber(availableAreaSqm)} sqm
           </Caption>
+          <Controlled id="button.dashboard.view-map">
           <Text
             as="button"
             type="button"
@@ -152,6 +154,7 @@ export default function KpiRow({ headline, onViewMap }) {
           >
             View Map
           </Text>
+          </Controlled>
         </Flex>
       </Shell>
     </SimpleGrid>

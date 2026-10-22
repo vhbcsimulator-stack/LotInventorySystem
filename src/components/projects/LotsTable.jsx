@@ -1,6 +1,7 @@
 import { Box, Checkbox, Flex, Icon, Menu, NativeSelect, Portal, Spinner, Table, Text } from '@chakra-ui/react'
 import { LuArrowDown, LuArrowUp, LuCopy, LuEllipsisVertical, LuEye, LuPencil, LuTrash2 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
+import { ControlledMenuItem } from '@/components/Controlled'
 import Pagination from '@/components/ui-kit/Pagination'
 import { COLORS, LOT_STATUS } from '@/theme/colors'
 import { formatNumber, formatPeso } from '@/utils/format'
@@ -198,22 +199,22 @@ function RowActions({ lot, onDetails, onRowAction }) {
         <Portal>
           <Menu.Positioner>
             <Menu.Content minW="170px">
-              <Menu.Item value="details" gap="8px" fontSize="13px">
+              <ControlledMenuItem control="button.projects.lot-details" value="details" gap="8px" fontSize="13px">
                 <Icon as={LuEye} boxSize="14px" />
                 View details
-              </Menu.Item>
-              <Menu.Item value="copy-row" gap="8px" fontSize="13px">
+              </ControlledMenuItem>
+              <ControlledMenuItem control="button.projects.lot-copy-row" value="copy-row" gap="8px" fontSize="13px">
                 <Icon as={LuCopy} boxSize="14px" />
                 Copy row
-              </Menu.Item>
-              <Menu.Item value="update" gap="8px" fontSize="13px">
+              </ControlledMenuItem>
+              <ControlledMenuItem control="button.projects.lot-update" value="update" gap="8px" fontSize="13px">
                 <Icon as={LuPencil} boxSize="14px" />
                 Update
-              </Menu.Item>
-              <Menu.Item value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+              </ControlledMenuItem>
+              <ControlledMenuItem control="button.projects.lot-delete" value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
                 <Icon as={LuTrash2} boxSize="14px" />
                 Delete
-              </Menu.Item>
+              </ControlledMenuItem>
             </Menu.Content>
           </Menu.Positioner>
         </Portal>

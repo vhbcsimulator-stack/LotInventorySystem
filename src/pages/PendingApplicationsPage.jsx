@@ -20,6 +20,8 @@ import { Card } from '@/components/ui-kit/Card'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
 import SourceNotice from '@/components/SourceNotice'
 import IdPicture from '@/components/IdPicture'
+import { ControlTooltip, ControlledMenuItem } from '@/components/Controlled'
+import { useControl } from '@/hooks/usePortalControls'
 import useApiQuery from '@/hooks/useApiQuery'
 import { ACCOUNT_KINDS } from '@/data/brokersData'
 import {
@@ -183,13 +185,15 @@ function HeaderCell({ children, ...rest }) {
  * applicant's details filled in. The kind they asked for is listed first.
  */
 function CopyToFormMenu({ application, disabled, onCopy }) {
+  const control = useControl('button.applications.create-account')
+  if (control.hidden) return null
   const kinds = application.accountType
     ? [application.accountType, ...KINDS.filter((kind) => kind !== application.accountType)]
     : KINDS
-  return (
+  const menu = (
     <Menu.Root onSelect={({ value }) => onCopy(value)}>
       <Menu.Trigger
-        disabled={disabled}
+        disabled={disabled || control.maintenance}
         aria-label={`Copy ${fullName(application)}'s details to an account form`}
         display="flex"
         alignItems="center"
@@ -235,6 +239,15 @@ function CopyToFormMenu({ application, disabled, onCopy }) {
       </Portal>
     </Menu.Root>
   )
+  if (!control.maintenance) return menu
+  // A disabled trigger fires no hover, so the tooltip sits on a span around it.
+  return (
+    <ControlTooltip message={control.message}>
+      <Box as="span" display="inline-flex" cursor="not-allowed" tabIndex={0}>
+        {menu}
+      </Box>
+    </ControlTooltip>
+  )
 }
 
 /** Reject, move back to pending, or delete — behind a three-dot button like the other tables. */
@@ -262,20 +275,20 @@ function RowActions({ application, onAction }) {
         <Menu.Positioner>
           <Menu.Content minW="190px">
             {application.status === 'pending' ? (
-              <Menu.Item value="reject" gap="8px" fontSize="13px">
+              <ControlledMenuItem control="button.applications.reject" value="reject" gap="8px" fontSize="13px">
                 <Icon as={LuUserX} boxSize="14px" />
                 Reject
-              </Menu.Item>
+              </ControlledMenuItem>
             ) : (
-              <Menu.Item value="pending" gap="8px" fontSize="13px">
+              <ControlledMenuItem control="button.applications.pending" value="pending" gap="8px" fontSize="13px">
                 <Icon as={LuRotateCcw} boxSize="14px" />
                 Move back to pending
-              </Menu.Item>
+              </ControlledMenuItem>
             )}
-            <Menu.Item value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
+            <ControlledMenuItem control="button.applications.delete" value="delete" gap="8px" fontSize="13px" color="#DC2626" _hover={{ bg: '#FDECEC', color: '#B91C1C' }}>
               <Icon as={LuTrash2} boxSize="14px" />
               Delete
-            </Menu.Item>
+            </ControlledMenuItem>
           </Menu.Content>
         </Menu.Positioner>
       </Portal>

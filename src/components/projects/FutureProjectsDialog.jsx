@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import Controlled from '@/components/Controlled'
 import { Box, CloseButton, Dialog, Flex, Icon, Image, Input, NativeSelect, Portal, SimpleGrid, Spinner, Text, Textarea } from '@chakra-ui/react'
 import { LuBuilding2, LuImagePlus, LuMapPin, LuPencil, LuPlus, LuTrash2 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
@@ -172,7 +173,9 @@ export default function FutureProjectsDialog({ open, onClose, projects: existing
                     </Box>
                     {error ? <Text role="alert" mt="10px" fontFamily={FONT} fontSize="13px" color="#B91C1C">{error}</Text> : null}
                     <Flex gap="8px" mt="16px" wrap="wrap">
+                      <Controlled id="button.projects.future-save">
                       <Button primary icon={editing ? LuPencil : LuPlus} loading={busy === 'save'} disabled={!canEdit || Boolean(busy) || !valid} onClick={save}>{editing ? 'Save changes' : 'Add project'}</Button>
+                      </Controlled>
                       {editing ? <Button disabled={Boolean(busy)} onClick={resetForm}>Cancel</Button> : null}
                     </Flex>
                   </Card>
@@ -187,7 +190,7 @@ export default function FutureProjectsDialog({ open, onClose, projects: existing
                             <Text fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="16px" fontWeight="700" color={COLORS.heading}>{project.name}</Text>
                             <Flex align="center" gap="6px" mt="5px" color={COLORS.muted}><Icon as={LuMapPin} boxSize="14px" /><Text fontFamily={FONT} fontSize="13px">{project.location}</Text></Flex>
                             {project.description ? <Text mt="9px" fontFamily={FONT} fontSize="13px" color={COLORS.muted} whiteSpace="pre-wrap">{project.description}</Text> : null}
-                            <Flex mt="14px" gap="8px"><Button icon={LuPencil} disabled={Boolean(busy)} onClick={() => edit(project)}>Edit</Button><Button icon={LuTrash2} disabled={Boolean(busy)} onClick={() => setRemoving(project)}>Remove</Button></Flex>
+                            <Flex mt="14px" gap="8px"><Controlled id="button.projects.future-edit"><Button icon={LuPencil} disabled={Boolean(busy)} onClick={() => edit(project)}>Edit</Button></Controlled><Controlled id="button.projects.future-remove"><Button icon={LuTrash2} disabled={Boolean(busy)} onClick={() => setRemoving(project)}>Remove</Button></Controlled></Flex>
                           </Box>
                         </Card>
                       ))}

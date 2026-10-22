@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import Controlled from '@/components/Controlled'
 import { Box, CloseButton, Dialog, Flex, Icon, Portal, SimpleGrid, Spinner, Text } from '@chakra-ui/react'
 import {
   LuCheck,
@@ -527,6 +528,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
   const tileActions = (image) =>
     canEdit ? (
       <Flex gap="6px">
+        <Controlled id="button.projects.gallery-replace">
         <Button
           icon={LuRefreshCw}
           aria-label="Replace image"
@@ -535,6 +537,8 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
           disabled={Boolean(busy)}
           onClick={() => startReplace(image)}
         />
+        </Controlled>
+        <Controlled id="button.projects.gallery-delete">
         <Button
           tone="dangerGhost"
           icon={LuTrash2}
@@ -546,6 +550,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
             setConfirmDelete([image])
           }}
         />
+        </Controlled>
       </Flex>
     ) : null
 
@@ -574,6 +579,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                 >
                   {allSelected ? 'Clear selection' : 'Select all'}
                 </Button>
+                <Controlled id="button.projects.gallery-delete">
                 <Button
                   tone="danger"
                   icon={LuTrash2}
@@ -585,6 +591,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                 >
                   Delete selected ({selected.size})
                 </Button>
+                </Controlled>
                 <Button disabled={Boolean(busy)} onClick={stopSelecting}>
                   Done
                 </Button>
@@ -592,10 +599,13 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
             ) : (
               <>
                 {images.length ? (
+                  <Controlled id="button.projects.gallery-delete">
                   <Button icon={LuListChecks} disabled={Boolean(busy)} onClick={() => setSelecting(true)}>
                     Select
                   </Button>
+                  </Controlled>
                 ) : null}
+                <Controlled id="button.projects.gallery-upload">
                 <Button
                   tone="primary"
                   icon={LuImagePlus}
@@ -608,6 +618,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                 >
                   {busy === 'upload' && progress ? progress : 'Upload images'}
                 </Button>
+                </Controlled>
               </>
             )}
         </Flex>
@@ -753,6 +764,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                     ) : null}
                     {canEdit && current ? (
                       <>
+                        <Controlled id="button.projects.gallery-replace">
                         <Button
                           icon={LuRefreshCw}
                           loading={busy === `replace:${current.id}`}
@@ -761,6 +773,8 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                         >
                           Replace image
                         </Button>
+                        </Controlled>
+                        <Controlled id="button.projects.gallery-delete">
                         <Button
                           tone="dangerGhost"
                           icon={LuTrash2}
@@ -772,6 +786,7 @@ export default function DevGalleryView({ gallery, projectCode, projectName }) {
                         >
                           Delete
                         </Button>
+                        </Controlled>
                       </>
                     ) : null}
                   </Flex>

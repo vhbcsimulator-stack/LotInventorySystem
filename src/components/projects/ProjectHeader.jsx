@@ -8,6 +8,8 @@ import {
   LuTable2,
 } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
+import { useControl } from '@/hooks/usePortalControls'
+import { ControlTooltip } from '@/components/Controlled'
 import { COLORS } from '@/theme/colors'
 
 const VIEWS = [
@@ -31,6 +33,10 @@ export default function ProjectHeader({
   onAction,
 }) {
   const hasProject = Boolean(project.name)
+  // Developer Controls can hide the Map tab, or leave it showing but unusable.
+  const mapControl = useControl('button.projects.view-map')
+  const views = VIEWS.filter((option) => option.value !== 'map' || !mapControl.hidden)
+  const blocked = (value) => value === 'map' && mapControl.maintenance
   return (
     <Card p={{ base: '16px', md: '24px' }} minW={0}>
       <Flex align="center" justify="space-between" gap="20px" flexWrap="wrap">
@@ -183,7 +189,7 @@ export default function ProjectHeader({
       <Box mt="18px" display={{ base: 'block', sm: 'none' }}>
         <NativeSelect.Root size="sm">
           <NativeSelect.Field value={view} onChange={(event) => onViewChange?.(event.target.value)} aria-label="Project section">
-            {VIEWS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            {views.map((option) => <option key={option.value} value={option.value} disabled={blocked(option.value)}>{option.label}{blocked(option.value) ? ' (under maintenance)' : ''}</option>)}
           </NativeSelect.Field>
           <NativeSelect.Indicator />
         </NativeSelect.Root>
@@ -201,9 +207,9 @@ export default function ProjectHeader({
         role="tablist"
         aria-label="Project section"
       >
-        {VIEWS.map((option) => {
+        {views.map((option) => {
           const active = view === option.value
-          return (
+          const tab = (
             <Flex
               as="button"
               type="button"
@@ -221,7 +227,10 @@ export default function ProjectHeader({
               color={active ? '#FFFFFF' : COLORS.subtle}
               cursor="pointer"
               aria-selected={active}
-              onClick={() => onViewChange?.(option.value)}
+              // aria-disabled, not disabled: a disabled button fires no hover, and the tooltip needs one.
+              aria-disabled={blocked(option.value) || undefined}
+              onClick={() => (blocked(option.value) ? null : onViewChange?.(option.value))}
+              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
               transition="background-color 120ms ease, color 120ms ease, box-shadow 120ms ease"
               _hover={{ bg: active ? '#00541F' : COLORS.surface, color: active ? '#FFFFFF' : COLORS.heading }}
               _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '1px' }}
@@ -231,6 +240,11 @@ export default function ProjectHeader({
                 {option.label}
               </Text>
             </Flex>
+          )
+          return blocked(option.value) ? (
+            <ControlTooltip key={option.value} message={mapControl.message}>{tab}</ControlTooltip>
+          ) : (
+            tab
           )
         })}
       </Flex>

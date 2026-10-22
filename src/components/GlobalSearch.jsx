@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Flex, Icon, Input, Text } from '@chakra-ui/react'
 import { LuClock3, LuCornerDownLeft, LuSearch, LuSparkles, LuTrash2 } from 'react-icons/lu'
+import usePortalControls from '@/hooks/usePortalControls'
 import { COMMANDS, SEARCH_SUGGESTIONS, searchCommands } from '@/lib/commands'
+import { commandAvailable } from '@/lib/portalControls'
 import { COLORS } from '@/theme/colors'
 
 const FONT = 'Inter, system-ui, sans-serif'
@@ -32,10 +34,16 @@ export default function GlobalSearch({ onRun }) {
   const boxRef = useRef(null)
   const inputRef = useRef(null)
 
-  const results = useMemo(() => searchCommands(query), [query])
+  // Nothing switched off in Developer Controls is offered, except to a developer.
+  const { controls, developer } = usePortalControls()
+  const offered = useMemo(
+    () => (command) => developer || commandAvailable(controls, command),
+    [controls, developer],
+  )
+  const results = useMemo(() => searchCommands(query, { limit: 40 }).filter(offered).slice(0, 8), [query, offered])
   const history = useMemo(
-    () => historyIds.map((id) => COMMANDS.find((command) => command.id === id)).filter(Boolean),
-    [historyIds],
+    () => historyIds.map((id) => COMMANDS.find((command) => command.id === id)).filter((command) => command && offered(command)),
+    [historyIds, offered],
   )
 
   // Clicking anywhere else puts the dropdown away.

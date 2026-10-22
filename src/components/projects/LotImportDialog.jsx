@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import Controlled from '@/components/Controlled'
 import { Box, CloseButton, Dialog, Flex, Icon, Portal, Spinner, Text } from '@chakra-ui/react'
 import { LuDownload, LuFileSpreadsheet, LuTriangleAlert } from 'react-icons/lu'
 import { CSV_TEMPLATE, commitLotImport, previewLotImport } from '@/data/lotImportData'
@@ -370,6 +371,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
               />
 
               <Flex mt="10px" align="center" justify="space-between" gap="10px" wrap="wrap">
+                <Controlled id="button.projects.import-template">
                 <Box
                   as="button"
                   type="button"
@@ -387,6 +389,7 @@ export default function LotImportDialog({ open, projectCode, projectName, terms 
                   <Icon as={LuDownload} boxSize="14px" />
                   Download template
                 </Box>
+                </Controlled>
               </Flex>
 
               {preview?.missingHeaders.length ? (

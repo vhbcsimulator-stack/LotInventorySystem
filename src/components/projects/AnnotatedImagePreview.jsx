@@ -680,7 +680,7 @@ export default function AnnotatedImagePreview({
    * lines only near its outline, or exactly inside its polygon. Clicked lots
    * are always bucket-filled.
    */
-  const [shapeMode, setShapeMode] = useState('bucket')
+  const [shapeMode, setShapeMode] = useState('polygon')
   // Statuses this project marks with a red ring rather than a colour (ERHD's Sold), and how thick the rings are.
   const circled = lotTermsFor(projectCode).circled
   const [ringThickness, setRingThickness] = useState(1)
