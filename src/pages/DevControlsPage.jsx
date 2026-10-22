@@ -181,7 +181,7 @@ export default function DevControlsPage() {
           flex="1"
           value={filter}
           onChange={(event) => setFilter(event.target.value)}
-          placeholder="Find a button — e.g. color lots, export, delete"
+          placeholder="Search Buttons"
           aria-label="Find a button"
           fontFamily={FONT}
           fontSize="13.5px"
@@ -193,7 +193,7 @@ export default function DevControlsPage() {
         const sections = [...new Set(pageButtons.map((button) => button.section))]
         return (
           <Card key={page.page}>
-            <CardHeading title={`${page.label} — buttons`} description="Hidden buttons disappear. Buttons under maintenance stay in place but cannot be pressed." mb="4px" />
+            <CardHeading title={`${page.label} | Buttons`}  mb="4px" />
             {sections.map((section) => (
               <Box key={section} mt="12px">
                 <Text

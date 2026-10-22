@@ -51,7 +51,7 @@ const accountButtons = (title) => ({
   ],
   'Each account': [
     ['profile', 'Open profile'],
-    ['remove', 'More actions → Remove'],
+    ['remove', 'More actions | Remove'],
   ],
 })
 
@@ -66,8 +66,8 @@ const BUTTONS = {
     Dashboard: [
       ['export', 'Export'],
       ['view-map', 'View map'],
-      ['explore-inventory', 'Inventory by estate → Explore'],
-      ['open-announcement', 'Announcements card → Open'],
+      ['explore-inventory', 'Inventory by estate | Explore'],
+      ['open-announcement', 'Announcements card | Open'],
     ],
   },
   projects: {
@@ -89,16 +89,16 @@ const BUTTONS = {
     ],
     'Lot table': [
       ['lot-status', 'Change status in the table'],
-      ['lot-details', 'Row menu → View details'],
-      ['lot-copy-row', 'Row menu → Copy row'],
-      ['lot-update', 'Row menu → Update'],
-      ['lot-delete', 'Row menu → Delete'],
+      ['lot-details', 'Row menu | View details'],
+      ['lot-copy-row', 'Row menu | Copy row'],
+      ['lot-update', 'Row menu | Update'],
+      ['lot-delete', 'Row menu | Delete'],
       ['bulk-delete', 'Delete selected'],
     ],
     'Map view': [
       ['color-lots', 'Color lots'],
-      ['annotations-upload', 'Annotations → Upload / replace COCO JSON'],
-      ['annotations-delete', 'Annotations → Delete outlines'],
+      ['annotations-upload', 'Annotations | Upload / replace COCO JSON'],
+      ['annotations-delete', 'Annotations | Delete outlines'],
       ['add-map', 'Add map'],
       ['map-fullsize', 'Open full size'],
       ['map-download', 'Download image'],
@@ -125,16 +125,16 @@ const BUTTONS = {
     Toolbar: [['export', 'Export CSV']],
     'Each client': [
       ['view', 'Open client details'],
-      ['edit', 'More actions → Edit'],
-      ['delete', 'More actions → Delete'],
+      ['edit', 'More actions | Edit'],
+      ['delete', 'More actions | Delete'],
     ],
   },
   applications: {
     'Each application': [
       ['create-account', 'Copy to form (create account)'],
-      ['reject', 'More actions → Reject'],
-      ['pending', 'More actions → Move back to pending'],
-      ['delete', 'More actions → Delete'],
+      ['reject', 'More actions | Reject'],
+      ['pending', 'More actions | Move back to pending'],
+      ['delete', 'More actions | Delete'],
     ],
   },
   brokers: accountButtons('Brokers'),
@@ -143,8 +143,8 @@ const BUTTONS = {
   announcements: {
     Toolbar: [['post', 'Post New Announcement']],
     'Each announcement': [
-      ['edit', 'More actions → Edit'],
-      ['delete', 'More actions → Delete'],
+      ['edit', 'More actions | Edit'],
+      ['delete', 'More actions | Delete'],
     ],
   },
 }
