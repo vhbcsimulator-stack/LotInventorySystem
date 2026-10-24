@@ -26,81 +26,9 @@ import { refreshTables } from '@/data/queryClient'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
 import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
+import { downloadMap, fileNameOf } from '@/lib/mapDownload'
 
 const FONT = 'Inter, system-ui, sans-serif'
-
-/** The longest side, in pixels, an SVG map is drawn at when downloaded as PNG. */
-const DOWNLOAD_MIN_SIDE = 4096
-const DOWNLOAD_MAX_SIDE = 8192
-
-/** An SVG's own size: its width and height, or failing those its viewBox. */
-function svgSize(text) {
-  const root = new DOMParser().parseFromString(text, 'image/svg+xml').documentElement
-  const box = (root.getAttribute('viewBox') ?? '').split(/[\s,]+/).map(Number)
-  const width = parseFloat(root.getAttribute('width')) || box[2] || 0
-  const height = parseFloat(root.getAttribute('height')) || box[3] || 0
-  return { width, height }
-}
-
-/** Saves `blob` as `fileName` through a temporary link. */
-function saveBlob(blob, fileName) {
-  const href = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = href
-  link.download = fileName
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  setTimeout(() => URL.revokeObjectURL(href), 1000)
-}
-
-/**
- * Downloads a map as a picture. A JPG, PNG or WebP map is saved as uploaded;
- * an SVG map — every colored map is one — is drawn to a PNG large enough to
- * keep its lettering sharp, since most people want a picture they can open
- * and share rather than a vector file.
- */
-async function downloadMap(url, baseName) {
-  const response = await fetch(url)
-  if (!response.ok) throw new Error('The map could not be loaded for download.')
-  const blob = await response.blob()
-  const svg = /svg/i.test(blob.type) || /\.svg(?:$|[?#])/i.test(url)
-  if (!svg) {
-    const ext = /\.(png|jpe?g|webp|gif)(?:$|[?#])/i.exec(url)?.[1].toLowerCase() ?? blob.type.split('/')[1] ?? 'png'
-    saveBlob(blob, `${baseName}.${ext === 'jpeg' ? 'jpg' : ext}`)
-    return
-  }
-  const text = await blob.text()
-  const href = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }))
-  try {
-    const image = await new Promise((resolve, reject) => {
-      const element = new Image()
-      element.onload = () => resolve(element)
-      element.onerror = () => reject(new Error('The map could not be drawn for download.'))
-      element.src = href
-    })
-    const own = svgSize(text)
-    const width = own.width || image.naturalWidth || 1
-    const height = own.height || image.naturalHeight || 1
-    const side = Math.max(width, height)
-    const scale = Math.min(DOWNLOAD_MAX_SIDE, Math.max(DOWNLOAD_MIN_SIDE, side)) / side
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.round(width * scale)
-    canvas.height = Math.round(height * scale)
-    const context = canvas.getContext('2d')
-    if (!context) throw new Error('The browser could not create the image.')
-    context.fillStyle = '#FFFFFF'
-    context.fillRect(0, 0, canvas.width, canvas.height)
-    context.imageSmoothingQuality = 'high'
-    context.drawImage(image, 0, 0, canvas.width, canvas.height)
-    const png = await new Promise((resolve, reject) =>
-      canvas.toBlob((result) => (result ? resolve(result) : reject(new Error('The browser could not save the map as PNG.'))), 'image/png'),
-    )
-    saveBlob(png, `${baseName}.png`)
-  } finally {
-    URL.revokeObjectURL(href)
-  }
-}
 
 function ActionButton({ icon, children, tone = 'neutral', loading, ...rest }) {
   const tones = {
@@ -496,7 +424,7 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
     setDownloading(map.id)
     try {
       const name = `${projectName || projectCode} ${label}${map.caption ? ` ${map.caption}` : ''}`
-      await downloadMap(map.url, name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'map')
+      await downloadMap(map.url, fileNameOf(name))
     } catch (err) {
       notifyFailed('Map not downloaded', err)
     } finally {
