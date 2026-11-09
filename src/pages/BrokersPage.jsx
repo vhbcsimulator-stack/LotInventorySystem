@@ -38,7 +38,7 @@ import {
   validateBroker,
 } from '@/data/brokersData'
 import IdPicture from '@/components/IdPicture'
-import { setApplicationStatus } from '@/data/applicationsData'
+import { deleteApplication } from '@/data/applicationsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
@@ -1331,12 +1331,13 @@ export function AccountsPage({ kind = 'broker', prefill, applicationId, idPictur
               notifyFailed('Account created, but its ID picture was not saved', err)
             }
           }
+          // Approved: the account now exists, so the application is removed from the table.
           if (application) {
             setApplication(null)
             try {
-              await setApplicationStatus(application, 'approved', kind)
+              await deleteApplication(application)
             } catch (err) {
-              notifyFailed('Account created, but the application is still pending', err)
+              notifyFailed('Account created, but the application was not removed', err)
             }
           }
           reload()

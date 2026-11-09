@@ -541,14 +541,22 @@ export default function PendingApplicationsPage({ onNavigate }) {
       setDeleting(application)
       return
     }
-    const status = action === 'reject' ? 'rejected' : 'pending'
+    if (action === 'reject') {
+      // Rejected applications are not kept: the row is removed from the table.
+      try {
+        await deleteApplication(application.id)
+        notifySaved('Application rejected', `${fullName(application)}'s application was rejected and removed.`)
+      } catch (err) {
+        notifyFailed('Could not reject the application', err)
+      }
+      reload()
+      return
+    }
+    const status = 'pending'
     try {
       // Only from the status shown here, so two reviewers never undo each other.
       await setApplicationStatus(application.id, status, null, { from: application.status })
-      notifySaved(
-        status === 'rejected' ? 'Application rejected' : 'Application moved back to pending',
-        `${fullName(application)}'s application is now ${status}.`,
-      )
+      notifySaved('Application moved back to pending', `${fullName(application)}'s application is now ${status}.`)
       reload()
     } catch (err) {
       if (isEditConflict(err)) {
