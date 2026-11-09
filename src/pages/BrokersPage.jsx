@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Box, CloseButton, Dialog, Flex, Grid, Icon, Input, Menu, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
 import {
   LuAward,
@@ -33,6 +33,7 @@ import {
   deleteAccount,
   fetchAccounts,
   fetchBrokerNames,
+  matchBroker,
   MAX_SALES_AGENTS_PER_BROKER,
   salesAgentCounts,
   setBrokerIdPicture,
@@ -232,11 +233,28 @@ function Field({ field, value, error, onChange, disabled }) {
  * A sales agent's broker, chosen from every broker account (A–Z). Each shows
  * how many agents they have; a broker at MAX_SALES_AGENTS_PER_BROKER cannot be picked.
  */
-function BrokerPicker({ value, error, onChange, disabled }) {
+function BrokerPicker({ value, error, onChange, onPick, suggestedName, disabled }) {
   const { data, loading } = useApiQuery(fetchBrokerNames)
   const brokers = data?.brokers ?? []
   const counts = salesAgentCounts(data?.salesAgents ?? [])
   const id = 'broker-brokerId'
+  const suggested = suggestedName ? matchBroker(brokers, suggestedName) : null
+  const suggestedFull = suggested ? (counts.get(String(suggested.id)) ?? 0) >= MAX_SALES_AGENTS_PER_BROKER : false
+
+  // From a pending application: pick the broker the applicant named, once the list loads.
+  const autoPicked = useRef(false)
+  useEffect(() => {
+    if (autoPicked.current || !data || !suggestedName) return
+    autoPicked.current = true
+    if (!value && suggested && !suggestedFull) onPick(String(suggested.id))
+  }, [data, suggestedName, value, suggested, suggestedFull, onPick])
+
+  let hint = ''
+  if (suggestedName && data) {
+    if (!suggested) hint = `The applicant named "${suggestedName}" as their broker, but no broker account matches — choose one.`
+    else if (suggestedFull) hint = `The applicant named ${suggested.name}, who already has ${MAX_SALES_AGENTS_PER_BROKER} sales agents — choose another.`
+    else if (String(value) === String(suggested.id)) hint = 'Picked from the broker named in the application.'
+  }
   const placeholder = loading && !data ? 'Loading brokers…' : brokers.length ? 'Select a broker' : 'No brokers yet — add one first'
   return (
     <Box>
@@ -270,6 +288,10 @@ function BrokerPicker({ value, error, onChange, disabled }) {
       {error ? (
         <Text id={`${id}-error`} mt="4px" fontFamily={FONT} fontSize="12px" color="#B91C1C">
           {error}
+        </Text>
+      ) : hint ? (
+        <Text mt="4px" fontFamily={FONT} fontSize="12px" color={COLORS.muted}>
+          {hint}
         </Text>
       ) : null}
     </Box>
@@ -346,6 +368,7 @@ function CreatedCredentials({ account, copy, onDone }) {
       <Flex mt="12px" direction="column" gap="10px">
         <CopyRow label="Email" value={account.email} />
         <CopyRow label="Temporary Password" value={account.password} />
+        {account.otp ? <CopyRow label="OTP" value={account.otp} /> : null}
       </Flex>
       <Box
         as="button"
@@ -376,7 +399,7 @@ function CreatedCredentials({ account, copy, onDone }) {
  * submit. After a create it swaps to the one-time credentials until Done.
  * `initialForm` fills it in on opening, e.g. from a pending application.
  */
-function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, showIdPicture, onClose, onCreated }) {
+function AddBrokerDialog({ copy, open, disabled, initialForm, applicationId, note, idPicture, showIdPicture, onClose, onCreated }) {
   const [form, setForm] = useState(() => ({ ...EMPTY_FORM, ...initialForm }))
   const [submitted, setSubmitted] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -385,6 +408,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
 
   const errors = submitted ? validateBroker(form, copy.kind) : {}
   const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))
+  const pickBroker = useCallback((brokerId) => setForm((prev) => ({ ...prev, brokerId })), [])
   const field = (spec) => (
     <Field key={spec.key} field={spec} value={form[spec.key]} error={errors[spec.key]} onChange={set(spec.key)} disabled={busy} />
   )
@@ -406,7 +430,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
 
     setBusy(true)
     try {
-      const account = await createAccount(copy.kind, form)
+      const account = await createAccount(copy.kind, form, { applicationId })
       const name = `${form.firstName.trim()} ${form.lastName.trim()}`
       setForm(EMPTY_FORM)
       setSubmitted(false)
@@ -417,7 +441,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
         onClose()
         return
       }
-      setCreated({ name, email: account.email, password: account.password })
+      setCreated({ name, email: account.email, password: account.password, otp: account.otp })
       notifySaved(`${copy.title} account created`, `The sign-in details were emailed to ${account.email}.`)
     } catch (err) {
       setError(err.message)
@@ -477,7 +501,14 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
                     </Flex>
                     {FIELDS.slice(2).map(field)}
                     {copy.kind === 'sales_agent' ? (
-                      <BrokerPicker value={form.brokerId} error={errors.brokerId} onChange={set('brokerId')} disabled={busy} />
+                      <BrokerPicker
+                        value={form.brokerId}
+                        error={errors.brokerId}
+                        onChange={set('brokerId')}
+                        onPick={pickBroker}
+                        suggestedName={applicationId ? form.brokerName : ''}
+                        disabled={busy}
+                      />
                     ) : null}
 
                     {/* A broker made from an application keeps its ID picture: check it against the details above. */}
@@ -1273,6 +1304,7 @@ export function AccountsPage({ kind = 'broker', prefill, applicationId, idPictur
         open={adding}
         disabled={!connected}
         initialForm={prefill}
+        applicationId={application}
         note={application ? 'Filled in from a pending application. Check the details before creating the account.' : ''}
         idPicture={application ? idPicture : null}
         showIdPicture={Boolean(application) && kind === 'broker'}

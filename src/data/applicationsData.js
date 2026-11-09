@@ -7,8 +7,9 @@
  * reviewed_at, created_at, updated_at, broker_name, otp
  * (see supabase/migrations/20261107_add_application_broker_name_otp.sql).
  *
- * `otp` is never read by the portal: fetches name their columns (no `*`) so
- * the code never reaches the browser.
+ * `otp` is never fetched by the portal: fetches name their columns (no `*`).
+ * The create-broker function reads it when an account is made from the
+ * application and returns it once, beside the temporary password.
  *
  * The portal never creates an account from an application directly: "Copy to
  * form" opens the chosen kind's create dialog with the details filled in, and
@@ -72,13 +73,18 @@ export function normalizeApplication(row) {
   }
 }
 
-/** The account form's fields, filled from an application (the email lower-cased, as accounts store it). */
+/**
+ * The account form's fields, filled from an application (the email lower-cased,
+ * as accounts store it). `brokerName` is the broker the applicant named; a sales
+ * agent's form picks the matching broker with it.
+ */
 export function applicationForm(application) {
   return {
     firstName: application.firstName,
     lastName: application.lastName,
     mobileNumber: application.mobileNumber,
     email: application.email.toLowerCase(),
+    brokerName: application.brokerName,
   }
 }
 

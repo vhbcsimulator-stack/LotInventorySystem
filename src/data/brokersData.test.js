@@ -1,6 +1,29 @@
 import { describe, expect, it } from 'vitest'
 
-const { cleanBroker, creditSales, salesAgentCounts, validateBroker } = await import('./brokersData')
+const { cleanBroker, creditSales, matchBroker, salesAgentCounts, validateBroker } = await import('./brokersData')
+
+describe('matchBroker', () => {
+  const brokers = [
+    { id: 1, name: 'Juan Dela Cruz', email: 'juan@example.com' },
+    { id: 2, name: 'Maria Santos', email: 'maria@example.com' },
+    { id: 3, name: 'Ana Reyes', email: '' },
+    { id: 4, name: 'Ana Reyes', email: 'ana2@example.com' },
+  ]
+
+  it('matches the full name ignoring case and extra spaces', () => {
+    expect(matchBroker(brokers, '  juan   dela CRUZ ')?.id).toBe(1)
+  })
+
+  it('matches an email', () => {
+    expect(matchBroker(brokers, 'Maria@Example.com')?.id).toBe(2)
+  })
+
+  it('gives null for no name, no match, or a name shared by two brokers', () => {
+    expect(matchBroker(brokers, '')).toBeNull()
+    expect(matchBroker(brokers, 'Pedro Penduko')).toBeNull()
+    expect(matchBroker(brokers, 'Ana Reyes')).toBeNull()
+  })
+})
 
 const VALID = { firstName: 'Juan', lastName: 'Dela Cruz', mobileNumber: '0917 123 4567', email: 'juan@example.com' }
 

@@ -195,6 +195,21 @@ Deno.serve(async (req: Request) => {
     })
   }
 
+  // Made from a pending application: its one-time code from the app's sign-up
+  // flow, shown beside the password. Read here because the portal never selects
+  // `otp` itself. Missing or unreadable, the account is still made.
+  let otp: string | null = null
+  const applicationId = clean(body.applicationId)
+  if (applicationId) {
+    const { data: application, error: applicationError } = await admin
+      .from('account_applications')
+      .select('otp')
+      .eq('id', applicationId)
+      .maybeSingle()
+    if (applicationError) console.error('[create-broker] could not read the application OTP:', applicationError.message)
+    otp = clean(application?.otp) || null
+  }
+
   // Also returned once, in case the email goes astray; it is not stored anywhere readable.
-  return reply(200, { id: row.id, authUserId: created.user.id, email, password })
+  return reply(200, { id: row.id, authUserId: created.user.id, email, password, otp })
 })

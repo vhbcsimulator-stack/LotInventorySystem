@@ -174,6 +174,20 @@ export function salesAgentCounts(salesAgents) {
   return counts
 }
 
+const nameKey = (value) => text(value).trim().replace(/\s+/g, ' ').toLowerCase()
+
+/**
+ * The broker (from fetchBrokerNames' `brokers`) an applicant named, e.g. an
+ * application's `brokerName`: matched on full name, ignoring case and extra
+ * spaces, or on email. Null when none matches or the name fits more than one.
+ */
+export function matchBroker(brokers, name) {
+  const key = nameKey(name)
+  if (!key) return null
+  const matches = brokers.filter((broker) => nameKey(broker.name) === key || (broker.email && nameKey(broker.email) === key))
+  return matches.length === 1 ? matches[0] : null
+}
+
 /**
  * Every broker's and sales agent's full name, A–Z, with their id: the choices
  * for who sold a lot. The name is stored in the lot's `sold_by` as written here,
@@ -278,11 +292,19 @@ fetchBrokers.tables = () => fetchAccounts.tables({ kind: 'broker' })
  * step from the create-broker function (told which by `kind`), which emails the
  * sign-in details and resolves { id, authUserId, email, password } — `password`
  * is returned only here, so show it now. A sales agent's `form.brokerId` records
- * the broker they work under. Throws with a readable message on failure.
+ * the broker they work under. Made from a pending application (`applicationId`),
+ * it also resolves that application's `otp` (null when it has none), read by the
+ * function so the code is never fetched by the portal otherwise. Throws with a
+ * readable message on failure.
  */
-export async function createAccount(kind, form) {
+export async function createAccount(kind, form, { applicationId } = {}) {
   const brokerId = kind === 'sales_agent' ? String(form.brokerId ?? '').trim() : ''
-  return invoke('create-broker', { ...cleanBroker(form), kind, ...(brokerId ? { brokerId } : {}) })
+  return invoke('create-broker', {
+    ...cleanBroker(form),
+    kind,
+    ...(brokerId ? { brokerId } : {}),
+    ...(applicationId ? { applicationId: String(applicationId) } : {}),
+  })
 }
 
 /**
