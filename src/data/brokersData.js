@@ -157,23 +157,6 @@ async function accountNames(table) {
   }
 }
 
-/**
- * The most sales agents one broker can have. Also enforced by the create-broker
- * function and a database trigger (20261107_limit_sales_agents_per_broker.sql).
- */
-export const MAX_SALES_AGENTS_PER_BROKER = 20
-
-/** How many sales agents work under each broker id (as a string), from fetchBrokerNames' `salesAgents`. */
-export function salesAgentCounts(salesAgents) {
-  const counts = new Map()
-  for (const agent of salesAgents) {
-    if (agent.brokerId == null) continue
-    const key = String(agent.brokerId)
-    counts.set(key, (counts.get(key) ?? 0) + 1)
-  }
-  return counts
-}
-
 const nameKey = (value) => text(value).trim().replace(/\s+/g, ' ').toLowerCase()
 
 /**
@@ -217,11 +200,9 @@ export function cleanBroker({ firstName = '', lastName = '', mobileNumber = '', 
  * it can be saved. A mobile number may carry +, spaces, dashes, and
  * parentheses, but needs 10 to 13 digits (09171234567, +63 917 123 4567).
  */
-export function validateBroker(form, kind = 'broker') {
+export function validateBroker(form) {
   const broker = cleanBroker(form)
   const errors = {}
-  // A sales agent works under a broker; that comes first in the form.
-  if (kind === 'sales_agent' && !String(form.brokerId ?? '').trim()) errors.brokerId = 'Choose their broker.'
   if (!broker.firstName) errors.firstName = 'Enter a first name.'
   if (!broker.lastName) errors.lastName = 'Enter a last name.'
   const digits = broker.mobileNumber.replace(/\D/g, '')

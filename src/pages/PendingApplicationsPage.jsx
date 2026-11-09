@@ -192,37 +192,52 @@ function HeaderCell({ children, ...rest }) {
   )
 }
 
+const COPY_BUTTON_STYLE = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+  h: '32px',
+  px: '12px',
+  borderRadius: '8px',
+  bg: COLORS.brandGreen,
+  color: '#FFFFFF',
+  fontFamily: FONT,
+  fontWeight: '600',
+  fontSize: '13px',
+  whiteSpace: 'nowrap',
+  cursor: 'pointer',
+  _hover: { bg: '#00541F' },
+  _disabled: { opacity: 0.5, cursor: 'not-allowed' },
+  _focusVisible: { outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' },
+}
+
 /**
- * "Copy to form": opens the create dialog of the chosen kind with the
- * applicant's details filled in. The kind they asked for is listed first.
+ * "Copy to form": opens the create dialog with the applicant's details filled
+ * in. The application's requested kind opens straight away; one with no
+ * requested kind asks which kind of account to create.
  */
 function CopyToFormMenu({ application, disabled, onCopy }) {
   const control = useControl('button.applications.create-account')
   if (control.hidden) return null
-  const kinds = KINDS.includes(application.accountType)
-    ? [application.accountType, ...KINDS.filter((kind) => kind !== application.accountType)]
-    : KINDS
-  const menu = (
+  const requested = KINDS.includes(application.accountType) ? application.accountType : ''
+  const menu = requested ? (
+    <Box
+      as="button"
+      type="button"
+      {...COPY_BUTTON_STYLE}
+      disabled={disabled || control.maintenance}
+      aria-label={`Copy ${fullName(application)}'s details to a ${ACCOUNT_KINDS[requested].singular} account form`}
+      onClick={() => onCopy(requested)}
+    >
+      <Icon as={LuClipboardCopy} boxSize="14px" />
+      Copy to form
+    </Box>
+  ) : (
     <Menu.Root onSelect={({ value }) => onCopy(value)}>
       <Menu.Trigger
+        {...COPY_BUTTON_STYLE}
         disabled={disabled || control.maintenance}
         aria-label={`Copy ${fullName(application)}'s details to an account form`}
-        display="flex"
-        alignItems="center"
-        gap="6px"
-        h="32px"
-        px="12px"
-        borderRadius="8px"
-        bg={COLORS.brandGreen}
-        color="#FFFFFF"
-        fontFamily={FONT}
-        fontWeight="600"
-        fontSize="13px"
-        whiteSpace="nowrap"
-        cursor="pointer"
-        _hover={{ bg: '#00541F' }}
-        _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
-        _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
       >
         <Icon as={LuClipboardCopy} boxSize="14px" />
         Copy to form
@@ -235,14 +250,9 @@ function CopyToFormMenu({ application, disabled, onCopy }) {
               <Menu.ItemGroupLabel fontSize="11px" color={COLORS.muted}>
                 Create account as
               </Menu.ItemGroupLabel>
-              {kinds.map((kind) => (
-                <Menu.Item key={kind} value={kind} fontSize="13px" justifyContent="space-between" gap="12px">
+              {KINDS.map((kind) => (
+                <Menu.Item key={kind} value={kind} fontSize="13px">
                   {ACCOUNT_KINDS[kind].title}
-                  {kind === application.accountType ? (
-                    <Text as="span" fontSize="11px" color={COLORS.brandGreen} fontWeight="600">
-                      Requested
-                    </Text>
-                  ) : null}
                 </Menu.Item>
               ))}
             </Menu.ItemGroup>

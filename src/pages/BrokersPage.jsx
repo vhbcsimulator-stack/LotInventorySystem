@@ -34,8 +34,6 @@ import {
   fetchAccounts,
   fetchBrokerNames,
   matchBroker,
-  MAX_SALES_AGENTS_PER_BROKER,
-  salesAgentCounts,
   setBrokerIdPicture,
   validateBroker,
 } from '@/data/brokersData'
@@ -230,31 +228,51 @@ function Field({ field, value, error, onChange, disabled }) {
 }
 
 /**
- * A sales agent's broker, chosen from every broker account (A–Z). Each shows
- * how many agents they have; a broker at MAX_SALES_AGENTS_PER_BROKER cannot be picked.
+ * A sales agent's broker, set automatically from the pending application: the
+ * broker account matching the name the applicant gave (see matchBroker). Read-only;
+ * with no match the sales agent is created without a broker.
  */
-function BrokerPicker({ value, error, onChange, onPick, suggestedName, disabled }) {
+function ApplicationBroker({ value, suggestedName, onPick }) {
+  const { data, loading } = useApiQuery(fetchBrokerNames)
+  const suggested = suggestedName ? matchBroker(data?.brokers ?? [], suggestedName) : null
+
+  // Once the broker list loads, record the matched broker on the form.
+  const picked = useRef(false)
+  useEffect(() => {
+    if (picked.current || !data) return
+    picked.current = true
+    if (suggested && String(value) !== String(suggested.id)) onPick(String(suggested.id))
+  }, [data, suggested, value, onPick])
+
+  let shown = suggested?.name ?? ''
+  if (loading && !data) {
+    shown = 'Finding the broker…'
+  } else if (!suggestedName) {
+    shown = 'None'
+  } else if (!suggested) {
+    shown = 'None'
+  }
+
+  return (
+    <Box>
+      <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
+        Broker
+      </Text>
+      <Flex align="center" gap="8px" h="40px" px="12px" bg={COLORS.canvas} border="1px solid" borderColor={COLORS.border} borderRadius="8px">
+        <Icon as={LuUserCheck} boxSize="15px" color={COLORS.subtle} flexShrink={0} />
+        <Text fontFamily={FONT} fontWeight="500" fontSize="14px" color={COLORS.heading} truncate>
+          {shown}
+        </Text>
+      </Flex>
+    </Box>
+  )
+}
+
+/** A sales agent's broker, chosen from every broker account (A–Z), when added from the portal. */
+function BrokerPicker({ value, error, onChange, disabled }) {
   const { data, loading } = useApiQuery(fetchBrokerNames)
   const brokers = data?.brokers ?? []
-  const counts = salesAgentCounts(data?.salesAgents ?? [])
   const id = 'broker-brokerId'
-  const suggested = suggestedName ? matchBroker(brokers, suggestedName) : null
-  const suggestedFull = suggested ? (counts.get(String(suggested.id)) ?? 0) >= MAX_SALES_AGENTS_PER_BROKER : false
-
-  // From a pending application: pick the broker the applicant named, once the list loads.
-  const autoPicked = useRef(false)
-  useEffect(() => {
-    if (autoPicked.current || !data || !suggestedName) return
-    autoPicked.current = true
-    if (!value && suggested && !suggestedFull) onPick(String(suggested.id))
-  }, [data, suggestedName, value, suggested, suggestedFull, onPick])
-
-  let hint = ''
-  if (suggestedName && data) {
-    if (!suggested) hint = `The applicant named "${suggestedName}" as their broker, but no broker account matches — choose one.`
-    else if (suggestedFull) hint = `The applicant named ${suggested.name}, who already has ${MAX_SALES_AGENTS_PER_BROKER} sales agents — choose another.`
-    else if (String(value) === String(suggested.id)) hint = 'Picked from the broker named in the application.'
-  }
   const placeholder = loading && !data ? 'Loading brokers…' : brokers.length ? 'Select a broker' : 'No brokers yet — add one first'
   return (
     <Box>
@@ -271,27 +289,18 @@ function BrokerPicker({ value, error, onChange, onPick, suggestedName, disabled 
           borderColor={error ? '#DC2626' : undefined}
         >
           <option value="">{placeholder}</option>
-          {brokers.map((broker) => {
-            const count = counts.get(String(broker.id)) ?? 0
-            const full = count >= MAX_SALES_AGENTS_PER_BROKER
-            return (
-              <option key={broker.id} value={broker.id} disabled={full}>
-                {broker.name}
-                {broker.email ? ` (${broker.email})` : ''}
-                {` — ${count}/${MAX_SALES_AGENTS_PER_BROKER} agents${full ? ', full' : ''}`}
-              </option>
-            )
-          })}
+          {brokers.map((broker) => (
+            <option key={broker.id} value={broker.id}>
+              {broker.name}
+              {broker.email ? ` (${broker.email})` : ''}
+            </option>
+          ))}
         </NativeSelect.Field>
         <NativeSelect.Indicator />
       </NativeSelect.Root>
       {error ? (
         <Text id={`${id}-error`} mt="4px" fontFamily={FONT} fontSize="12px" color="#B91C1C">
           {error}
-        </Text>
-      ) : hint ? (
-        <Text mt="4px" fontFamily={FONT} fontSize="12px" color={COLORS.muted}>
-          {hint}
         </Text>
       ) : null}
     </Box>
@@ -406,7 +415,13 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, applicationId, not
   const [error, setError] = useState('')
   const [created, setCreated] = useState(null)
 
-  const errors = submitted ? validateBroker(form, copy.kind) : {}
+  // Added from the portal (not an application), a sales agent's broker is picked from the dropdown and required.
+  const pickingBroker = copy.kind === 'sales_agent' && !applicationId
+  const check = (values) => ({
+    ...(pickingBroker && !String(values.brokerId ?? '').trim() ? { brokerId: 'Choose their broker.' } : {}),
+    ...validateBroker(values),
+  })
+  const errors = submitted ? check(form) : {}
   const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))
   const pickBroker = useCallback((brokerId) => setForm((prev) => ({ ...prev, brokerId })), [])
   const field = (spec) => (
@@ -426,7 +441,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, applicationId, not
     event.preventDefault()
     setSubmitted(true)
     setError('')
-    if (Object.keys(validateBroker(form, copy.kind)).length) return
+    if (Object.keys(check(form)).length) return
 
     setBusy(true)
     try {
@@ -500,15 +515,11 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, applicationId, not
                       {FIELDS.slice(0, 2).map(field)}
                     </Flex>
                     {FIELDS.slice(2).map(field)}
-                    {copy.kind === 'sales_agent' ? (
-                      <BrokerPicker
-                        value={form.brokerId}
-                        error={errors.brokerId}
-                        onChange={set('brokerId')}
-                        onPick={pickBroker}
-                        suggestedName={applicationId ? form.brokerName : ''}
-                        disabled={busy}
-                      />
+                    {copy.kind === 'sales_agent' && applicationId ? (
+                      <ApplicationBroker value={form.brokerId} suggestedName={form.brokerName} onPick={pickBroker} />
+                    ) : null}
+                    {pickingBroker ? (
+                      <BrokerPicker value={form.brokerId} error={errors.brokerId} onChange={set('brokerId')} disabled={busy} />
                     ) : null}
 
                     {/* A broker made from an application keeps its ID picture: check it against the details above. */}
@@ -1280,9 +1291,9 @@ export function AccountsPage({ kind = 'broker', prefill, applicationId, idPictur
             ) : (
               <Box p="16px">
                 {brokers.length ? (
-                  <EmptyState icon={LuSearch} title={`No matching ${copy.plural}`} hint="Try a different name, email, or mobile number." />
+                  <EmptyState icon={LuSearch} title={`No matching ${copy.plural}`}  />
                 ) : (
-                  <EmptyState icon={LuUsers} title={`No ${copy.plural} yet`} hint={`Use Add ${copy.titlePlural} to create the first account.`} />
+                  <EmptyState icon={LuUsers} title={`No ${copy.plural} yet`}  />
                 )}
               </Box>
             )}

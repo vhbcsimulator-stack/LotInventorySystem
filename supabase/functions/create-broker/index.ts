@@ -20,9 +20,6 @@ declare const Deno: {
   serve(handler: (request: Request) => Response | Promise<Response>): void
 }
 
-// Matches MAX_SALES_AGENTS_PER_BROKER in src/data/brokersData.js and the database trigger.
-const MAX_SALES_AGENTS_PER_BROKER = 20
-const BROKER_FULL = `That broker already has ${MAX_SALES_AGENTS_PER_BROKER} sales agents, the most allowed. Choose another broker.`
 
 const EMAIL_PATTERN =/^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -108,20 +105,12 @@ Deno.serve(async (req: Request) => {
   if (!firstName || !lastName || !mobileNumber || !email) return reply(400, { error: 'All fields are required.' })
   if (!EMAIL_PATTERN.test(email)) return reply(400, { error: 'Enter a valid email address.' })
 
-  // A sales agent works under a broker: check the one picked exists before making the login.
+  // A sales agent's broker, matched from their application by the portal. Optional:
+  // with none, the agent is saved without a broker. One given must still exist.
   const brokerId = account.table === 'sales_agents' ? clean(body.brokerId) : ''
-  if (account.table === 'sales_agents') {
-    if (!brokerId) return reply(400, { error: "Choose the sales agent's broker." })
+  if (brokerId) {
     const { data: broker, error: brokerError } = await admin.from('brokers').select('id').eq('id', brokerId).maybeSingle()
-    if (brokerError || !broker) return reply(400, { error: 'That broker no longer exists. Choose another.' })
-    // Checked before the login is made; the database trigger
-    // (20261107_limit_sales_agents_per_broker.sql) is the final guard.
-    const { count, error: countError } = await admin
-      .from('sales_agents')
-      .select('id', { count: 'exact', head: true })
-      .eq('broker_id', brokerId)
-    if (countError) return reply(500, { error: countError.message })
-    if ((count ?? 0) >= MAX_SALES_AGENTS_PER_BROKER) return reply(409, { error: BROKER_FULL })
+    if (brokerError || !broker) return reply(400, { error: 'The broker named in the application no longer exists.' })
   }
 
   /*
@@ -169,14 +158,11 @@ Deno.serve(async (req: Request) => {
   if (insertError) {
     await admin.auth.admin.deleteUser(created.user.id)
     const taken = insertError.code === '23505'
-    const brokerFull = /broker_full/i.test(insertError.message)
     const noBrokerColumn = /broker_id/i.test(insertError.message)
-    return reply(taken || brokerFull ? 409 : 500, {
+    return reply(taken ? 409 : 500, {
       error: taken
         ? `A ${account.label} with the email ${email} already exists.`
-        : brokerFull
-          ? BROKER_FULL
-          : noBrokerColumn
+        : noBrokerColumn
           ? 'sales_agents has no broker_id column yet — run supabase/migrations/20261106_add_sales_agent_broker_id.sql.'
           : insertError.message,
     })
