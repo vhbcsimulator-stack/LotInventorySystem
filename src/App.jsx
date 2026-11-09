@@ -29,7 +29,7 @@ const PAGE_TITLES = {
   projects: 'Projects & Lots',
   announcements: 'Announcements',
   brokers: 'Add Brokers',
-  salesAgents: 'Add Sales Agents',
+  salesAgents: 'Add Salespeople',
   applications: 'Pending Applications',
   clients: 'Clients',
   devControls: 'Developer Controls',

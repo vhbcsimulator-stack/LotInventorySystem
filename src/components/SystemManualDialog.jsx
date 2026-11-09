@@ -70,7 +70,7 @@ const SECTIONS = [
         'Open Project Actions and choose Add lot, or use a row’s update action.',
         'Enter the identifier, phase or tower when applicable, category, area, and status. MSCC units also have unit type, floor level, view, and end-unit fields.',
         'If a lot is sold, record Sold By in the edit form. Save and confirm the success message.',
-        'For a reserved lot, open its details and choose Default, Client Reserved, or Company Reserved under Reserve Type. Client Reserved also asks who reserved it (a broker or sales agent, or Other… and a name) and the client.',
+        'For a reserved lot, open its details and choose Default, Client Reserved, or Company Reserved under Reserve Type. Client Reserved also asks who reserved it (a broker or salesperson, or Other… and a name) and the client.',
         'Reserve Type changes are not saved as you pick or type. Select the check icon to save them, or the cross icon to discard them and go back to what was saved. For Client Reserved the check icon is enabled once who reserved it and the client are both chosen.',
       ] },
       { heading: 'Status and map colors', points: [

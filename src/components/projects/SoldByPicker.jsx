@@ -36,17 +36,17 @@ export default function SoldByPicker({ id, value, onChange, disabled, fieldProps
 
   const placeholder =
     loading && !accounts.length
-      ? agents ? 'Loading sales agents…' : 'Loading brokers…'
+      ? agents ? 'Loading salespeople…' : 'Loading brokers…'
       : shared
         ? `Which ${value}?`
-        : agents ? 'Choose a sales agent' : 'Choose a broker'
+        : agents ? 'Choose a salesperson' : 'Choose a broker'
 
   return (
     <Flex direction="column" gap="6px" w="full">
       <NativeSelect.Root disabled={disabled}>
         <NativeSelect.Field
           id={id}
-          aria-label={agents ? 'Sales agent' : 'Sold by'}
+          aria-label={agents ? 'Salesperson' : 'Sold by'}
           title={picked?.email}
           value={picked?.email ?? (other ? OTHER : '')}
           onChange={(event) => pick(event.target.value)}
@@ -67,10 +67,10 @@ export default function SoldByPicker({ id, value, onChange, disabled, fieldProps
       </NativeSelect.Root>
       {other ? (
         <Input
-          aria-label={agents ? 'Sales agent (other)' : 'Sold by (other)'}
+          aria-label={agents ? 'Salesperson (other)' : 'Sold by (other)'}
           value={value}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="Agent or realty name"
+          placeholder="Salesperson or realty name"
           disabled={disabled}
           autoFocus={choseOther}
           {...fieldProps}
@@ -92,14 +92,14 @@ export function SellerPicker({ id, value, onChange, disabled, fieldProps }) {
       <NativeSelect.Root disabled={disabled}>
         <NativeSelect.Field
           id={id}
-          aria-label="Sold by a broker or a sales agent"
+          aria-label="Sold by a broker or a salesperson"
           value={kind}
           onChange={(event) => onChange({ kind: event.target.value, name: '' })}
           color={kind ? COLORS.heading : COLORS.subtle}
           {...fieldProps}
         >
           <option value="" disabled>
-            Broker or sales agent?
+            Broker or salesperson?
           </option>
           {SELLER_KINDS.map((option) => (
             <option key={option.value} value={option.value}>

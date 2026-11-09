@@ -35,14 +35,14 @@ export const PAGE_CONTROLS = [
   { page: 'clients', label: 'Clients' },
   { page: 'applications', label: 'Pending Applications' },
   { page: 'brokers', label: 'Brokers' },
-  { page: 'salesAgents', label: 'Sales Agents' },
+  { page: 'salesAgents', label: 'Salespeople' },
   { page: 'announcements', label: 'Announcements' },
 ].map((item) => ({ ...item, id: pageControl(item.page) }))
 
 /** The account directories share one page component, keyed by account kind. */
 export const ACCOUNT_PAGE = { broker: 'brokers', sales_agent: 'salesAgents' }
 
-/** The buttons and menu items of one account directory (Brokers, Sales Agents). */
+/** The buttons and menu items of one account directory (Brokers, Salespeople). */
 const accountButtons = (title) => ({
   Toolbar: [
     ['add', `Add ${title}`],
@@ -137,7 +137,7 @@ const BUTTONS = {
     ],
   },
   brokers: accountButtons('Brokers'),
-  salesAgents: accountButtons('Sales Agents'),
+  salesAgents: accountButtons('Salespeople'),
   announcements: {
     Toolbar: [['post', 'Post New Announcement']],
     'Each announcement': [

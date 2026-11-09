@@ -101,7 +101,7 @@ export default function LatestTransactionsCard({ recent, projectName = '' }) {
               <HeadCell>Date</HeadCell>
               <HeadCell>Property</HeadCell>
               <HeadCell>Status</HeadCell>
-              <HeadCell>Broker / Agent</HeadCell>
+              <HeadCell>Broker / Salesperson</HeadCell>
               <HeadCell>Client</HeadCell>
               <HeadCell align="end">Lot Area</HeadCell>
             </Table.Row>

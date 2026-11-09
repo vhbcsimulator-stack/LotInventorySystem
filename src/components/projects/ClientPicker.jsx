@@ -61,7 +61,7 @@ export default function ClientPicker({ id, value, onChange, disabled, fieldProps
             </option>
           ))}
           <option value={NEW} disabled={waitsForSoldBy}>
-            {waitsForSoldBy ? 'New client… (choose the broker or sales agent first)' : 'New client…'}
+            {waitsForSoldBy ? 'New client… (choose the broker or salesperson first)' : 'New client…'}
           </option>
         </NativeSelect.Field>
         <NativeSelect.Indicator />

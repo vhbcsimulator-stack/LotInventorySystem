@@ -1206,7 +1206,7 @@ export async function createLot(projectCode, { lotNo, phase, category, areaSqm, 
   if (phase !== null && !(Number.isInteger(phase) && phase > 0)) throw new Error(`${lotTermsFor(projectCode).group ?? 'Phase'} must be a whole number.`)
   if (!LOT_STATUS_OPTIONS.some((option) => option.value === status)) throw new Error(`Unknown status "${status}".`)
   const agent = text(soldBy).trim()
-  if (status === 'sold' && !agent && !text(salesAgent).trim()) throw new Error('Choose who sold this lot: a broker or a sales agent.')
+  if (status === 'sold' && !agent && !text(salesAgent).trim()) throw new Error('Choose who sold this lot: a broker or a salesperson.')
 
   const { data: auth } = await supabase.auth.getUser()
   if (!auth?.user) throw new Error('Sign in to add lots.')

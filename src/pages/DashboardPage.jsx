@@ -116,7 +116,7 @@ export default function DashboardPage({ onNavigate }) {
         ),
         workbookSheet(
           'Recent Transactions',
-          ['Date', 'Project', 'Lot', 'Status', 'Broker', 'Sales Agent', 'Client', 'Lot Area (sqm)'],
+          ['Date', 'Project', 'Lot', 'Status', 'Broker', 'Salesperson', 'Client', 'Lot Area (sqm)'],
           view.recent.rows.map((row) => [
             formatDate(row.date, { precision: row.datePrecision }),
             row.projectName,

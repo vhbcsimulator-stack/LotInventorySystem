@@ -19,7 +19,7 @@ function useSeller(lot) {
   const broker = Boolean(lot.soldBy)
   const stored = lot.soldBy || lot.salesAgent
   const account = findAccount((broker ? data?.brokers : data?.salesAgents) ?? [], stored)
-  return { name: account?.name ?? stored, email: account?.email ?? '', role: broker ? 'broker' : 'sales agent' }
+  return { name: account?.name ?? stored, email: account?.email ?? '', role: broker ? 'broker' : 'salesperson' }
 }
 
 function SoldByNote({ lot, short = false, ...rest }) {

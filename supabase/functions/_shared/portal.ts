@@ -53,7 +53,7 @@ export function publicClient() {
 export const APP_ACCOUNTS = {
   broker: { table: 'brokers', role: 'broker', label: 'broker' },
   regular_user: { table: 'regular_users', role: 'regular_user', label: 'user' },
-  sales_agent: { table: 'sales_agents', role: 'sales_agent', label: 'sales agent' },
+  sales_agent: { table: 'sales_agents', role: 'sales_agent', label: 'salesperson' },
 } as const
 
 export type AppAccount = (typeof APP_ACCOUNTS)[keyof typeof APP_ACCOUNTS]

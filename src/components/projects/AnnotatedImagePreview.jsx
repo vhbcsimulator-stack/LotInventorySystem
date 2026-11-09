@@ -3102,7 +3102,7 @@ function SaleFields({ change, sale, projectCode, disabled, textStyle, onChange }
       <Box
         {...linkProps}
         alignSelf="flex-end"
-        title="Change the status without naming the broker, sales agent, or client"
+        title="Change the status without naming the broker, salesperson, or client"
         onClick={disabled ? undefined : () => onChange({ skip: true })}
       >
         Skip

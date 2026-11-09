@@ -75,7 +75,7 @@ const VIP_TAG = { fg: '#92400E', bg: '#FEF3E2' }
 const ACCOUNT_TAG = {
   Broker: { fg: '#1D4ED8', bg: '#E0EAFF' },
   'Regular User': { fg: '#475569', bg: '#EEF1F5' },
-  'Sales Agent': { fg: '#047857', bg: '#DFF5EC' },
+  Salesperson: { fg: '#047857', bg: '#DFF5EC' },
 }
 
 /*

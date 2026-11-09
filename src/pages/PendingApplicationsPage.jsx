@@ -54,7 +54,7 @@ const KINDS = ['broker', 'sales_agent']
 const CATEGORIES = [
   { value: 'all', label: 'All' },
   { value: 'broker', label: 'Brokers' },
-  { value: 'sales_agent', label: 'Sales Agents' },
+  { value: 'sales_agent', label: 'Salespeople' },
   { value: 'regular_user', label: 'Regular Users' },
   { value: '', label: 'Not Stated' },
 ]
@@ -574,7 +574,7 @@ export default function PendingApplicationsPage({ onNavigate }) {
             Pending Account Applications
           </Text>
           <Text mt="6px" maxW="600px" fontFamily={FONT} fontSize="14px" lineHeight="20px" color={COLORS.muted}>
-            Sign-up forms sent from the app. Use Copy to form to open a broker or sales agent account form with the
+            Sign-up forms sent from the app. Use Copy to form to open a broker or salesperson account form with the
             applicant&apos;s details filled in — the application is approved once the account is created.
           </Text>
         </Box>

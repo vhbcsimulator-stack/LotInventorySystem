@@ -21,7 +21,7 @@ const DEFAULT_NAV_ITEMS = [
   { key: 'clients', label: 'Clients', icon: LuUsers },
   { key: 'applications', label: 'Pending Applications', icon: LuInbox },
   { key: 'brokers', label: 'Brokers', icon: LuContactRound },
-  { key: 'salesAgents', label: 'Sales Agents', icon: LuBriefcaseBusiness },
+  { key: 'salesAgents', label: 'Salespeople', icon: LuBriefcaseBusiness },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
 ]
 

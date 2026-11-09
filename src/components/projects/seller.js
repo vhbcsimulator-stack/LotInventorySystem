@@ -4,7 +4,7 @@ import { salesKey } from '@/data/brokersData'
 /** Who can sell a lot. */
 export const SELLER_KINDS = [
   { value: 'broker', label: 'Broker' },
-  { value: 'sales_agent', label: 'Sales agent' },
+  { value: 'sales_agent', label: 'Salesperson' },
 ]
 
 /**

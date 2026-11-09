@@ -47,7 +47,7 @@ function visibleColumns(rows) {
 export const SELLER_KINDS = [
   { value: 'broker', label: 'Broker', plural: 'Brokers', table: 'brokers' },
   { value: 'regular_user', label: 'Regular User', plural: 'Regular Users', table: 'regular_users' },
-  { value: 'sales_agent', label: 'Sales Agent', plural: 'Sales Agents', table: 'sales_agents' },
+  { value: 'sales_agent', label: 'Salesperson', plural: 'Salespeople', table: 'sales_agents' },
 ]
 
 // The column added to each client for the kind of account it belongs to.
@@ -105,7 +105,7 @@ export function sellerKindOf(client, accounts) {
 
 /**
  * Every client row, newest first when the table has created_at, each with an
- * `account_type` ("Broker", "Regular User", "Sales Agent", or '') shown beside
+ * `account_type` ("Broker", "Regular User", "Salesperson", or '') shown beside
  * Broker Name. Resolves { clients, columns, source }, where `columns` is
  * [{ key, label }]. Never throws: failures resolve empty with a `source` and
  * the database's message.
