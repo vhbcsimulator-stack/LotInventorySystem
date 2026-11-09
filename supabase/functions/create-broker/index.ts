@@ -42,21 +42,25 @@ function generatePassword() {
 
 const clean = (value: unknown) => String(value ?? '').trim()
 
-/** The welcome email: the account's sign-in details, and a request to change the password. */
-function welcomeEmail(account: AppAccount, firstName: string, email: string, password: string) {
-  const subject = `Your BHRI ${account.label} account`
+/**
+ * The welcome email: the account's sign-in details (with the application's OTP,
+ * when it was made from one), and a request to change the password.
+ */
+function welcomeEmail(account: AppAccount, firstName: string, email: string, password: string, otp: string | null) {
+  const subject = `Your BrightOne ${account.label} account`
   const text = [
     `Hi ${firstName},`,
     '',
-    `A ${account.label} account was created for you in the BHRI app. Sign in with:`,
+    `A ${account.label} account was created for you in the BrightOne app. Sign in with:`,
     '',
     `Email: ${email}`,
     `Temporary password: ${password}`,
+    ...(otp ? [`OTP: ${otp}`] : []),
     '',
     'This password is temporary. After you sign in, please change it in the app',
     'right away and keep your new password to yourself.',
     '',
-    "If you weren't expecting this account, reply to this email or contact BHRI.",
+    "If you weren't expecting this account, reply to this email or contact BrightOne.",
   ].join('\n')
 
   const name = escapeHtml(firstName)
@@ -65,17 +69,22 @@ function welcomeEmail(account: AppAccount, firstName: string, email: string, pas
   <body style="margin:0;padding:24px;background:#f4f6f8;font-family:Inter,Segoe UI,Arial,sans-serif;color:#1f2937">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:12px;padding:28px">
       <tr><td>
-        <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to BHRI, ${name}</h1>
-        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A ${account.label} account was created for you in the BHRI app. Sign in with:</p>
+        <h1 style="margin:0 0 12px;font-size:20px;color:#111827">Welcome to BrightOne, ${name}</h1>
+        <p style="margin:0 0 16px;font-size:14px;line-height:22px">A ${account.label} account was created for you in the BrightOne app. Sign in with:</p>
         <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;background:#f3f4f6;border-radius:8px;padding:14px;font-size:14px">
           <tr><td style="padding:4px 0;color:#6b7280;width:150px">Email</td><td style="padding:4px 0;font-weight:600">${escapeHtml(email)}</td></tr>
-          <tr><td style="padding:4px 0;color:#6b7280">Temporary password</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(password)}</td></tr>
+          <tr><td style="padding:4px 0;color:#6b7280">Temporary password</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(password)}</td></tr>${
+            otp
+              ? `
+          <tr><td style="padding:4px 0;color:#6b7280">OTP</td><td style="padding:4px 0;font-weight:700;font-family:Consolas,Menlo,monospace;font-size:16px;letter-spacing:1px">${escapeHtml(otp)}</td></tr>`
+              : ''
+          }
         </table>
         <p style="margin:16px 0 0;padding:12px 14px;background:#fffbeb;font-size:14px;line-height:22px">
           <strong>This password is temporary.</strong> After you sign in, please change it in the app
           right away and keep your new password to yourself.
         </p>
-        <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#6b7280">If you weren't expecting this account, reply to this email or contact BHRI.</p>
+        <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#6b7280">If you weren't expecting this account, reply to this email or contact BrightOne.</p>
       </td></tr>
     </table>
   </body>
@@ -168,22 +177,9 @@ Deno.serve(async (req: Request) => {
     })
   }
 
-  // The sign-in details, sent through Resend. Without them the new account
-  // has no way in, so if the email cannot be sent nothing is kept.
-  try {
-    await sendEmail({ to: email, ...welcomeEmail(account, firstName, email, password) })
-  } catch (err) {
-    await admin.from(account.table).delete().eq('id', row.id)
-    await admin.auth.admin.deleteUser(created.user.id)
-    const message = err instanceof Error ? err.message : String(err)
-    return reply(/too many/i.test(message) ? 429 : 502, {
-      error: `Could not email the sign-in details: ${message} The account was not created.`,
-    })
-  }
-
   // Made from a pending application: its one-time code from the app's sign-up
-  // flow, shown beside the password. Read here because the portal never selects
-  // `otp` itself. Missing or unreadable, the account is still made.
+  // flow, emailed and shown beside the password. Read here because the portal
+  // never selects `otp` itself. Missing or unreadable, the account is still made.
   let otp: string | null = null
   const applicationId = clean(body.applicationId)
   if (applicationId) {
@@ -194,6 +190,19 @@ Deno.serve(async (req: Request) => {
       .maybeSingle()
     if (applicationError) console.error('[create-broker] could not read the application OTP:', applicationError.message)
     otp = clean(application?.otp) || null
+  }
+
+  // The sign-in details, sent through Resend. Without them the new account
+  // has no way in, so if the email cannot be sent nothing is kept.
+  try {
+    await sendEmail({ to: email, ...welcomeEmail(account, firstName, email, password, otp) })
+  } catch (err) {
+    await admin.from(account.table).delete().eq('id', row.id)
+    await admin.auth.admin.deleteUser(created.user.id)
+    const message = err instanceof Error ? err.message : String(err)
+    return reply(/too many/i.test(message) ? 429 : 502, {
+      error: `Could not email the sign-in details: ${message} The account was not created.`,
+    })
   }
 
   // Also returned once, in case the email goes astray; it is not stored anywhere readable.
