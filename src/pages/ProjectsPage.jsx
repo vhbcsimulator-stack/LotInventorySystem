@@ -32,7 +32,11 @@ import SourceNotice from '@/components/SourceNotice'
 import { SUPABASE_ENV, uiStatus } from '@/data/supabase'
 import { DEFAULT_PROJECT_CODE, DEFAULT_SORT, LOT_STATUS_OPTIONS, updateLotStatus } from '@/data/projectsData'
 import { exportLotsCsv, exportMsccReportCsv } from '@/data/lotImportData'
-import { notifyFailed, notifySaved } from '@/lib/notify'
+import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
+import { isEditConflict, isNewer } from '@/data/editConflicts'
+
+/** Of two copies of one lot, the more recently saved — a dialog's own copy until the live table catches up. */
+const freshest = (mine, live) => (live && (!mine || !isNewer(mine.updatedAt, live.updatedAt)) ? live : mine)
 import { COLORS } from '@/theme/colors'
 
 // `floor` is MSCC's Floor Level; the land projects never set it.
@@ -141,6 +145,9 @@ export default function ProjectsPage({
     }
   }, [fetched, statusEdits])
 
+  /** A lot as the live table now has it (null when it is not loaded), for dialogs opened on an older copy. */
+  const latestLot = (id) => fetched?.lots.find((lot) => lot.id === id) ?? null
+
   /*
    * True once a tab has actually been switched. The first paint is already being
    * revealed by the page itself, so the panel only animates from the second view on.
@@ -187,13 +194,22 @@ export default function ProjectsPage({
     setStatusEdits((prev) => ({ ...prev, [lot.id]: { status, base: fetched } }))
     setSavingIds((prev) => new Set(prev).add(lot.id))
     try {
-      await updateLotStatus(lot.id, status, fetched.project.code)
+      await updateLotStatus(lot.id, status, fetched.project.code, { expectedUpdatedAt: lot.updatedAt })
       notifySaved('Status updated', `${lot.identifier} is now ${LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status}.`)
       reload()
     } catch (err) {
-      console.error('[projects] could not update lot status:', err)
-      notifyFailed(`Could not change ${lot.identifier}`, err)
-      setStatusError(`Could not change ${lot.identifier} to "${status}": ${err.message}`)
+      if (isEditConflict(err)) {
+        // The row was stale: show the other person's change and let them decide again.
+        notifyWarning(
+          `${lot.identifier} was just changed by someone else`,
+          'Your status was not saved. The table now shows the latest — pick the status again if you still want to change it.',
+        )
+        reload()
+      } else {
+        console.error('[projects] could not update lot status:', err)
+        notifyFailed(`Could not change ${lot.identifier}`, err)
+        setStatusError(`Could not change ${lot.identifier} to "${status}": ${err.message}`)
+      }
       // Put the old status back.
       setStatusEdits((prev) => {
         const next = { ...prev }
@@ -538,12 +554,14 @@ export default function ProjectsPage({
       />
 
       <LotDetailsDialog
-        lot={lotDialog?.type === 'details' ? lotDialog.lot : null}
+        lot={lotDialog?.type === 'details' ? freshest(lotDialog.lot, latestLot(lotDialog.lot.id)) : null}
         terms={data.terms}
         projectName={data.project.name}
         projectCode={data.project.code}
-        onReserveTypeSaved={(reserveType, reservedFor) => {
-          setLotDialog((prev) => (prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType, reservedFor } } : prev))
+        onReserveTypeSaved={(reserveType, reservedFor, updatedAt) => {
+          setLotDialog((prev) =>
+            prev?.type === 'details' ? { ...prev, lot: { ...prev.lot, reserveType, reservedFor, updatedAt } } : prev,
+          )
           reload()
         }}
         onClose={() => setLotDialog(null)}
@@ -553,6 +571,7 @@ export default function ProjectsPage({
           key={lotDialog.lot?.id ?? 'new'}
           open
           lot={lotDialog.lot}
+          latestLot={lotDialog.lot ? latestLot(lotDialog.lot.id) : null}
           projectCode={data.project.code}
           phases={data.facets.phases}
           terms={data.terms}

@@ -13,6 +13,8 @@ import {
   updateReserveType,
 } from '@/data/projectsData'
 import { PRICE_CONFIG } from '@/data/pricesData'
+import { isEditConflict, isNewer } from '@/data/editConflicts'
+import ConflictNotice from '@/components/ConflictNotice'
 import { unitDescription, updateClientForLot } from '@/data/clientsData'
 import { SellerPicker } from '@/components/projects/SoldByPicker'
 import { sellerFields, sellerOf } from '@/components/projects/seller'
@@ -164,19 +166,50 @@ function ReserveTypeSelect({ lot, projectCode, onSaved }) {
   const [saved, setSaved] = useState({ type: lot.reserveType ?? '', client: savedClient, seller: savedSeller })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  // The lot's version the draft started from, and the conflict a save ran into.
+  const [version, setVersion] = useState(lot.updatedAt)
+  const [conflict, setConflict] = useState(null)
 
-  async function save(type, { name, id, by } = {}) {
+  /** Start over from `source` — the lot as it now is in the database. */
+  function adopt(source) {
+    const isClient = source.reserveType === 'client'
+    const next = { type: source.reserveType ?? '', client: isClient ? (source.reservedFor ?? '') : '', seller: isClient ? sellerOf(source) : noSeller }
+    setVersion(source.updatedAt)
+    setSaved(next)
+    setValue(next.type)
+    setClient(next.client)
+    setSeller(next.seller)
+    setClientId(null)
+    setConflict(null)
+    setError('')
+  }
+
+  async function save(type, { name, id, by } = {}, { overwrite = false } = {}) {
     setSaving(true)
     setError('')
+    setConflict(null)
     try {
       const forClient = type === 'client'
-      await updateReserveType(lot.id, projectCode, type, forClient ? name : undefined, forClient ? sellerFields(by) : undefined)
+      const updatedAt = await updateReserveType(
+        lot.id,
+        projectCode,
+        type,
+        forClient ? name : undefined,
+        forClient ? sellerFields(by) : undefined,
+        { expectedUpdatedAt: overwrite ? undefined : version },
+      )
+      setVersion(updatedAt)
       if (forClient && id) await pointClientAt(id, { stage: 'reserved', projectCode, lot })
       const label = RESERVE_TYPE_OPTIONS.find((option) => option.value === type)?.label ?? type
       notifySaved('Reserve type updated', `${lot.identifier} is now ${label}${forClient ? ` for ${name}` : ''}.`)
       setSaved({ type, client: forClient ? name : '', seller: forClient ? by : noSeller })
-      onSaved?.(type, forClient ? name : '')
+      onSaved?.(type, forClient ? name : '', updatedAt)
     } catch (err) {
+      // Someone else saved first: keep this draft and ask what to do with it.
+      if (isEditConflict(err)) {
+        setConflict(err)
+        return
+      }
       console.error('[projects] could not update reserve type:', err)
       notifyFailed('Could not update the reserve type', err)
       setValue(saved.type)
@@ -216,10 +249,15 @@ function ReserveTypeSelect({ lot, projectCode, onSaved }) {
   // A client reservation needs who reserved it and its client before it can be saved.
   const complete = !isClient || (Boolean(client.trim()) && Boolean(seller.name.trim()))
 
-  function commit() {
+  // `lot` is kept live by the page: someone else's newer save shows at once when
+  // there is no draft to lose, and as a warning over the draft when there is.
+  const changedElsewhere = isNewer(lot.updatedAt, version)
+  if (changedElsewhere && !dirty && !saving && !conflict) adopt(lot)
+
+  function commit(options) {
     if (!dirty || !complete || saving) return
-    if (isClient) save('client', { name: client.trim(), id: clientId, by: { ...seller, name: seller.name.trim() } })
-    else save(value)
+    if (isClient) save('client', { name: client.trim(), id: clientId, by: { ...seller, name: seller.name.trim() } }, options)
+    else save(value, {}, options)
   }
 
   function discard() {
@@ -228,6 +266,7 @@ function ReserveTypeSelect({ lot, projectCode, onSaved }) {
     setSeller(saved.seller)
     setClientId(null)
     setError('')
+    setConflict(null)
   }
 
   return (
@@ -289,10 +328,22 @@ function ReserveTypeSelect({ lot, projectCode, onSaved }) {
             icon={LuCheck}
             label="Save reserve type"
             tone="primary"
-            onClick={commit}
+            onClick={() => commit()}
             disabled={saving || !complete}
           />
         </Flex>
+      ) : null}
+      {conflict || (dirty && changedElsewhere) ? (
+        <Box maxW="300px">
+          <ConflictNotice
+            message={conflict?.message ?? 'Someone else just changed this lot.'}
+            detail={conflict ? undefined : 'Saving will ask before replacing their changes.'}
+            discardLabel="Load their changes"
+            onDiscard={() => adopt(lot)}
+            onOverwrite={conflict && !conflict.deleted ? () => commit({ overwrite: true }) : undefined}
+            busy={saving}
+          />
+        </Box>
       ) : null}
       {error ? (
         <Text role="alert" fontFamily={FONT} fontSize="12px" color="#B91C1C" textAlign="end">
@@ -380,8 +431,12 @@ const fieldProps = { h: '42px', borderRadius: '8px', fontFamily: FONT, fontSize:
  * Add a lot (no `lot`) or edit one: identifier, phase (only when the project uses
  * phases), category, and area; a new lot also picks its status. Mount it with a
  * `key` per lot so the form starts from that lot.
+ *
+ * `latestLot` is the same lot as the live table now shows it: when someone else
+ * saves it while the form is open, the form says so, and a save made over their
+ * change asks first.
  */
-export function LotEditDialog({ open, lot = null, projectCode, phases, terms = DEFAULT_LOT_TERMS, onClose, onSaved }) {
+export function LotEditDialog({ open, lot = null, latestLot = null, projectCode, phases, terms = DEFAULT_LOT_TERMS, onClose, onSaved }) {
   /*
    * Ungrouped projects (ERHD) never ask for a phase; projects with their own
    * grouping (MSCC towers) always do. Otherwise a phase is asked for once the
@@ -408,9 +463,12 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
   const unitFields = terms.unitFields ?? []
   const [unit, setUnit] = useState(() => Object.fromEntries(unitFields.map((field) => [field.key, lot?.[field.key] ?? ''])))
   const isNew = !lot
+  // The version of the lot the form is editing: `lot`, or the latest one once loaded over it.
+  const [base, setBase] = useState(lot)
+  const [conflict, setConflict] = useState(null)
   // Existing lots change status through the table's status picker; only a new lot picks one here.
   const [status, setStatus] = useState('available')
-  const showSoldBy = isNew ? status === 'sold' : lot.rawStatus === 'sold'
+  const showSoldBy = isNew ? status === 'sold' : base.rawStatus === 'sold'
   // Who sold it: a broker or a sales agent, then which one.
   const [seller, setSeller] = useState(() => sellerOf(lot))
   // A sold lot's buyer, kept in reserved_for.
@@ -422,8 +480,31 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
-  async function handleSave() {
+  // Someone else saved this lot after the form opened.
+  const changedElsewhere = !isNew && isNewer(latestLot?.updatedAt, base.updatedAt)
+
+  /** Drop this form's edits for the lot as it now is; closes when the table no longer has it. */
+  function loadLatest() {
+    setConflict(null)
     setError('')
+    if (!latestLot || conflict?.deleted) {
+      onClose()
+      return
+    }
+    setBase(latestLot)
+    setLotNo(latestLot.identifier === '—' ? '' : latestLot.identifier)
+    setPhase(latestLot.phaseNo ? String(latestLot.phaseNo) : '')
+    setCategory(latestLot.rawCategory ?? '')
+    setArea(String(latestLot.areaSqm))
+    setUnit(Object.fromEntries(unitFields.map((field) => [field.key, latestLot[field.key] ?? ''])))
+    setSeller(sellerOf(latestLot))
+    setClient(latestLot.rawStatus === 'sold' ? (latestLot.reservedFor ?? '') : '')
+    setClientId(null)
+  }
+
+  async function handleSave({ overwrite = false } = {}) {
+    setError('')
+    setConflict(null)
     setSaving(true)
     try {
       const fields = {
@@ -435,14 +516,27 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
         ...(unitFields.length ? { unit } : {}),
       }
       if (isNew) await createLot(projectCode, { ...fields, status, ...sellerFields(seller), client })
-      else await updateLot(lot.id, projectCode, { ...fields, ...(showSoldBy ? { ...sellerFields(seller), client } : {}) })
+      else {
+        await updateLot(
+          lot.id,
+          projectCode,
+          { ...fields, ...(showSoldBy ? { ...sellerFields(seller), client } : {}) },
+          { expectedUpdatedAt: overwrite ? undefined : base.updatedAt },
+        )
+      }
       if (showSoldBy && client && clientId) {
-        await pointClientAt(clientId, { stage: 'closed', projectCode, lot, lotNo: lotNo.trim() })
+        await pointClientAt(clientId, { stage: 'closed', projectCode, lot: base, lotNo: lotNo.trim() })
       }
       setSaving(false)
       notifySaved(`${terms.item} ${isNew ? 'added' : 'updated'}`, `${terms.item} ${lotNo.trim()} was ${isNew ? 'added' : 'saved'}.`)
       onSaved(`${terms.item} ${lotNo.trim()} ${isNew ? 'added' : 'updated'}.`)
     } catch (err) {
+      // Someone else saved first: keep the form as typed and ask what to do.
+      if (isEditConflict(err)) {
+        setConflict(err)
+        setSaving(false)
+        return
+      }
       setError(err.message)
       notifyFailed(`Could not ${isNew ? 'add' : 'update'} the ${terms.item.toLowerCase()}`, err)
       setSaving(false)
@@ -460,7 +554,7 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
           <Button onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button tone="primary" onClick={handleSave} disabled={saving} loading={saving}>
+          <Button tone="primary" onClick={() => handleSave()} disabled={saving || Boolean(conflict)} loading={saving}>
             {saving ? 'Saving…' : isNew ? `Add ${terms.item.toLowerCase()}` : 'Save'}
           </Button>
         </>
@@ -587,13 +681,30 @@ export function LotEditDialog({ open, lot = null, projectCode, phases, terms = D
                 brokerName: seller.name,
                 projectCode,
                 unitDescription: unitDescription(projectCode, lotNo.trim(), 'Sold'),
-                tcpFormatted: lot?.tcp ? formatPeso(lot.tcp) : '',
+                tcpFormatted: base?.tcp ? formatPeso(base.tcp) : '',
               }}
             />
           </FormRow>
         ) : null}
 
       </Flex>
+      {conflict ? (
+        <ConflictNotice
+          message={conflict.message}
+          discardLabel={conflict.deleted ? 'Close' : 'Discard mine'}
+          onDiscard={loadLatest}
+          onOverwrite={conflict.deleted ? undefined : () => handleSave({ overwrite: true })}
+          busy={saving}
+        />
+      ) : changedElsewhere ? (
+        <ConflictNotice
+          message={`Someone else just changed ${terms.item.toLowerCase()} ${base.identifier} while you were editing.`}
+          detail="Load their changes to start from the latest, or keep editing — saving will ask before replacing theirs."
+          discardLabel="Load their changes"
+          onDiscard={loadLatest}
+          busy={saving}
+        />
+      ) : null}
       <ErrorText>{error}</ErrorText>
     </LotDialog>
   )

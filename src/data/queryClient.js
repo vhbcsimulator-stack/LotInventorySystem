@@ -52,6 +52,15 @@ function readsFrom(query, tables) {
 }
 
 /**
+ * Drop the cached results read from any of `tables` and refetch those on
+ * screen — what live updates call when Supabase reports a change.
+ */
+export function invalidateTables(tables) {
+  if (!tables.length) return Promise.resolve()
+  return queryClient.invalidateQueries({ predicate: (query) => readsFrom(query, tables) })
+}
+
+/**
  * Refresh button: ask the database whether any of `tables` changed since the
  * last refresh and, only if so, drop the cached results read from them and
  * refetch those on screen. Unchanged tables keep their cache and download

@@ -18,6 +18,7 @@ import { STATUS_ALIASES, fetchAllRows, supabase, uiStatus, unwrap } from './supa
 import { PRICE_CONFIG, fetchPriceLookup } from './pricesData'
 import { cached } from './queryClient'
 import { relabelClientsForLot, updateClientForLot } from './clientsData'
+import { conflictFor, unlessChanged } from './editConflicts'
 
 export { SOURCE }
 
@@ -580,6 +581,8 @@ async function fetchLotsPage(projectCode, table, query, categoryByLabelPromise) 
       // 'month' when only the month is known (imported from a month/year sheet);
       // '' for the full dates the portal writes itself.
       lastUpdatedPrecision: text(lot.last_updated_precision),
+      // The row's version: saves pass it back so they never overwrite someone else's newer change.
+      updatedAt: text(lot.updated_at),
       areaSqm,
       pricePerSqm,
       tcp: Math.round(areaSqm * pricePerSqm * 100) / 100,
@@ -811,8 +814,12 @@ function unitColumnsFor(projectCode, unit) {
  *
  * `reserveType` ('client', 'company', or '' for the default) is recorded with a
  * reserved status; left undefined, a reserved lot keeps the type it had.
+ *
+ * `expectedUpdatedAt` is the lot's `updatedAt` as the user saw it: the save is
+ * refused with an EditConflictError if someone else has changed the lot since.
+ * Resolves { updatedAt } — the lot's new version — plus any `clientError`.
  */
-export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE, { reserveType, soldBy, salesAgent, client, clientId } = {}) {
+export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_CODE, { reserveType, soldBy, salesAgent, client, clientId, expectedUpdatedAt } = {}) {
   if (!supabase) throw new Error('No database connected.')
   const table = LOT_TABLES[projectCode]
   if (!table) throw new Error(`No lot table is set up for ${projectCode}.`)
@@ -835,7 +842,8 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
     ...(!reserved ? { reserve_type: null } : reserveType !== undefined ? { reserve_type: reserveType || null } : {}),
   }
 
-  const updateRow = (body) => supabase.from(table).update(body).eq('id', id).select('id, lot_no, total')
+  const updateRow = (body) =>
+    unlessChanged(supabase.from(table).update(body).eq('id', id), expectedUpdatedAt).select('id, lot_no, total, updated_at')
 
   /*
    * Who sold it — or, for a client reservation, who reserved it — is kept with
@@ -884,16 +892,20 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
     result = await write({ ...changes, ...seller, ...buyer })
   }
   if (result.error) throw explainMissingColumn(new Error(result.error.message))
-  if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+  if (!result.data?.length) {
+    throw (await conflictFor(table, id, expectedUpdatedAt, 'This lot')) ??
+      new Error('The database did not accept the change — you may need to sign in.')
+  }
 
   const [lot] = result.data
+  const updatedAt = text(lot.updated_at)
   const statusLabel = LOT_STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status
   // Clients whose Unit Description names this lot follow its status ("MVLC B27 L1 · Available").
   await relabelClientsForLot({ projectCode, lotNo: text(lot.lot_no), statusLabel }).catch((err) =>
     console.error('[projects] lot saved, clients not relabelled:', err),
   )
 
-  if (!clientId || !buyer.reserved_for) return {}
+  if (!clientId || !buyer.reserved_for) return { updatedAt }
   try {
     await updateClientForLot(clientId, {
       stage: status === 'sold' ? 'closed' : 'reserved',
@@ -902,11 +914,20 @@ export async function updateLotStatus(id, status, projectCode = DEFAULT_PROJECT_
       total: lot.total,
       statusLabel,
     })
-    return {}
+    return { updatedAt }
   } catch (err) {
     console.error('[projects] lot saved, client not updated:', err)
-    return { clientError: err.message }
+    return { updatedAt, clientError: err.message }
   }
+}
+
+/**
+ * Throws an EditConflictError when the lot is no longer at `expectedUpdatedAt` —
+ * for a save that does other work first (the map colour prompt uploads a map).
+ */
+export async function assertLotUnchanged(projectCode, id, expectedUpdatedAt) {
+  const conflict = await conflictFor(lotTableFor(projectCode), id, expectedUpdatedAt, 'This lot')
+  if (conflict) throw conflict
 }
 
 /** Who a reserved lot is held for. '' is the default reservation and is stored as null. */
@@ -924,8 +945,11 @@ const RESERVE_TYPE_MISSING =
  * `client` is who a client reservation is held for, and `seller` ({ soldBy,
  * salesAgent }, as sellerFields gives it) the broker or sales agent who
  * reserved it; company and default reservations carry neither.
+ *
+ * With `expectedUpdatedAt`, refused with an EditConflictError when someone else
+ * changed the lot since that version. Resolves the lot's new `updatedAt`.
  */
-export async function updateReserveType(id, projectCode, reserveType, client, seller) {
+export async function updateReserveType(id, projectCode, reserveType, client, seller, { expectedUpdatedAt } = {}) {
   const table = lotTableFor(projectCode)
   if (!RESERVE_TYPE_OPTIONS.some((option) => option.value === reserveType)) {
     throw new Error(`Unknown reserve type "${reserveType}".`)
@@ -944,7 +968,7 @@ export async function updateReserveType(id, projectCode, reserveType, client, se
     ...sellerColumns,
     updated_at: new Date().toISOString(),
   }
-  const write = (row) => supabase.from(table).update(row).eq('id', id).select('id')
+  const write = (row) => unlessChanged(supabase.from(table).update(row).eq('id', id), expectedUpdatedAt).select('id, updated_at')
   let result = await write(body)
   // Before the sold_by / sales_agent migrations, a column only being cleared is dropped.
   const missing = ['sales_agent', 'sold_by'].find((column) => column in body && !body[column] && result.error?.message.includes(column))
@@ -957,7 +981,11 @@ export async function updateReserveType(id, projectCode, reserveType, client, se
   if (result.error) {
     throw new Error(/reserve_type/.test(result.error.message) ? RESERVE_TYPE_MISSING : result.error.message)
   }
-  if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+  if (!result.data?.length) {
+    throw (await conflictFor(table, id, expectedUpdatedAt, 'This lot')) ??
+      new Error('The database did not accept the change — you may need to sign in.')
+  }
+  return text(result.data[0].updated_at)
 }
 
 /** A lot identifier as written on a map or a sheet: case, spaces, and punctuation ignored. */
@@ -1110,8 +1138,11 @@ function lastUpdatedDay(value, fallback) {
  * Update a lot's identifier, phase, category, and area. The stored price per sqm
  * and TCP are refreshed from the project's price table so they stay consistent
  * with what the lots page shows. `phase` may be null for projects without phases.
+ *
+ * With `expectedUpdatedAt`, refused with an EditConflictError when someone else
+ * changed the lot since that version.
  */
-export async function updateLot(id, projectCode, { lotNo, phase, category, areaSqm, soldBy, salesAgent, client, unit, lastUpdated }) {
+export async function updateLot(id, projectCode, { lotNo, phase, category, areaSqm, soldBy, salesAgent, client, unit, lastUpdated }, { expectedUpdatedAt } = {}) {
   const table = lotTableFor(projectCode)
   // Projects whose lots are not grouped (ERHD) never store a phase.
   if (!lotTermsFor(projectCode).group) phase = null
@@ -1147,9 +1178,14 @@ export async function updateLot(id, projectCode, { lotNo, phase, category, areaS
     ...unitColumnsFor(projectCode, unit),
   }
 
-  const result = await writeTolerantly(changes, (body) => supabase.from(table).update(body).eq('id', id).select('id'))
+  const result = await writeTolerantly(changes, (body) =>
+    unlessChanged(supabase.from(table).update(body).eq('id', id), expectedUpdatedAt).select('id'),
+  )
   if (result.error) throw explainMissingColumn(new Error(result.error.message))
-  if (!result.data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+  if (!result.data?.length) {
+    throw (await conflictFor(table, id, expectedUpdatedAt, `${lotTermsFor(projectCode).item} ${lot_no}`)) ??
+      new Error('The database did not accept the change — you may need to sign in.')
+  }
 }
 
 /**

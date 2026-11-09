@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
-const { cleanBroker, creditSales, validateBroker } = await import('./brokersData')
+const { cleanBroker, creditSales, salesAgentCounts, validateBroker } = await import('./brokersData')
 
 const VALID = { firstName: 'Juan', lastName: 'Dela Cruz', mobileNumber: '0917 123 4567', email: 'juan@example.com' }
+
+describe('salesAgentCounts', () => {
+  it('counts agents per broker id, skipping agents with no broker', () => {
+    const counts = salesAgentCounts([{ brokerId: 1 }, { brokerId: '1' }, { brokerId: 'b-2' }, { brokerId: null }])
+    expect(counts.get('1')).toBe(2)
+    expect(counts.get('b-2')).toBe(1)
+    expect(counts.size).toBe(2)
+  })
+})
 
 describe('validateBroker', () => {
   it('accepts a complete form', () => {
@@ -17,6 +26,12 @@ describe('validateBroker', () => {
       'mobileNumber',
       'email',
     ])
+  })
+
+  it("requires a sales agent's broker, but not a broker's", () => {
+    expect(validateBroker(VALID, 'sales_agent').brokerId).toBeTruthy()
+    expect(validateBroker({ ...VALID, brokerId: 'b-1' }, 'sales_agent')).toEqual({})
+    expect(validateBroker(VALID, 'broker')).toEqual({})
   })
 
   it('rejects malformed mobile numbers and emails', () => {

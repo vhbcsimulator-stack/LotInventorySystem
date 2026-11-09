@@ -23,6 +23,8 @@ function normalize(row) {
     email: text(row.email),
     // Brokers only: the ID picture from their application, a URL or "bucket/path" (data/idPictures.js).
     idPicture: text(row.id_picture).trim(),
+    // Sales agents only: the broker they work under (null when none is recorded).
+    brokerId: row.broker_id ?? null,
     createdAt: text(row.created_at),
   }
 }
@@ -142,6 +144,8 @@ async function accountNames(table) {
       .map((row) => ({
         id: row.id,
         authUserId: row.auth_user_id ?? null,
+        // Sales agents only: the broker they work under.
+        brokerId: row.broker_id ?? null,
         email: text(row.email),
         name: `${text(row.first_name).trim()} ${text(row.last_name).trim()}`.trim(),
       }))
@@ -151,6 +155,23 @@ async function accountNames(table) {
     console.error(`[${table}] no names:`, err)
     return []
   }
+}
+
+/**
+ * The most sales agents one broker can have. Also enforced by the create-broker
+ * function and a database trigger (20261107_limit_sales_agents_per_broker.sql).
+ */
+export const MAX_SALES_AGENTS_PER_BROKER = 20
+
+/** How many sales agents work under each broker id (as a string), from fetchBrokerNames' `salesAgents`. */
+export function salesAgentCounts(salesAgents) {
+  const counts = new Map()
+  for (const agent of salesAgents) {
+    if (agent.brokerId == null) continue
+    const key = String(agent.brokerId)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
 }
 
 /**
@@ -182,9 +203,11 @@ export function cleanBroker({ firstName = '', lastName = '', mobileNumber = '', 
  * it can be saved. A mobile number may carry +, spaces, dashes, and
  * parentheses, but needs 10 to 13 digits (09171234567, +63 917 123 4567).
  */
-export function validateBroker(form) {
+export function validateBroker(form, kind = 'broker') {
   const broker = cleanBroker(form)
   const errors = {}
+  // A sales agent works under a broker; that comes first in the form.
+  if (kind === 'sales_agent' && !String(form.brokerId ?? '').trim()) errors.brokerId = 'Choose their broker.'
   if (!broker.firstName) errors.firstName = 'Enter a first name.'
   if (!broker.lastName) errors.lastName = 'Enter a last name.'
   const digits = broker.mobileNumber.replace(/\D/g, '')
@@ -220,8 +243,11 @@ export async function fetchAccounts({ kind = 'broker' } = {}) {
     ])
     const people = data.map(normalize)
     const stats = creditSales(people, sales)
+    // Sales agents show the name of the broker they work under.
+    const brokerNames = kind === 'sales_agent' ? new Map((await accountNames('brokers')).map((b) => [String(b.id), b.name])) : null
     const accounts = people.map((account) => ({
       ...account,
+      ...(brokerNames ? { brokerName: account.brokerId == null ? '' : brokerNames.get(String(account.brokerId)) ?? '' } : {}),
       lotsSold: stats.get(account.id)?.lotsSold ?? 0,
       totalTcp: stats.get(account.id)?.totalTcp ?? 0,
     }))
@@ -233,8 +259,11 @@ export async function fetchAccounts({ kind = 'broker' } = {}) {
 }
 
 /** The tables fetchAccounts reads, so its Refresh button knows what to check. */
-fetchAccounts.tables = ({ kind = 'broker' } = {}) =>
-  ACCOUNT_KINDS[kind].sells ? [ACCOUNT_KINDS[kind].table, ...Object.values(LOT_TABLES)] : [ACCOUNT_KINDS[kind].table]
+fetchAccounts.tables = ({ kind = 'broker' } = {}) => [
+  ACCOUNT_KINDS[kind].table,
+  ...(kind === 'sales_agent' ? ['brokers'] : []),
+  ...(ACCOUNT_KINDS[kind].sells ? Object.values(LOT_TABLES) : []),
+]
 
 /** Brokers only, as { brokers, source }. */
 export async function fetchBrokers() {
@@ -248,10 +277,12 @@ fetchBrokers.tables = () => fetchAccounts.tables({ kind: 'broker' })
  * Add a broker, regular user, or sales agent: their app login and row as one
  * step from the create-broker function (told which by `kind`), which emails the
  * sign-in details and resolves { id, authUserId, email, password } — `password`
- * is returned only here, so show it now. Throws with a readable message on failure.
+ * is returned only here, so show it now. A sales agent's `form.brokerId` records
+ * the broker they work under. Throws with a readable message on failure.
  */
 export async function createAccount(kind, form) {
-  return invoke('create-broker', { ...cleanBroker(form), kind })
+  const brokerId = kind === 'sales_agent' ? String(form.brokerId ?? '').trim() : ''
+  return invoke('create-broker', { ...cleanBroker(form), kind, ...(brokerId ? { brokerId } : {}) })
 }
 
 /**

@@ -9,6 +9,7 @@ import MaintenanceScreen from '@/components/MaintenanceScreen'
 import PortalControlsProvider from '@/components/PortalControlsProvider'
 import Sidebar from '@/components/Sidebar'
 import TopBar from '@/components/TopBar'
+import { startLiveUpdates } from '@/data/liveUpdates'
 import useAuth from '@/hooks/useAuth'
 import usePortalControls from '@/hooks/usePortalControls'
 import {
@@ -29,7 +30,6 @@ const PAGE_TITLES = {
   announcements: 'Announcements',
   brokers: 'Add Brokers',
   salesAgents: 'Add Sales Agents',
-  regularUsers: 'Add Regular Users',
   applications: 'Pending Applications',
   clients: 'Clients',
   devControls: 'Developer Controls',
@@ -102,6 +102,11 @@ function PortalShell({ auth }) {
   useEffect(() => {
     if (user) preloadPages()
   }, [user])
+
+  // Signed in: refetch what is on screen whenever its Supabase tables change.
+  // Resubscribes per user so realtime checks row-level security as them.
+  const userId = user?.id
+  useEffect(() => (userId ? startLiveUpdates() : undefined), [userId])
 
   if (loading) {
     return (

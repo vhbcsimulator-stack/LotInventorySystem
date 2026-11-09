@@ -4,7 +4,11 @@
  * `account_applications` (see supabase/migrations/20261021_create_account_applications.sql):
  * id, first_name, last_name, mobile_number, email, account_type, message, id_picture,
  * status ('pending' | 'approved' | 'rejected'), approved_as, reviewed_by,
- * reviewed_at, created_at, updated_at.
+ * reviewed_at, created_at, updated_at, broker_name, otp
+ * (see supabase/migrations/20261107_add_application_broker_name_otp.sql).
+ *
+ * `otp` is never read by the portal: fetches name their columns (no `*`) so
+ * the code never reaches the browser.
  *
  * The portal never creates an account from an application directly: "Copy to
  * form" opens the chosen kind's create dialog with the details filled in, and
@@ -12,6 +16,7 @@
  */
 import { SOURCE, text } from '@/data/api'
 import { ACCOUNT_KINDS } from '@/data/brokersData'
+import { conflictFor, unlessChanged } from '@/data/editConflicts'
 import { fetchAllRows, supabase } from '@/data/supabase'
 
 export const APPLICATIONS_TABLE = 'account_applications'
@@ -21,12 +26,28 @@ export const APPLICATION_STATUSES = ['pending', 'approved', 'rejected']
 /** The page (Sidebar nav key) that creates each kind of account. */
 export const ACCOUNT_PAGES = {
   broker: 'brokers',
-  regular_user: 'regularUsers',
   sales_agent: 'salesAgents',
 }
 
 const MISSING =
   'The account_applications table is not set up yet — run supabase/migrations/20261021_create_account_applications.sql in the Supabase SQL Editor.'
+
+// Every column the portal reads — deliberately leaves out `otp`.
+const APPLICATION_COLUMNS = [
+  'id',
+  'first_name',
+  'last_name',
+  'mobile_number',
+  'email',
+  'account_type',
+  'broker_name',
+  'message',
+  'id_picture',
+  'status',
+  'approved_as',
+  'reviewed_at',
+  'created_at',
+].join(', ')
 
 const kindOrBlank = (value) => (ACCOUNT_KINDS[text(value)] ? text(value) : '')
 
@@ -40,6 +61,7 @@ export function normalizeApplication(row) {
     mobileNumber: text(row.mobile_number).trim(),
     email: text(row.email).trim(),
     accountType: kindOrBlank(row.account_type),
+    brokerName: text(row.broker_name).trim(),
     message: text(row.message).trim(),
     // A URL or "bucket/path" — see data/idPictures.js.
     idPicture: text(row.id_picture).trim(),
@@ -67,7 +89,7 @@ export function applicationForm(application) {
 export async function fetchApplications() {
   if (!supabase) return { applications: [], source: SOURCE.NOT_CONFIGURED }
   try {
-    const rows = await fetchAllRows(APPLICATIONS_TABLE, '*', (query) => query.order('created_at', { ascending: false }))
+    const rows = await fetchAllRows(APPLICATIONS_TABLE, APPLICATION_COLUMNS, (query) => query.order('created_at', { ascending: false }))
     return { applications: rows.map(normalizeApplication), source: SOURCE.DATABASE }
   } catch (err) {
     console.error(`[${APPLICATIONS_TABLE}] falling back to an empty list:`, err)
@@ -80,13 +102,16 @@ fetchApplications.tables = () => [APPLICATIONS_TABLE]
 /**
  * Move an application to `status`. `approvedAs` records which kind of account
  * was made for it. Throws with a readable message on failure.
+ *
+ * With `from` (the status the user saw), refused with an EditConflictError when
+ * someone else has already moved it to another status.
  */
-export async function setApplicationStatus(id, status, approvedAs = null) {
+export async function setApplicationStatus(id, status, approvedAs = null, { from } = {}) {
   if (!supabase) throw new Error('No database connected.')
   const { data: auth } = await supabase.auth.getUser()
   const reviewed = status !== 'pending'
   const now = new Date().toISOString()
-  const { data, error } = await supabase
+  const update = supabase
     .from(APPLICATIONS_TABLE)
     .update({
       status,
@@ -96,10 +121,19 @@ export async function setApplicationStatus(id, status, approvedAs = null) {
       updated_at: now,
     })
     .eq('id', id)
-    .select('id')
+  const { data, error } = await unlessChanged(update, from, 'status').select('id')
   if (error) throw new Error(/account_applications/i.test(error.message) ? MISSING : error.message)
-  // Row-level security filters an update it refuses, so nothing comes back.
-  if (!data?.length) throw new Error('That application could not be changed — it may have been removed.')
+  if (!data?.length) {
+    const conflict = await conflictFor(APPLICATIONS_TABLE, id, from, 'This application', 'status')
+    if (conflict) {
+      conflict.message = conflict.deleted
+        ? 'Someone else removed this application.'
+        : 'Someone else already reviewed this application — the list now shows its current status.'
+      throw conflict
+    }
+    // Row-level security filters an update it refuses, so nothing comes back.
+    throw new Error('That application could not be changed — it may have been removed.')
+  }
 }
 
 /** Remove an application for good. Throws with a readable message on failure. */

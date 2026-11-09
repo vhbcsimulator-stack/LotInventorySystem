@@ -9,7 +9,13 @@ import {
   uploadMapImage,
 } from '@/data/annotatedImagesData'
 import { usesFloors } from '@/data/projectMapsData'
-import { LOT_STATUS_OPTIONS, fetchLotsByIdentifier, updateLotStatus, updateLotStatuses } from '@/data/projectsData'
+import {
+  LOT_STATUS_OPTIONS,
+  assertLotUnchanged,
+  fetchLotsByIdentifier,
+  updateLotStatus,
+  updateLotStatuses,
+} from '@/data/projectsData'
 import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
 import { MAP_LOT_FILL } from '@/theme/colors'
 
@@ -127,6 +133,8 @@ export default function LotMapColorPrompt({ projectCode, projectId, projectName,
     setSaving(true)
     setSaveError('')
     try {
+      // Someone else changed the lot since it was picked: upload nothing.
+      if (!state.saved.length) await assertLotUnchanged(projectCode, lot.id, lot.updatedAt)
       // The map first: if it fails, the lot keeps its old status too.
       const url = await uploadMapImage({ projectCode, projectId, slot: current.image.slot, file })
       if (url) await saveAnnotatedImage({ projectCode, slot: current.image.slot, existing: current.image, imageUrl: url })
@@ -141,6 +149,7 @@ export default function LotMapColorPrompt({ projectCode, projectId, projectName,
             salesAgent: own?.salesAgent,
             client: own?.client,
             clientId: own?.clientId,
+            expectedUpdatedAt: lot.updatedAt,
           })
       // Other lots recoloured along the way; the requested one is written above.
       const result = await updateLotStatuses(

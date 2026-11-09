@@ -3,6 +3,7 @@
  * id, title, content, created_by, created_at, updated_at, user_id.
  */
 import { SOURCE, text } from '@/data/api'
+import { conflictFor, unlessChanged } from '@/data/editConflicts'
 import { searchTerm, supabase, unwrap } from '@/data/supabase'
 
 function normalize(row) {
@@ -12,6 +13,8 @@ function normalize(row) {
     body: text(row.content),
     author: text(row.created_by),
     createdAt: text(row.created_at),
+    // The row's version, so an edit never overwrites someone else's newer one.
+    updatedAt: text(row.updated_at),
   }
 }
 
@@ -25,7 +28,7 @@ export async function fetchAnnouncements({ search = '', sort = 'newest' } = {}) 
   try {
     let query = supabase
       .from('announcements')
-      .select('id, title, content, created_by, created_at')
+      .select('id, title, content, created_by, created_at, updated_at')
       .order('created_at', { ascending: sort === 'oldest' })
 
     const term = searchTerm(search)
@@ -51,17 +54,20 @@ export async function createAnnouncement({ title, body, userId }) {
 /**
  * Change an announcement's title and content. Throws when the write fails or no
  * row was updated (row-level security silently filters writes it refuses).
+ * With `expectedUpdatedAt`, refused with an EditConflictError when someone else
+ * changed it since that version.
  */
-export async function updateAnnouncement(id, { title, body }) {
+export async function updateAnnouncement(id, { title, body }, { expectedUpdatedAt } = {}) {
   if (!supabase) throw new Error('No database connected.')
-  const { data } = unwrap(
-    await supabase
-      .from('announcements')
-      .update({ title: title.trim(), content: body.trim(), updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .select('id'),
-  )
-  if (!data.length) throw new Error('The database did not accept the change — you may need to sign in.')
+  const update = supabase
+    .from('announcements')
+    .update({ title: title.trim(), content: body.trim(), updated_at: new Date().toISOString() })
+    .eq('id', id)
+  const { data } = unwrap(await unlessChanged(update, expectedUpdatedAt).select('id'))
+  if (!data.length) {
+    throw (await conflictFor('announcements', id, expectedUpdatedAt, 'This announcement')) ??
+      new Error('The database did not accept the change — you may need to sign in.')
+  }
 }
 
 /** Permanently delete one announcement. */

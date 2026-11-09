@@ -20,7 +20,11 @@ declare const Deno: {
   serve(handler: (request: Request) => Response | Promise<Response>): void
 }
 
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+// Matches MAX_SALES_AGENTS_PER_BROKER in src/data/brokersData.js and the database trigger.
+const MAX_SALES_AGENTS_PER_BROKER = 20
+const BROKER_FULL = `That broker already has ${MAX_SALES_AGENTS_PER_BROKER} sales agents, the most allowed. Choose another broker.`
+
+const EMAIL_PATTERN =/^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 // No look-alikes (0/O, 1/l/I), so the password survives being read aloud or
 // copied by hand into the app.
@@ -94,6 +98,8 @@ Deno.serve(async (req: Request) => {
   if (!body) return reply(400, { error: 'Send the account details as JSON.' })
   const account = appAccount(body.kind)
   if (!account) return reply(400, { error: 'Unknown account kind.' })
+  // Regular user accounts are no longer made from the portal (existing ones are kept).
+  if (account.table === 'regular_users') return reply(400, { error: 'Regular user accounts can no longer be created.' })
   const firstName = clean(body.firstName)
   const lastName = clean(body.lastName)
   const mobileNumber = clean(body.mobileNumber)
@@ -101,6 +107,22 @@ Deno.serve(async (req: Request) => {
 
   if (!firstName || !lastName || !mobileNumber || !email) return reply(400, { error: 'All fields are required.' })
   if (!EMAIL_PATTERN.test(email)) return reply(400, { error: 'Enter a valid email address.' })
+
+  // A sales agent works under a broker: check the one picked exists before making the login.
+  const brokerId = account.table === 'sales_agents' ? clean(body.brokerId) : ''
+  if (account.table === 'sales_agents') {
+    if (!brokerId) return reply(400, { error: "Choose the sales agent's broker." })
+    const { data: broker, error: brokerError } = await admin.from('brokers').select('id').eq('id', brokerId).maybeSingle()
+    if (brokerError || !broker) return reply(400, { error: 'That broker no longer exists. Choose another.' })
+    // Checked before the login is made; the database trigger
+    // (20261107_limit_sales_agents_per_broker.sql) is the final guard.
+    const { count, error: countError } = await admin
+      .from('sales_agents')
+      .select('id', { count: 'exact', head: true })
+      .eq('broker_id', brokerId)
+    if (countError) return reply(500, { error: countError.message })
+    if ((count ?? 0) >= MAX_SALES_AGENTS_PER_BROKER) return reply(409, { error: BROKER_FULL })
+  }
 
   /*
    * Confirmed from the start: the password is only ever sent to this address,
@@ -138,6 +160,7 @@ Deno.serve(async (req: Request) => {
       email,
       auth_user_id: created.user.id,
       user_id: caller.id,
+      ...(brokerId ? { broker_id: brokerId } : {}),
     })
     .select('id')
     .single()
@@ -146,8 +169,16 @@ Deno.serve(async (req: Request) => {
   if (insertError) {
     await admin.auth.admin.deleteUser(created.user.id)
     const taken = insertError.code === '23505'
-    return reply(taken ? 409 : 500, {
-      error: taken ? `A ${account.label} with the email ${email} already exists.` : insertError.message,
+    const brokerFull = /broker_full/i.test(insertError.message)
+    const noBrokerColumn = /broker_id/i.test(insertError.message)
+    return reply(taken || brokerFull ? 409 : 500, {
+      error: taken
+        ? `A ${account.label} with the email ${email} already exists.`
+        : brokerFull
+          ? BROKER_FULL
+          : noBrokerColumn
+          ? 'sales_agents has no broker_id column yet — run supabase/migrations/20261106_add_sales_agent_broker_id.sql.'
+          : insertError.message,
     })
   }
 

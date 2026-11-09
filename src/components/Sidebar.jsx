@@ -13,7 +13,6 @@ import {
   LuInbox,
   LuSlidersHorizontal,
   LuUsers,
-  LuUsersRound
 } from 'react-icons/lu'
 
 const DEFAULT_NAV_ITEMS = [
@@ -23,7 +22,6 @@ const DEFAULT_NAV_ITEMS = [
   { key: 'applications', label: 'Pending Applications', icon: LuInbox },
   { key: 'brokers', label: 'Brokers', icon: LuContactRound },
   { key: 'salesAgents', label: 'Sales Agents', icon: LuBriefcaseBusiness },
-  { key: 'regularUsers', label: 'Regular Users', icon: LuUsersRound },
   { key: 'announcements', label: 'Announcements', icon: LuMegaphone },
 ]
 

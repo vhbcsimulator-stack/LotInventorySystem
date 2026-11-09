@@ -3,14 +3,18 @@ import { Box, CloseButton, Dialog, Drawer, Flex, Grid, Icon, Image, Input, Menu,
 import {
   LuArrowDown,
   LuArrowUp,
+  LuChevronDown,
   LuDownload,
   LuEllipsisVertical,
+  LuMail,
   LuPencil,
+  LuPhone,
   LuSearch,
   LuStar,
   LuTrash2,
   LuTriangleAlert,
   LuUsers,
+  LuX,
 } from 'react-icons/lu'
 import { ClientFormDialog } from '@/components/projects/ClientPicker'
 import ClientsSkeleton from '@/components/skeletons/ClientsSkeleton'
@@ -21,7 +25,7 @@ import Pagination from '@/components/ui-kit/Pagination'
 import RefreshButton from '@/components/ui-kit/RefreshButton'
 import ToolbarButton from '@/components/ui-kit/ToolbarButton'
 import Controlled, { ControlledMenuItem } from '@/components/Controlled'
-import { useControl } from '@/hooks/usePortalControls'
+import { useControl, useControls } from '@/hooks/usePortalControls'
 import { buttonControl } from '@/lib/portalControls'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
@@ -226,19 +230,19 @@ function compareValues(a, b) {
   return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' })
 }
 
+/** A filter chip: pressed while its filter applies, with the matching count in a badge. */
 function Pill({ active, dot, count, children, onClick }) {
   return (
     <Flex
       as="button"
       type="button"
-      role="tab"
-      aria-selected={active}
+      aria-pressed={active}
       onClick={onClick}
       align="center"
       gap="8px"
-      h="36px"
+      h="40px"
       pl={dot ? '12px' : '14px'}
-      pr="6px"
+      pr="8px"
       borderRadius="8px"
       bg={active ? COLORS.activeBg : TINT}
       color={active ? '#FFFFFF' : COLORS.heading}
@@ -252,7 +256,72 @@ function Pill({ active, dot, count, children, onClick }) {
       _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
     >
       {dot ? <Box as="span" boxSize="8px" borderRadius="full" bg={dot} boxShadow={active ? '0 0 0 2px #FFFFFF' : undefined} /> : null}
-      {children} ({count})
+      {children}
+      <Text
+        as="span"
+        minW="24px"
+        px="7px"
+        borderRadius="full"
+        bg={active ? 'rgba(255, 255, 255, 0.22)' : COLORS.surface}
+        color={active ? '#FFFFFF' : COLORS.muted}
+        fontFamily={FONT}
+        fontSize="12px"
+        lineHeight="20px"
+        fontVariantNumeric="tabular-nums"
+        textAlign="center"
+      >
+        {count}
+      </Text>
+    </Flex>
+  )
+}
+
+/** A labelled row of filter chips. */
+function FilterRow({ label, children }) {
+  return (
+    <Flex role="group" aria-label={label} align="center" gap="8px" flexWrap="wrap">
+      <Text
+        as="span"
+        aria-hidden="true"
+        w={{ base: '100%', sm: '64px' }}
+        fontFamily={FONT}
+        fontWeight="600"
+        fontSize="11.5px"
+        letterSpacing="0.6px"
+        textTransform="uppercase"
+        color={COLORS.subtle}
+      >
+        {label}
+      </Text>
+      {children}
+    </Flex>
+  )
+}
+
+/** A small outlined action in the details panel (call, email). */
+function QuickAction({ href, icon, children }) {
+  return (
+    <Flex
+      as="a"
+      href={href}
+      align="center"
+      gap="6px"
+      h="36px"
+      px="12px"
+      borderRadius="8px"
+      border="1px solid"
+      borderColor={COLORS.border}
+      bg={COLORS.surface}
+      color={COLORS.heading}
+      fontFamily={FONT}
+      fontWeight="600"
+      fontSize="13px"
+      transition="background-color 120ms ease"
+      _hover={{ bg: COLORS.hoverBg }}
+      _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+    >
+      <Icon as={icon} boxSize="14px" color={COLORS.activeBg} />
+      {children}
     </Flex>
   )
 }
@@ -330,12 +399,164 @@ function DetailValue({ column, value }) {
   return <CellValue column={column} value={value} full />
 }
 
-/** Every column of one client, blanks included, in a side panel. */
-function ClientDrawer({ client, columns, parts, onClose }) {
-  const name = client ? plainValue(client[parts.name]) || 'Client' : ''
-  const subtitle = client && parts.subtitle ? plainValue(client[parts.subtitle]) : ''
-  const status = client && parts.status ? client[parts.status] : null
-  const vip = client && parts.vipFlag && truthy(client[parts.vipFlag])
+function DetailRow({ column, client }) {
+  return (
+    <Grid
+      templateColumns={{ base: '1fr', sm: '140px 1fr' }}
+      gap={{ base: '2px', sm: '16px' }}
+      py="12px"
+      borderBottom="1px solid"
+      borderColor={COLORS.border}
+      _last={{ borderBottom: 'none' }}
+    >
+      <Text pt="2px" fontSize="11.5px" fontWeight="600" letterSpacing="0.5px" textTransform="uppercase" color={COLORS.subtle}>
+        {column.label}
+      </Text>
+      <Box minW={0} color={COLORS.heading}>
+        <DetailValue column={column} value={client[column.key]} />
+      </Box>
+    </Grid>
+  )
+}
+
+// Payment and CTS/DOAS read "Unknown" when blank, which is still worth showing.
+const hasDetail = (column, value) => isPaymentColumn(column.key) || isContractColumn(column.key) || !blank(value)
+
+/**
+ * One client's details: quick call/email, the filled-in fields, and the empty
+ * ones folded away (keyed by client, so the fold resets for each client).
+ */
+function ClientDetails({ client, columns, parts, onEdit, onDelete }) {
+  const [showEmpty, setShowEmpty] = useState(false)
+  const control = useControls()
+  const editControl = control('button.clients.edit')
+  const deleteControl = control('button.clients.delete')
+
+  const name = plainValue(client[parts.name]) || 'Client'
+  const subtitle = parts.subtitle ? plainValue(client[parts.subtitle]) : ''
+  const status = parts.status ? client[parts.status] : null
+  const vip = parts.vipFlag && truthy(client[parts.vipFlag])
+  const email = parts.email ? plainValue(client[parts.email]) : ''
+  const phoneKey = columns.find((column) => isPhoneColumn(column.key) && !blank(client[column.key]))?.key
+  const phone = phoneKey ? plainValue(client[phoneKey]) : ''
+
+  const filled = columns.filter((column) => hasDetail(column, client[column.key]))
+  const empty = columns.filter((column) => !hasDetail(column, client[column.key]))
+
+  return (
+    <>
+      <Drawer.Header borderBottom="1px solid" borderColor={COLORS.border} py="20px" display="block">
+        <Flex align="center" gap="14px" pr="32px">
+          <Avatar name={name} src={parts.avatar && client[parts.avatar]} size="52px" fontSize="17px" />
+          <Box minW={0}>
+            <Drawer.Title fontFamily={HEADING_FONT} fontSize="19px" lineHeight="1.3" color={COLORS.heading} overflowWrap="anywhere">
+              {name}
+            </Drawer.Title>
+            {subtitle ? (
+              <Drawer.Description mt="2px" fontFamily={FONT} fontSize="13px" color={COLORS.muted}>
+                {subtitle}
+              </Drawer.Description>
+            ) : null}
+            {!blank(status) || vip ? (
+              <Flex mt="8px" gap="6px" flexWrap="wrap">
+                {!blank(status) ? <CellValue column={{ key: parts.status }} value={status} /> : null}
+                {vip ? <VipTag label={parts.vipTag && plainValue(client[parts.vipTag])} /> : null}
+              </Flex>
+            ) : null}
+          </Box>
+        </Flex>
+        {phone || email ? (
+          <Flex mt="16px" gap="8px" flexWrap="wrap">
+            {phone ? (
+              <QuickAction href={`tel:${phone.replace(/[^\d+]/g, '')}`} icon={LuPhone}>
+                Call
+              </QuickAction>
+            ) : null}
+            {email ? (
+              <QuickAction href={`mailto:${email}`} icon={LuMail}>
+                Email
+              </QuickAction>
+            ) : null}
+          </Flex>
+        ) : null}
+      </Drawer.Header>
+      <Drawer.CloseTrigger asChild top="16px" right="16px">
+        <CloseButton size="sm" aria-label="Close client details" />
+      </Drawer.CloseTrigger>
+      <Drawer.Body py="4px" fontFamily={FONT} fontSize="14px">
+        {filled.map((column) => (
+          <DetailRow key={column.key} column={column} client={client} />
+        ))}
+        {empty.length ? (
+          <Box py="12px">
+            <Flex
+              as="button"
+              type="button"
+              aria-expanded={showEmpty}
+              onClick={() => setShowEmpty((value) => !value)}
+              align="center"
+              gap="6px"
+              h="32px"
+              fontFamily={FONT}
+              fontWeight="600"
+              fontSize="13px"
+              color={COLORS.activeBg}
+              cursor="pointer"
+              _hover={{ textDecoration: 'underline' }}
+              _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+            >
+              <Icon
+                as={LuChevronDown}
+                boxSize="14px"
+                transform={showEmpty ? 'rotate(180deg)' : undefined}
+                transition="transform 150ms ease"
+              />
+              {showEmpty ? 'Hide' : 'Show'} {empty.length} empty {empty.length === 1 ? 'field' : 'fields'}
+            </Flex>
+            {showEmpty ? (
+              <Box mt="4px">
+                {empty.map((column) => (
+                  <DetailRow key={column.key} column={column} client={client} />
+                ))}
+              </Box>
+            ) : null}
+          </Box>
+        ) : null}
+      </Drawer.Body>
+      {!editControl.hidden || !deleteControl.hidden ? (
+        <Drawer.Footer borderTop="1px solid" borderColor={COLORS.border} py="14px" gap="10px" justifyContent="flex-end">
+          {!deleteControl.hidden ? (
+            <ToolbarButton
+              icon={LuTrash2}
+              onClick={onDelete}
+              disabled={deleteControl.maintenance}
+              title={deleteControl.maintenance ? deleteControl.message || 'Under maintenance' : undefined}
+              color="#B91C1C"
+              _hover={{ bg: '#FDECEC' }}
+              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+            >
+              Delete
+            </ToolbarButton>
+          ) : null}
+          {!editControl.hidden ? (
+            <ToolbarButton
+              icon={LuPencil}
+              onClick={onEdit}
+              disabled={editControl.maintenance}
+              title={editControl.maintenance ? editControl.message || 'Under maintenance' : undefined}
+              _disabled={{ opacity: 0.5, cursor: 'not-allowed' }}
+            >
+              Edit client
+            </ToolbarButton>
+          ) : null}
+        </Drawer.Footer>
+      ) : null}
+    </>
+  )
+}
+
+/** One client's details in a side panel. */
+function ClientDrawer({ client, columns, parts, onClose, onEdit, onDelete }) {
   return (
     <Drawer.Root open={Boolean(client)} onOpenChange={({ open }) => !open && onClose()} placement="end" size="md">
       <Portal>
@@ -343,52 +564,14 @@ function ClientDrawer({ client, columns, parts, onClose }) {
         <Drawer.Positioner>
           <Drawer.Content bg={COLORS.surface}>
             {client ? (
-              <>
-                <Drawer.Header borderBottom="1px solid" borderColor={COLORS.border} py="20px" display="block">
-                  <Flex align="center" gap="14px" pr="32px">
-                    <Avatar name={name} src={parts.avatar && client[parts.avatar]} size="52px" fontSize="17px" />
-                    <Box minW={0}>
-                      <Drawer.Title fontFamily={HEADING_FONT} fontSize="19px" lineHeight="1.3" color={COLORS.heading}>
-                        {name}
-                      </Drawer.Title>
-                      {subtitle ? (
-                        <Drawer.Description mt="2px" fontFamily={FONT} fontSize="13px" color={COLORS.muted}>
-                          {subtitle}
-                        </Drawer.Description>
-                      ) : null}
-                      {!blank(status) || vip ? (
-                        <Flex mt="8px" gap="6px" flexWrap="wrap">
-                          {!blank(status) ? <CellValue column={{ key: parts.status }} value={status} /> : null}
-                          {vip ? <VipTag label={parts.vipTag && plainValue(client[parts.vipTag])} /> : null}
-                        </Flex>
-                      ) : null}
-                    </Box>
-                  </Flex>
-                </Drawer.Header>
-                <Drawer.CloseTrigger asChild top="16px" right="16px">
-                  <CloseButton size="sm" />
-                </Drawer.CloseTrigger>
-                <Drawer.Body py="4px" fontFamily={FONT} fontSize="14px">
-                  {columns.map((column) => (
-                    <Grid
-                      key={column.key}
-                      templateColumns={{ base: '1fr', sm: '140px 1fr' }}
-                      gap={{ base: '2px', sm: '16px' }}
-                      py="12px"
-                      borderBottom="1px solid"
-                      borderColor={COLORS.border}
-                      _last={{ borderBottom: 'none' }}
-                    >
-                      <Text pt="2px" fontSize="11.5px" fontWeight="600" letterSpacing="0.5px" textTransform="uppercase" color={COLORS.subtle}>
-                        {column.label}
-                      </Text>
-                      <Box minW={0} color={COLORS.heading}>
-                        <DetailValue column={column} value={client[column.key]} />
-                      </Box>
-                    </Grid>
-                  ))}
-                </Drawer.Body>
-              </>
+              <ClientDetails
+                key={client._key}
+                client={client}
+                columns={columns}
+                parts={parts}
+                onEdit={() => onEdit(client)}
+                onDelete={() => onDelete(client)}
+              />
             ) : null}
           </Drawer.Content>
         </Drawer.Positioner>
@@ -596,6 +779,16 @@ export default function ClientsPage() {
   const currentPage = Math.min(page, pageCount)
   const visible = matching.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
 
+  const filtersActive = activeGroup !== 'all' || activeTab !== 'all' || Boolean(needle)
+  function clearFilters() {
+    setGroup('all')
+    setTab('all')
+    setSearch('')
+    setPage(1)
+  }
+  const firstShown = (currentPage - 1) * PAGE_SIZE + 1
+  const lastShown = firstShown + visible.length - 1
+
   /** Header click: ascending, then descending, then back to the table's own order. */
   function toggleSort(key) {
     setSort((prev) => (prev?.key !== key ? { key, dir: 'asc' } : prev.dir === 'asc' ? { key, dir: 'desc' } : null))
@@ -624,7 +817,7 @@ export default function ClientsPage() {
             Clients
           </Text>
           <Text mt="8px" fontFamily={FONT} fontSize="14px" lineHeight="22px" color={COLORS.muted}>
-            Every client in the {CLIENTS_TABLE} table. Select a client to see all of their details.
+            Find a client by name, phone, project, or broker. Select one to see their full details, call, or email them.
           </Text>
         </Box>
 
@@ -645,8 +838,9 @@ export default function ClientsPage() {
             flex="1"
             minW="220px"
             maxW="480px"
-            h="40px"
-            px="14px"
+            h="44px"
+            pl="14px"
+            pr="6px"
             bg={COLORS.surface}
             border="1px solid"
             borderColor={COLORS.border}
@@ -663,12 +857,42 @@ export default function ClientsPage() {
                 setSearch(event.target.value)
                 setPage(1)
               }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' && search) {
+                  event.preventDefault()
+                  setSearch('')
+                  setPage(1)
+                }
+              }}
               placeholder="Search by name, phone, project, broker..."
               aria-label="Search clients"
               fontFamily={FONT}
-              fontSize="13px"
+              fontSize="14px"
               color={COLORS.heading}
             />
+            {search ? (
+              <Flex
+                as="button"
+                type="button"
+                aria-label="Clear search"
+                title="Clear search"
+                onClick={() => {
+                  setSearch('')
+                  setPage(1)
+                }}
+                align="center"
+                justify="center"
+                boxSize="32px"
+                flexShrink={0}
+                borderRadius="6px"
+                color={COLORS.subtle}
+                cursor="pointer"
+                _hover={{ bg: COLORS.hoverBg, color: COLORS.heading }}
+                _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '1px' }}
+              >
+                <Icon as={LuX} boxSize="15px" />
+              </Flex>
+            ) : null}
           </Flex>
           <Controlled id={buttonControl('clients', 'export')}>
             <ToolbarButton
@@ -683,15 +907,8 @@ export default function ClientsPage() {
         </Flex>
 
         <Card as="section" p="0" overflow="hidden" aria-label="Clients">
-          <Flex
-            role="tablist"
-            aria-label="Clients by account type"
-            gap="8px"
-            flexWrap="wrap"
-            px={{ base: '16px', md: '24px' }}
-            pt="16px"
-            pb="4px"
-          >
+          <Flex direction="column" gap="10px" px={{ base: '16px', md: '24px' }} pt="16px" pb="4px">
+          <FilterRow label="Account">
             {groups.map((option) => (
               <Pill
                 key={option.value}
@@ -706,10 +923,11 @@ export default function ClientsPage() {
                 {option.label}
               </Pill>
             ))}
+          </FilterRow>
           </Flex>
           <Flex align="center" justify="space-between" gap="12px" flexWrap="wrap" px={{ base: '16px', md: '24px' }} py="12px">
             {hasTabs ? (
-              <Flex role="tablist" aria-label="Client status" gap="8px" flexWrap="wrap">
+              <FilterRow label="Stage">
                 {tabs.map((option) => (
                   <Pill
                     key={option.value}
@@ -724,13 +942,37 @@ export default function ClientsPage() {
                     {option.label}
                   </Pill>
                 ))}
-              </Flex>
+              </FilterRow>
             ) : (
               <Text as="h2" fontFamily={HEADING_FONT} fontWeight="700" fontSize="17px" color={COLORS.heading}>
                 All Clients ({grouped.length})
               </Text>
             )}
-            <RefreshButton onRefresh={refresh} label="Refresh clients" size="32px" />
+            <Flex align="center" gap="8px" ml="auto">
+              {filtersActive ? (
+                <Flex
+                  as="button"
+                  type="button"
+                  onClick={clearFilters}
+                  align="center"
+                  gap="6px"
+                  h="36px"
+                  px="10px"
+                  borderRadius="8px"
+                  fontFamily={FONT}
+                  fontWeight="600"
+                  fontSize="13px"
+                  color={COLORS.activeBg}
+                  cursor="pointer"
+                  _hover={{ bg: TINT }}
+                  _focusVisible={{ outline: '2px solid', outlineColor: COLORS.activeBg, outlineOffset: '2px' }}
+                >
+                  <Icon as={LuX} boxSize="14px" />
+                  Clear filters
+                </Flex>
+              ) : null}
+              <RefreshButton onRefresh={refresh} label="Refresh clients" size="36px" />
+            </Flex>
           </Flex>
 
           {visible.length ? (
@@ -842,7 +1084,15 @@ export default function ClientsPage() {
           ) : (
             <Box p="16px">
               {clients.length ? (
-                <EmptyState icon={LuSearch} title="No matching clients" hint="Try a different search or tab." />
+                <EmptyState
+                  icon={LuSearch}
+                  title="No matching clients"
+                  hint={needle ? `Nothing matches “${search.trim()}” with these filters.` : 'No clients fit these filters.'}
+                >
+                  <ToolbarButton icon={LuX} onClick={clearFilters} mt="8px">
+                    Clear filters
+                  </ToolbarButton>
+                </EmptyState>
               ) : (
                 <EmptyState
                   icon={LuUsers}
@@ -865,7 +1115,15 @@ export default function ClientsPage() {
               borderColor={COLORS.border}
             >
               <Text fontFamily={FONT} fontSize="13px" color={COLORS.muted}>
-                Showing {visible.length} of {matching.length} {matching.length === 1 ? 'client' : 'clients'}
+                Showing{' '}
+                <Text as="span" fontWeight="600" color={COLORS.heading} fontVariantNumeric="tabular-nums">
+                  {firstShown}–{lastShown}
+                </Text>{' '}
+                of{' '}
+                <Text as="span" fontWeight="600" color={COLORS.heading} fontVariantNumeric="tabular-nums">
+                  {matching.length}
+                </Text>{' '}
+                {matching.length === 1 ? 'client' : 'clients'}
               </Text>
               <Pagination page={currentPage} pageCount={pageCount} onChange={setPage} />
             </Flex>
@@ -873,7 +1131,14 @@ export default function ClientsPage() {
         </Card>
       </Flex>
 
-      <ClientDrawer client={viewControl.usable ? openClient : null} columns={columns} parts={parts} onClose={() => setOpenKey(null)} />
+      <ClientDrawer
+        client={viewControl.usable ? openClient : null}
+        columns={columns}
+        parts={parts}
+        onClose={() => setOpenKey(null)}
+        onEdit={setEditing}
+        onDelete={setDeleting}
+      />
       {editing ? (
         <ClientFormDialog
           key={editing._key}

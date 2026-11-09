@@ -42,6 +42,8 @@ import {
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
+import { isEditConflict, isNewer } from '@/data/editConflicts'
+import ConflictNotice from '@/components/ConflictNotice'
 
 const FONT = 'Inter, system-ui, sans-serif'
 const HEADING_FONT = "'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -279,25 +281,52 @@ function AnnouncementItem({ item, onEdit, onDelete }) {
   )
 }
 
-/** Posts a new announcement, or edits `announcement` when one is given. */
-function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted }) {
+/**
+ * Posts a new announcement, or edits `announcement` when one is given.
+ * `latest` is that announcement as the live list now has it, so an edit made
+ * by someone else while this one is open is shown, and never silently replaced.
+ */
+function PostAnnouncementDialog({ open, announcement, latest, userId, onClose, onPosted }) {
   const [form, setForm] = useState({ title: announcement?.title ?? '', body: announcement?.body ?? '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // The version this edit started from, and the conflict a save ran into.
+  const [version, setVersion] = useState(announcement?.updatedAt ?? '')
+  const [conflict, setConflict] = useState(null)
+  const changedElsewhere = Boolean(announcement) && isNewer(latest?.updatedAt, version)
 
   const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))
-  const canSubmit = form.title.trim() && form.body.trim() && !busy
+  const canSubmit = form.title.trim() && form.body.trim() && !busy && !conflict
 
-  async function handleSubmit() {
+  /** Drop this edit for the announcement as it now is; closes when it is gone. */
+  function loadLatest() {
+    setConflict(null)
+    setError('')
+    if (!latest || conflict?.deleted) {
+      onClose()
+      return
+    }
+    setForm({ title: latest.title, body: latest.body })
+    setVersion(latest.updatedAt)
+  }
+
+  async function handleSubmit({ overwrite = false } = {}) {
     setBusy(true)
     setError('')
+    setConflict(null)
     try {
-      if (announcement) await updateAnnouncement(announcement.id, form)
-      else await createAnnouncement({ ...form, userId })
+      if (announcement) {
+        await updateAnnouncement(announcement.id, form, { expectedUpdatedAt: overwrite ? undefined : version })
+      } else await createAnnouncement({ ...form, userId })
       setForm({ title: '', body: '' })
       notifySaved(announcement ? 'Announcement updated' : 'Announcement posted')
       onPosted()
     } catch (err) {
+      // Someone else saved first: keep the text as typed and ask what to do.
+      if (isEditConflict(err)) {
+        setConflict(err)
+        return
+      }
       setError(err.message)
       notifyFailed(announcement ? 'Could not update the announcement' : 'Could not post the announcement', err)
     } finally {
@@ -346,6 +375,23 @@ function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted 
                   </Text>
                 ) : null}
               </Flex>
+              {conflict ? (
+                <ConflictNotice
+                  message={conflict.message}
+                  discardLabel={conflict.deleted ? 'Close' : 'Discard mine'}
+                  onDiscard={loadLatest}
+                  onOverwrite={conflict.deleted ? undefined : () => handleSubmit({ overwrite: true })}
+                  busy={busy}
+                />
+              ) : changedElsewhere ? (
+                <ConflictNotice
+                  message="Someone else just edited this announcement while you were editing."
+                  detail="Load their changes to start from the latest, or keep editing — saving will ask before replacing theirs."
+                  discardLabel="Load their changes"
+                  onDiscard={loadLatest}
+                  busy={busy}
+                />
+              ) : null}
             </Dialog.Body>
             <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <Box
@@ -365,7 +411,7 @@ function PostAnnouncementDialog({ open, announcement, userId, onClose, onPosted 
               >
                 Cancel
               </Box>
-              <PrimaryButton onClick={handleSubmit} disabled={!canSubmit} loading={busy}>
+              <PrimaryButton onClick={() => handleSubmit()} disabled={!canSubmit} loading={busy}>
                 {announcement ? 'Save' : 'Post'}
               </PrimaryButton>
             </Dialog.Footer>
@@ -604,6 +650,7 @@ export default function AnnouncementsPage() {
         key={editing?.id ?? 'new'}
         open={posting || Boolean(editing)}
         announcement={editing}
+        latest={editing ? (data?.announcements ?? []).find((item) => item.id === editing.id) ?? null : null}
         userId={user?.id}
         onClose={() => {
           setPosting(false)

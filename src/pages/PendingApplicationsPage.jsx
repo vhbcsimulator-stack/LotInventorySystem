@@ -33,7 +33,8 @@ import {
 } from '@/data/applicationsData'
 import { SUPABASE_ENV } from '@/data/supabase'
 import { COLORS } from '@/theme/colors'
-import { notifyFailed, notifySaved } from '@/lib/notify'
+import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
+import { isEditConflict } from '@/data/editConflicts'
 
 const FONT = 'Inter, system-ui, sans-serif'
 const HEADING_FONT = "'Plus Jakarta Sans', Inter, system-ui, sans-serif"
@@ -46,7 +47,8 @@ const TABS = [
 ]
 
 // The account kinds an application can become, in the order "Copy to form" lists them.
-const KINDS = ['broker', 'regular_user', 'sales_agent']
+// Regular user accounts are no longer made, so those applications can only be rejected.
+const KINDS = ['broker', 'sales_agent']
 
 // Category filters by the account type asked for; '' is an application that did not say.
 const CATEGORIES = [
@@ -111,7 +113,7 @@ function kindTitle(kind) {
 function matchesSearch(application, search) {
   const needle = search.trim().toLowerCase()
   if (!needle) return true
-  return [fullName(application), application.email, application.mobileNumber, application.message]
+  return [fullName(application), application.email, application.mobileNumber, application.brokerName, application.message]
     .some((value) => value.toLowerCase().includes(needle))
 }
 
@@ -131,6 +133,16 @@ function KindBadge({ kind }) {
       whiteSpace="nowrap"
     >
       {kindTitle(kind)}
+    </Text>
+  )
+}
+
+/** The broker the applicant named in the app, if any. */
+function BrokerName({ name }) {
+  if (!name) return null
+  return (
+    <Text mt="6px" fontFamily={FONT} fontSize="12px" color={COLORS.muted} overflowWrap="anywhere">
+      Broker: <Text as="span" color={COLORS.heading} fontWeight="600">{name}</Text>
     </Text>
   )
 }
@@ -187,7 +199,7 @@ function HeaderCell({ children, ...rest }) {
 function CopyToFormMenu({ application, disabled, onCopy }) {
   const control = useControl('button.applications.create-account')
   if (control.hidden) return null
-  const kinds = application.accountType
+  const kinds = KINDS.includes(application.accountType)
     ? [application.accountType, ...KINDS.filter((kind) => kind !== application.accountType)]
     : KINDS
   const menu = (
@@ -353,6 +365,7 @@ function ApplicationRow({ application, connected, onCopy, onAction }) {
                 {formatDate(application.createdAt)}
               </Text>
             </Flex>
+            <BrokerName name={application.brokerName} />
           </Box>
         </Box>
       </Flex>
@@ -372,6 +385,7 @@ function ApplicationRow({ application, connected, onCopy, onAction }) {
       </Box>
       <Box role="cell" display={{ base: 'none', lg: 'block' }}>
         <KindBadge kind={application.accountType} />
+        <BrokerName name={application.brokerName} />
         {application.status === 'approved' && application.approvedAs ? (
           <Text mt="6px" fontFamily={FONT} fontSize="12px" color={COLORS.brandGreen} fontWeight="600">
             Made as {kindTitle(application.approvedAs)}
@@ -481,7 +495,7 @@ function DeleteDialog({ application, onClose, onDeleted }) {
 
 /**
  * Account applications sent from the mobile app. "Copy to form" opens the
- * Brokers, Regular Users, or Sales Agents create dialog with the applicant's
+ * Brokers or Sales Agents create dialog with the applicant's
  * details filled in; making the account there marks the application approved.
  */
 export default function PendingApplicationsPage({ onNavigate }) {
@@ -519,14 +533,18 @@ export default function PendingApplicationsPage({ onNavigate }) {
     }
     const status = action === 'reject' ? 'rejected' : 'pending'
     try {
-      await setApplicationStatus(application.id, status)
+      // Only from the status shown here, so two reviewers never undo each other.
+      await setApplicationStatus(application.id, status, null, { from: application.status })
       notifySaved(
         status === 'rejected' ? 'Application rejected' : 'Application moved back to pending',
         `${fullName(application)}'s application is now ${status}.`,
       )
       reload()
     } catch (err) {
-      notifyFailed('Could not update the application', err)
+      if (isEditConflict(err)) {
+        notifyWarning(`${fullName(application)}'s application was not changed`, err.message)
+        reload()
+      } else notifyFailed('Could not update the application', err)
     }
   }
 
@@ -546,7 +564,7 @@ export default function PendingApplicationsPage({ onNavigate }) {
             Pending Account Applications
           </Text>
           <Text mt="6px" maxW="600px" fontFamily={FONT} fontSize="14px" lineHeight="20px" color={COLORS.muted}>
-            Sign-up forms sent from the app. Use Copy to form to open a broker, regular user, or sales agent account form with the
+            Sign-up forms sent from the app. Use Copy to form to open a broker or sales agent account form with the
             applicant&apos;s details filled in — the application is approved once the account is created.
           </Text>
         </Box>

@@ -12,6 +12,7 @@ import {
   LuPhone,
   LuSearch,
   LuSlidersHorizontal,
+  LuUserCheck,
   LuUserMinus,
   LuUserPlus,
   LuUsers,
@@ -26,7 +27,17 @@ import Controlled, { ControlledMenuItem } from '@/components/Controlled'
 import { ACCOUNT_PAGE, buttonControl } from '@/lib/portalControls'
 import SourceNotice from '@/components/SourceNotice'
 import useApiQuery from '@/hooks/useApiQuery'
-import { ACCOUNT_KINDS, createAccount, deleteAccount, fetchAccounts, setBrokerIdPicture, validateBroker } from '@/data/brokersData'
+import {
+  ACCOUNT_KINDS,
+  createAccount,
+  deleteAccount,
+  fetchAccounts,
+  fetchBrokerNames,
+  MAX_SALES_AGENTS_PER_BROKER,
+  salesAgentCounts,
+  setBrokerIdPicture,
+  validateBroker,
+} from '@/data/brokersData'
 import IdPicture from '@/components/IdPicture'
 import { setApplicationStatus } from '@/data/applicationsData'
 import { SUPABASE_ENV } from '@/data/supabase'
@@ -59,7 +70,8 @@ const SORTS = [
   { value: 'newest', label: 'Newest Accounts', compare: (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) },
 ]
 
-const EMPTY_FORM = { firstName: '', lastName: '', mobileNumber: '', email: '' }
+// brokerId is used by sales agents only: the broker they work under.
+const EMPTY_FORM = { firstName: '', lastName: '', mobileNumber: '', email: '', brokerId: '' }
 
 // autoComplete is off: these fields describe the broker, not the admin filling
 // the form in, so the browser should not offer the admin's own details.
@@ -102,7 +114,9 @@ function lotsLabel(count) {
 function matchesSearch(broker, search) {
   const needle = search.trim().toLowerCase()
   if (!needle) return true
-  return [fullName(broker), broker.email, broker.mobileNumber].some((value) => value.toLowerCase().includes(needle))
+  return [fullName(broker), broker.email, broker.mobileNumber, broker.brokerName ?? ''].some((value) =>
+    value.toLowerCase().includes(needle),
+  )
 }
 
 /** Brokers with at least one sale, best TCP first. */
@@ -130,10 +144,20 @@ function csvCell(value) {
 }
 
 function downloadBrokersCsv(brokers, copy) {
+  const withBroker = copy.kind === 'sales_agent'
   const rows = copy.sells
     ? [
-        ['first_name', 'last_name', 'email', 'mobile_number', 'lots_sold', 'total_tcp', 'created_at'],
-        ...brokers.map((b) => [b.firstName, b.lastName, b.email, b.mobileNumber, b.lotsSold, Math.round(b.totalTcp), b.createdAt]),
+        ['first_name', 'last_name', 'email', 'mobile_number', ...(withBroker ? ['broker'] : []), 'lots_sold', 'total_tcp', 'created_at'],
+        ...brokers.map((b) => [
+          b.firstName,
+          b.lastName,
+          b.email,
+          b.mobileNumber,
+          ...(withBroker ? [b.brokerName ?? ''] : []),
+          b.lotsSold,
+          Math.round(b.totalTcp),
+          b.createdAt,
+        ]),
       ]
     : [
         ['first_name', 'last_name', 'email', 'mobile_number', 'created_at'],
@@ -195,6 +219,54 @@ function Field({ field, value, error, onChange, disabled }) {
         aria-describedby={error ? `${id}-error` : undefined}
         borderColor={error ? '#DC2626' : undefined}
       />
+      {error ? (
+        <Text id={`${id}-error`} mt="4px" fontFamily={FONT} fontSize="12px" color="#B91C1C">
+          {error}
+        </Text>
+      ) : null}
+    </Box>
+  )
+}
+
+/**
+ * A sales agent's broker, chosen from every broker account (A–Z). Each shows
+ * how many agents they have; a broker at MAX_SALES_AGENTS_PER_BROKER cannot be picked.
+ */
+function BrokerPicker({ value, error, onChange, disabled }) {
+  const { data, loading } = useApiQuery(fetchBrokerNames)
+  const brokers = data?.brokers ?? []
+  const counts = salesAgentCounts(data?.salesAgents ?? [])
+  const id = 'broker-brokerId'
+  const placeholder = loading && !data ? 'Loading brokers…' : brokers.length ? 'Select a broker' : 'No brokers yet — add one first'
+  return (
+    <Box>
+      <Text as="label" htmlFor={id} display="block" mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
+        Broker
+      </Text>
+      <NativeSelect.Root disabled={disabled}>
+        <NativeSelect.Field
+          id={id}
+          value={value}
+          onChange={onChange}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
+          borderColor={error ? '#DC2626' : undefined}
+        >
+          <option value="">{placeholder}</option>
+          {brokers.map((broker) => {
+            const count = counts.get(String(broker.id)) ?? 0
+            const full = count >= MAX_SALES_AGENTS_PER_BROKER
+            return (
+              <option key={broker.id} value={broker.id} disabled={full}>
+                {broker.name}
+                {broker.email ? ` (${broker.email})` : ''}
+                {` — ${count}/${MAX_SALES_AGENTS_PER_BROKER} agents${full ? ', full' : ''}`}
+              </option>
+            )
+          })}
+        </NativeSelect.Field>
+        <NativeSelect.Indicator />
+      </NativeSelect.Root>
       {error ? (
         <Text id={`${id}-error`} mt="4px" fontFamily={FONT} fontSize="12px" color="#B91C1C">
           {error}
@@ -311,7 +383,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
   const [error, setError] = useState('')
   const [created, setCreated] = useState(null)
 
-  const errors = submitted ? validateBroker(form) : {}
+  const errors = submitted ? validateBroker(form, copy.kind) : {}
   const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }))
   const field = (spec) => (
     <Field key={spec.key} field={spec} value={form[spec.key]} error={errors[spec.key]} onChange={set(spec.key)} disabled={busy} />
@@ -330,7 +402,7 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
     event.preventDefault()
     setSubmitted(true)
     setError('')
-    if (Object.keys(validateBroker(form)).length) return
+    if (Object.keys(validateBroker(form, copy.kind)).length) return
 
     setBusy(true)
     try {
@@ -404,6 +476,9 @@ function AddBrokerDialog({ copy, open, disabled, initialForm, note, idPicture, s
                       {FIELDS.slice(0, 2).map(field)}
                     </Flex>
                     {FIELDS.slice(2).map(field)}
+                    {copy.kind === 'sales_agent' ? (
+                      <BrokerPicker value={form.brokerId} error={errors.brokerId} onChange={set('brokerId')} disabled={busy} />
+                    ) : null}
 
                     {/* A broker made from an application keeps its ID picture: check it against the details above. */}
                     {showIdPicture ? (
@@ -484,6 +559,7 @@ function BrokerProfileDialog({ broker, copy, onClose }) {
     ? [
         { icon: LuMail, label: 'Email', value: broker.email },
         { icon: LuPhone, label: 'Mobile Number', value: broker.mobileNumber },
+        ...(copy.kind === 'sales_agent' ? [{ icon: LuUserCheck, label: 'Broker', value: broker.brokerName }] : []),
         { icon: LuUserPlus, label: 'Account Created', value: formatShortDate(broker.createdAt) },
       ]
     : []
