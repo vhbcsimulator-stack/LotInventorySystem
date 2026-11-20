@@ -28,7 +28,7 @@
  */
 import { SOURCE } from './api'
 import { fetchAnnouncements } from './announcementsData'
-import { LOT_TABLES, lotTermsFor } from './projectsData'
+import { LOT_TABLES, loadProjectRegistry, lotTermsFor, sectionSuffix } from './projectsData'
 import { fetchAllRows, supabase, uiStatus, unwrap } from './supabase'
 
 export { SOURCE }
@@ -97,7 +97,7 @@ export const EMPTY_DASHBOARD = {
  */
 const phaseLabel = (group, phase, section = null) =>
   group && phase !== null && phase !== undefined
-    ? `${group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
+    ? `${group} ${phase}${sectionSuffix(section)}`
     : ''
 
 const lotLabel = (project, lot) =>
@@ -435,6 +435,8 @@ export async function fetchDashboard() {
   if (!supabase) return { ...EMPTY_DASHBOARD, source: SOURCE.NOT_CONFIGURED }
 
   try {
+    // Projects added from the portal join LOT_TABLES once the project list is loaded.
+    await loadProjectRegistry()
     const names = await fetchProjectNames()
     // A paused project (Project Actions → Pause project) is left off the dashboard entirely.
     const codes = Object.keys(LOT_TABLES).filter((code) => !names.get(code)?.paused)

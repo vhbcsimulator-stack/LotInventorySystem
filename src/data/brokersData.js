@@ -9,7 +9,7 @@
  * the admin out, and the key that can make one must stay on the server.
  */
 import { SOURCE, num, text } from '@/data/api'
-import { LOT_TABLES } from '@/data/projectsData'
+import { LOT_TABLES, loadProjectRegistry } from '@/data/projectsData'
 import { fetchAllRows, supabase, uiStatus, unwrap } from '@/data/supabase'
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -50,6 +50,8 @@ export function salesKey(value) {
  * table that cannot be read (or lacks the column) is skipped.
  */
 async function fetchSoldLots(column) {
+  // Projects added from the portal join LOT_TABLES once the project list is loaded.
+  await loadProjectRegistry()
   const perTable = await Promise.all(
     Object.values(LOT_TABLES).map((table) =>
       fetchAllRows(table, `id, status, ${column}, total`, (query) => query.not(column, 'is', null)).catch((err) => {

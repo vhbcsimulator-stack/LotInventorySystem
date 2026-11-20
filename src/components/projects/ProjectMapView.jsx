@@ -11,7 +11,7 @@ import {
   Spinner,
   Text,
 } from '@chakra-ui/react'
-import { LuDownload, LuExpand, LuImagePlus, LuMap, LuRefreshCw, LuZoomIn, LuZoomOut } from 'react-icons/lu'
+import { LuDownload, LuExpand, LuImagePlus, LuLayers, LuMap, LuPencil, LuRefreshCw, LuTrash2, LuZoomIn, LuZoomOut } from 'react-icons/lu'
 import { Card } from '@/components/ui-kit/Card'
 import { MapViewSkeleton } from '@/components/skeletons/ProjectViewSkeletons'
 import SegmentedControl from '@/components/ui-kit/SegmentedControl'
@@ -21,7 +21,8 @@ import AnnotatedImagesPanel from '@/components/projects/AnnotatedImagesPanel'
 import EmptyState from '@/components/EmptyState'
 import useApiQuery from '@/hooks/useApiQuery'
 import Controlled from '@/components/Controlled'
-import { fetchProjectMaps, mapTabValue, saveProjectMap, usesFloors } from '@/data/projectMapsData'
+import { addPhase, deletePhase, editPhase, fetchProjectMaps, mapTabValue, parseSlotValue, saveProjectMap, slotName, slotUnitFor, usesFloors } from '@/data/projectMapsData'
+import { sectionSuffix } from '@/data/projectsData'
 import { refreshTables } from '@/data/queryClient'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
@@ -269,35 +270,28 @@ export function FullscreenImageDialog({ open, src, alt, title, onClose }) {
   )
 }
 
-/** The slot a tab stands for, used as the Add dialog's default. */
+/** The slot a tab stands for, used as the Add map dialog's default. */
 function slotForTab(tabValue, floors) {
-  if (tabValue === 'commercial') return { kind: 'commercial', phase: '' }
-  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(tabValue ?? '')
-  if (match) return { kind: 'phase', phase: match[1], section: match[2] ? match[2].toUpperCase() === 'EAST' ? 'East' : match[2].toUpperCase() : '' }
+  if (tabValue === 'commercial') return { kind: 'commercial', slot: '' }
+  if (parseSlotValue(tabValue).phase !== null) return { kind: 'phase', slot: tabValue }
   // A condominium has no whole-site map, so its default slot is still a floor.
-  return floors ? { kind: 'phase', phase: '' } : { kind: 'whole', phase: '' }
+  return floors ? { kind: 'phase', slot: '' } : { kind: 'whole', slot: '' }
 }
 
-function AddMapDialog({ open, initialSlot, floors, mvlc, busy, error, onClose, onSave }) {
-  const [kind, setKind] = useState(initialSlot.kind)
-  const [phase, setPhase] = useState(initialSlot.phase)
-  const [section, setSection] = useState(initialSlot.section || 'A')
-  const [file, setFile] = useState(null)
-  const [fileError, setFileError] = useState('')
+const fieldLabel = (children) => (
+  <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
+    {children}
+  </Text>
+)
 
-  const unit = floors ? 'Floor' : 'Phase'
-  const needsPhase = kind === 'phase'
-  const phaseNumber = phase.trim() === '' ? null : Number(phase)
-  const allowed = phaseNumber === 1 ? ['A', 'B', 'C', 'East'] : phaseNumber === 2 ? ['A', 'B', 'East'] : []
-  const mapSection = mvlc && needsPhase && allowed.length ? (allowed.includes(section) ? section : allowed[0]) : null
-  const canSave = file && !busy && (!needsPhase || (Number.isInteger(phaseNumber) && phaseNumber > 0 && (!mvlc || phaseNumber <= 3)))
+const SECTION_PATTERN = /^[A-Za-z]{1,12}$/
+const wholeNumber = (value) => {
+  const number = String(value).trim() === '' ? null : Number(value)
+  return Number.isInteger(number) && number > 0 ? number : null
+}
 
-  const label = (children) => (
-    <Text mb="6px" fontFamily={FONT} fontWeight="500" fontSize="13px" color={COLORS.heading}>
-      {children}
-    </Text>
-  )
-
+/** The frame both map dialogs share: title, body, Cancel and a primary button. */
+function MapDialog({ open, title, busy, onClose, primary, children }) {
   return (
     <Dialog.Root
       open={open}
@@ -314,88 +308,19 @@ function AddMapDialog({ open, initialSlot, floors, mvlc, busy, error, onClose, o
           <Dialog.Content borderRadius="16px" maxH="calc(100dvh - 32px)">
             <Dialog.Header borderBottom="1px solid" borderColor={COLORS.border} py="18px">
               <Dialog.Title fontFamily="'Plus Jakarta Sans', Inter, system-ui, sans-serif" fontSize="18px" color={COLORS.heading}>
-                Add map
+                {title}
               </Dialog.Title>
             </Dialog.Header>
             <Dialog.Body py="18px">
               <Flex direction="column" gap="14px">
-                <Box>
-                  {label('Map for')}
-                  <NativeSelect.Root>
-                    <NativeSelect.Field value={kind} onChange={(event) => setKind(event.target.value)}>
-                      {floors ? null : <option value="whole">Whole Map</option>}
-                      <option value="phase">{unit}</option>
-                      <option value="commercial">Commercial</option>
-                    </NativeSelect.Field>
-                    <NativeSelect.Indicator />
-                  </NativeSelect.Root>
-                </Box>
-                {kind !== 'whole' ? (
-                  <Box>
-                    {label(needsPhase ? `${unit} number` : `${unit} number (optional)`)}
-                    {mvlc && needsPhase ? (
-                      <NativeSelect.Root>
-                        <NativeSelect.Field value={phase} onChange={(event) => setPhase(event.target.value)}>
-                          <option value="">Select phase</option>
-                          <option value="1">Phase 1</option>
-                          <option value="2">Phase 2</option>
-                          <option value="3">Phase 3</option>
-                        </NativeSelect.Field>
-                        <NativeSelect.Indicator />
-                      </NativeSelect.Root>
-                    ) : (
-                      <Input type="number" min={1} step={1} value={phase} onChange={(event) => setPhase(event.target.value)} placeholder="e.g. 1" />
-                    )}
-                  </Box>
-                ) : null}
-                {mvlc && needsPhase && allowed.length ? (
-                  <Box>
-                    {label('Section')}
-                    <NativeSelect.Root>
-                      <NativeSelect.Field value={mapSection} onChange={(event) => setSection(event.target.value)}>
-                        {allowed.map((value) => <option key={value} value={value}>{value}</option>)}
-                      </NativeSelect.Field>
-                      <NativeSelect.Indicator />
-                    </NativeSelect.Root>
-                  </Box>
-                ) : null}
-                <Box>
-                  {label('Image')}
-                  <Input
-                    type="file"
-                    accept={acceptFor('map')}
-                    pt="6px"
-                    onChange={(event) => {
-                      const next = event.target.files?.[0] ?? null
-                      const problem = next ? uploadProblem('map', next) : ''
-                      setFileError(problem)
-                      setFile(problem ? null : next)
-                      if (problem) event.target.value = ''
-                    }}
-                  />
-                  <Text mt="4px" fontFamily={FONT} fontSize="12px" color={fileError ? '#B91C1C' : COLORS.subtle} role={fileError ? 'alert' : undefined}>
-                    {fileError || describeUpload('map')}
-                  </Text>
-                </Box>
-                {error ? (
-                  <Text role="alert" fontFamily={FONT} fontSize="13px" color="#B91C1C">
-                    {error}
-                  </Text>
-                ) : null}
+                {children}
               </Flex>
             </Dialog.Body>
             <Dialog.Footer borderTop="1px solid" borderColor={COLORS.border} py="16px" gap="10px" flexWrap="wrap">
               <ActionButton onClick={onClose} disabled={busy}>
                 Cancel
               </ActionButton>
-              <ActionButton
-                tone="primary"
-                loading={busy}
-                disabled={!canSave}
-                onClick={() => onSave({ phase: kind === 'whole' ? null : phaseNumber, section: mapSection, commercial: kind === 'commercial' }, file)}
-              >
-                Save map
-              </ActionButton>
+              {primary}
             </Dialog.Footer>
             <Dialog.CloseTrigger asChild top="14px" right="14px">
               <CloseButton size="sm" disabled={busy} />
@@ -404,6 +329,245 @@ function AddMapDialog({ open, initialSlot, floors, mvlc, busy, error, onClose, o
         </Dialog.Positioner>
       </Portal>
     </Dialog.Root>
+  )
+}
+
+function ErrorText({ children }) {
+  return children ? (
+    <Text role="alert" fontFamily={FONT} fontSize="13px" color="#B91C1C">
+      {children}
+    </Text>
+  ) : null
+}
+
+/**
+ * Upload a map into a slot. A phase map goes into one of the project's phases
+ * (the tabs, from `uploads`) or a new one typed here; "Add phase" makes an
+ * empty phase without a picture.
+ */
+function AddMapDialog({ open, initialSlot, phaseSlots, floors, unit, busy, error, onClose, onSave }) {
+  const [kind, setKind] = useState(initialSlot.kind)
+  // A phase tab's value, or '' for a phase typed in below.
+  const [slot, setSlot] = useState(initialSlot.slot || phaseSlots[0]?.value || '')
+  const [phase, setPhase] = useState('')
+  const [section, setSection] = useState('')
+  const [file, setFile] = useState(null)
+  const [fileError, setFileError] = useState('')
+
+  const typed = kind === 'phase' && !slot
+  const phaseNumber = wholeNumber(phase)
+  const sectionOk = !section.trim() || SECTION_PATTERN.test(section.trim())
+  const slotOk =
+    kind === 'whole' ||
+    (kind === 'commercial' && (phase.trim() === '' || phaseNumber !== null)) ||
+    (kind === 'phase' && (slot ? true : phaseNumber !== null && sectionOk))
+  const canSave = Boolean(file) && !busy && slotOk
+
+  function target() {
+    if (kind === 'whole') return { phase: null, section: null, commercial: false }
+    if (kind === 'commercial') return { phase: phaseNumber, section: null, commercial: true }
+    if (slot) return { ...parseSlotValue(slot), commercial: false }
+    return { phase: phaseNumber, section: section.trim() || null, commercial: false }
+  }
+
+  return (
+    <MapDialog
+      open={open}
+      title="Add map"
+      busy={busy}
+      onClose={onClose}
+      primary={
+        <ActionButton tone="primary" loading={busy} disabled={!canSave} onClick={() => onSave(target(), file)}>
+          Save map
+        </ActionButton>
+      }
+    >
+      <Box>
+        {fieldLabel('Map for')}
+        <NativeSelect.Root>
+          <NativeSelect.Field value={kind} onChange={(event) => setKind(event.target.value)}>
+            {floors ? null : <option value="whole">Whole Map</option>}
+            <option value="phase">{unit}</option>
+            <option value="commercial">Commercial</option>
+          </NativeSelect.Field>
+          <NativeSelect.Indicator />
+        </NativeSelect.Root>
+      </Box>
+      {kind === 'phase' ? (
+        <Box>
+          {fieldLabel(unit)}
+          <NativeSelect.Root>
+            <NativeSelect.Field value={slot} onChange={(event) => setSlot(event.target.value)}>
+              {phaseSlots.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+              <option value="">New {unit.toLowerCase()}…</option>
+            </NativeSelect.Field>
+            <NativeSelect.Indicator />
+          </NativeSelect.Root>
+        </Box>
+      ) : null}
+      {typed || kind === 'commercial' ? (
+        <Box>
+          {fieldLabel(typed ? `${unit} number` : `${unit} number (optional)`)}
+          <Input type="number" min={1} step={1} value={phase} onChange={(event) => setPhase(event.target.value)} placeholder="e.g. 4" />
+        </Box>
+      ) : null}
+      {typed ? (
+        <Box>
+          {fieldLabel('Section (optional)')}
+          <Input value={section} maxLength={12} onChange={(event) => setSection(event.target.value)} placeholder="e.g. D or East" />
+          {!sectionOk ? <ErrorText>A section is one letter or one word.</ErrorText> : null}
+        </Box>
+      ) : null}
+      <Box>
+        {fieldLabel('Image')}
+        <Input
+          type="file"
+          accept={acceptFor('map')}
+          pt="6px"
+          onChange={(event) => {
+            const next = event.target.files?.[0] ?? null
+            const problem = next ? uploadProblem('map', next) : ''
+            setFileError(problem)
+            setFile(problem ? null : next)
+            if (problem) event.target.value = ''
+          }}
+        />
+        <Text mt="4px" fontFamily={FONT} fontSize="12px" color={fileError ? '#B91C1C' : COLORS.subtle} role={fileError ? 'alert' : undefined}>
+          {fileError || describeUpload('map')}
+        </Text>
+      </Box>
+      <ErrorText>{error}</ErrorText>
+    </MapDialog>
+  )
+}
+
+/**
+ * Add a phase — or a section of one (Phase 1D, Phase 2 East), a floor, or a
+ * commercial phase — as a row in `uploads`. It gets its tab at once, empty
+ * until a map is added to it.
+ */
+function AddPhaseDialog({ open, unit, suggested, editing = null, busy, error, onClose, onSave }) {
+  // `editing` is the phase tab being renamed ({ label, phase, section }); a phase stays a phase.
+  const [kind, setKind] = useState('phase')
+  const [phase, setPhase] = useState(editing ? String(editing.phase) : suggested ? String(suggested) : '')
+  const [section, setSection] = useState(editing?.section ?? '')
+  const phaseNumber = wholeNumber(phase)
+  const sectionOk = !section.trim() || SECTION_PATTERN.test(section.trim())
+  const canSave = !busy && phaseNumber !== null && (kind === 'commercial' || sectionOk)
+  const preview =
+    phaseNumber === null
+      ? ''
+      : kind === 'commercial'
+        ? `Commercial ${unit} ${phaseNumber}`
+        : `${unit} ${phaseNumber}${sectionOk ? sectionSuffix(section) : ''}`
+
+  return (
+    <MapDialog
+      open={open}
+      title={editing ? `Edit ${editing.label}` : `Add ${unit.toLowerCase()}`}
+      busy={busy}
+      onClose={onClose}
+      primary={
+        <ActionButton
+          tone="primary"
+          loading={busy}
+          disabled={!canSave}
+          onClick={() => onSave({ phase: phaseNumber, section: kind === 'commercial' ? '' : section.trim(), commercial: kind === 'commercial' })}
+        >
+          {editing ? 'Save' : `Add ${unit.toLowerCase()}`}
+        </ActionButton>
+      }
+    >
+      {editing ? null : <Box>
+        {fieldLabel('Type')}
+        <NativeSelect.Root>
+          <NativeSelect.Field value={kind} onChange={(event) => setKind(event.target.value)}>
+            <option value="phase">{unit}</option>
+            <option value="commercial">Commercial</option>
+          </NativeSelect.Field>
+          <NativeSelect.Indicator />
+        </NativeSelect.Root>
+      </Box>}
+      <Box>
+        {fieldLabel(`${unit} number`)}
+        <Input type="number" min={1} step={1} value={phase} onChange={(event) => setPhase(event.target.value)} placeholder="e.g. 4" />
+      </Box>
+      {kind === 'phase' ? (
+        <Box>
+          {fieldLabel('Section (optional)')}
+          <Input value={section} maxLength={12} onChange={(event) => setSection(event.target.value)} placeholder="e.g. D or East" />
+          <Text mt="4px" fontFamily={FONT} fontSize="12px" color={sectionOk ? COLORS.subtle : '#B91C1C'}>
+            {sectionOk ? `One letter or one word, for a part of a ${unit.toLowerCase()} with its own map.` : 'A section is one letter or one word.'}
+          </Text>
+        </Box>
+      ) : null}
+      {preview && editing ? (
+        <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
+          Renames the tab to{' '}
+          <Text as="span" fontWeight="600" color={COLORS.heading}>
+            {preview}
+          </Text>
+          . Its maps, lot outlines and colours move with it; lots keep the {unit.toLowerCase()} number they were saved with.
+        </Text>
+      ) : preview ? (
+        <Text fontFamily={FONT} fontSize="13px" color={COLORS.subtle}>
+          Adds the{' '}
+          <Text as="span" fontWeight="600" color={COLORS.heading}>
+            {preview}
+          </Text>{' '}
+          tab. Add its map afterwards with “Add map”.
+        </Text>
+      ) : null}
+      <ErrorText>{error}</ErrorText>
+    </MapDialog>
+  )
+}
+
+/** Confirm deleting a phase tab with its maps, outlines and colours. */
+function DeletePhaseDialog({ open, label, mapCount, busy, error, onClose, onConfirm }) {
+  return (
+    <MapDialog
+      open={open}
+      title={`Delete ${label}?`}
+      busy={busy}
+      onClose={onClose}
+      primary={
+        <Flex
+          as="button"
+          type="button"
+          align="center"
+          gap="6px"
+          h="34px"
+          px="12px"
+          borderRadius="8px"
+          bg="#DC2626"
+          color="#FFFFFF"
+          fontFamily={FONT}
+          fontWeight="600"
+          fontSize="13px"
+          cursor="pointer"
+          disabled={busy}
+          _hover={{ bg: '#B91C1C' }}
+          _disabled={{ opacity: 0.6, cursor: 'not-allowed' }}
+          onClick={onConfirm}
+        >
+          {busy ? <Spinner size="xs" /> : <Icon as={LuTrash2} boxSize="14px" />}
+          Delete
+        </Flex>
+      }
+    >
+      <Text fontFamily={FONT} fontSize="14px" lineHeight="22px" color={COLORS.muted}>
+        {mapCount
+          ? `The ${label} tab and its ${mapCount === 1 ? 'map' : `${mapCount} maps`} will be deleted, with the map pictures, lot outlines and map colours. This cannot be undone.`
+          : `The empty ${label} tab will be deleted.`}{' '}
+        Lots in this phase are not deleted.
+      </Text>
+      <ErrorText>{error}</ErrorText>
+    </MapDialog>
   )
 }
 
@@ -418,7 +582,12 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
   // The first map only reveals with the panel around it; later tabs reveal themselves.
   const [tabSwitched, setTabSwitched] = useState(false)
   const floors = usesFloors(projectCode)
+  // What the project's phase slots are called: Phase, Floor, or a portal-added project's own word.
+  const unit = slotUnitFor(projectCode)
   const [adding, setAdding] = useState(false)
+  const [addingPhase, setAddingPhase] = useState(false)
+  // 'edit' | 'delete' while the phase tab in view is being renamed or deleted.
+  const [phaseAction, setPhaseAction] = useState('')
   const [busy, setBusy] = useState('') // '' | 'add' | <map id being replaced>
   const [downloading, setDownloading] = useState(null) // the id of the map being downloaded
   async function startDownload(map, label) {
@@ -461,6 +630,60 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
     } catch (err) {
       setError(err.message)
       notifyFailed(mode === 'add' ? 'Could not add the map' : 'Could not replace the map image', err)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Add an empty phase (a row in `uploads`), then open its tab ready for "Add map". */
+  async function savePhase({ phase, section, commercial }) {
+    setBusy('phase')
+    setError('')
+    try {
+      const value = await addPhase({ projectCode, projectId, phase, section, commercial })
+      setAddingPhase(false)
+      notifySaved(`${unit} added`, 'Its tab is ready — use "Add map" to upload its map.')
+      setTabSwitched(true)
+      setTab(value)
+      reload()
+    } catch (err) {
+      setError(err.message)
+      notifyFailed(`Could not add the ${unit.toLowerCase()}`, err)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  /** Rename the phase tab in view; its maps, outlines and colours move with it. */
+  async function renamePhase({ phase, section }) {
+    setBusy('phase')
+    setError('')
+    try {
+      const value = await editPhase({ projectCode, slot: active.value, phase, section })
+      setPhaseAction('')
+      notifySaved(`${unit} updated`, `${active.label} is now ${slotName(projectCode, { phase, section })}.`)
+      setTab(value)
+      reload()
+    } catch (err) {
+      setError(err.message)
+      notifyFailed(`Could not update ${active.label}`, err)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function removePhase() {
+    setBusy('phase')
+    setError('')
+    try {
+      await deletePhase({ projectCode, slot: active.value })
+      setPhaseAction('')
+      notifySaved(`${unit} deleted`, `${active.label} was deleted.`)
+      setTab('')
+      reload()
+    } catch (err) {
+      setError(err.message)
+      notifyFailed(`Could not delete ${active.label}`, err)
     } finally {
       setBusy('')
     }
@@ -530,6 +753,50 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
             previewRef={outlinesRef}
           />
         ) : null}
+        {canEdit && active?.phase !== undefined ? (
+          <Controlled id="button.projects.edit-phase">
+          <ActionButton
+            icon={LuPencil}
+            disabled={Boolean(busy)}
+            title={`Rename ${active.label}`}
+            onClick={() => {
+              setError('')
+              setPhaseAction('edit')
+            }}
+          >
+            Edit {unit.toLowerCase()}
+          </ActionButton>
+          </Controlled>
+        ) : null}
+        {canEdit && active?.phase !== undefined ? (
+          <Controlled id="button.projects.delete-phase">
+          <ActionButton
+            icon={LuTrash2}
+            disabled={Boolean(busy)}
+            title={`Delete ${active.label}`}
+            onClick={() => {
+              setError('')
+              setPhaseAction('delete')
+            }}
+          >
+            Delete {unit.toLowerCase()}
+          </ActionButton>
+          </Controlled>
+        ) : null}
+        {canEdit ? (
+          <Controlled id="button.projects.add-phase">
+          <ActionButton
+            icon={LuLayers}
+            disabled={Boolean(busy)}
+            onClick={() => {
+              setError('')
+              setAddingPhase(true)
+            }}
+          >
+            Add {unit.toLowerCase()}
+          </ActionButton>
+          </Controlled>
+        ) : null}
         {canEdit ? (
           <Controlled id="button.projects.add-map">
           <ActionButton
@@ -549,14 +816,19 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
         <input ref={replaceInput} type="file" accept={acceptFor('map')} hidden onChange={handleReplaceFile} />
       </Flex>
 
-      {error && !adding ? (
+      {error && !adding && !addingPhase && !phaseAction ? (
         <Text role="alert" mb="12px" fontFamily={FONT} fontSize="13px" color="#B91C1C">
           {error}
         </Text>
       ) : null}
 
-      {/* Each map tab reveals as it arrives; `key` replays it on every switch. */}
-      <Reveal key={active?.value ?? 'none'} animate={tabSwitched}>
+      {/*
+        * Only the selected tab's map is shown. Each map tab reveals as it
+        * arrives; `key` replays it on every switch. The key is prefixed so no
+        * sibling (such as the Edit phase dialog) can ever share it — two
+        * siblings with one key leave old tabs' panels on the page.
+        */}
+      <Reveal key={`panel:${active?.value ?? 'none'}`} animate={tabSwitched}>
       {active && active.maps.length > 0 ? (
         <Flex direction="column" gap="18px" opacity={loading ? 0.6 : 1} transition="opacity 120ms ease">
           {active.maps.map((map, index) => (
@@ -643,8 +915,9 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
         <AddMapDialog
           open
           initialSlot={slotForTab(active?.value, floors)}
+          phaseSlots={tabs.filter((option) => option.phase !== undefined)}
           floors={floors}
-          mvlc={/^mvlc$/i.test(projectCode ?? '')}
+          unit={unit}
           busy={busy === 'add'}
           error={error}
           onClose={() => {
@@ -652,6 +925,53 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
             setError('')
           }}
           onSave={(target, file) => save(target, file, 'add')}
+        />
+      ) : null}
+
+      {phaseAction === 'edit' && active ? (
+        <AddPhaseDialog
+          key={`edit:${active.value}`}
+          open
+          unit={unit}
+          editing={active}
+          busy={busy === 'phase'}
+          error={error}
+          onClose={() => {
+            setPhaseAction('')
+            setError('')
+          }}
+          onSave={renamePhase}
+        />
+      ) : null}
+
+      {phaseAction === 'delete' && active ? (
+        <DeletePhaseDialog
+          open
+          label={active.label}
+          mapCount={active.maps.length}
+          busy={busy === 'phase'}
+          error={error}
+          onClose={() => {
+            setPhaseAction('')
+            setError('')
+          }}
+          onConfirm={removePhase}
+        />
+      ) : null}
+
+      {addingPhase ? (
+        <AddPhaseDialog
+          open
+          unit={unit}
+          // The next phase number after the highest one the project has.
+          suggested={Math.max(0, ...tabs.map((option) => option.phase ?? 0)) + 1}
+          busy={busy === 'phase'}
+          error={error}
+          onClose={() => {
+            setAddingPhase(false)
+            setError('')
+          }}
+          onSave={savePhase}
         />
       ) : null}
     </Card>

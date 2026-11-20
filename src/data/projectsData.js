@@ -15,7 +15,7 @@
  */
 import { SOURCE, num, text } from './api'
 import { STATUS_ALIASES, fetchAllRows, supabase, uiStatus, unwrap } from './supabase'
-import { PRICE_CONFIG, fetchPriceLookup } from './pricesData'
+import { PRICE_CONFIG, fetchPriceLookup, registerPriceTable, unregisterPriceTable } from './pricesData'
 import { cached } from './queryClient'
 import { relabelClientsForLot, updateClientForLot } from './clientsData'
 import { conflictFor, unlessChanged } from './editConflicts'
@@ -329,10 +329,25 @@ export const EMPTY_PROJECT_LOTS = {
   pageSize: 10,
 }
 
+/**
+ * A section as stored: one letter upper-cased ("d" -> "D"), a word capitalised
+ * ("east" -> "East"); '' for none. Sections are whatever the project's maps in
+ * `uploads` use — MVLC's A, B, C, D and East, or any a new phase is given.
+ */
+export function normalizeSection(value) {
+  const section = text(value).trim()
+  if (!section) return ''
+  return section.length === 1 ? section.toUpperCase() : section.charAt(0).toUpperCase() + section.slice(1).toLowerCase()
+}
+
+/** How a section follows the phase number: a letter attached ("1D"), a word spaced ("1 East"). */
+export const sectionSuffix = (section) => {
+  const name = normalizeSection(section)
+  return !name ? '' : name.length === 1 ? name : ` ${name}`
+}
+
 const phaseLabel = (phase, terms = DEFAULT_LOT_TERMS, section = null) =>
-  phase === null || phase === undefined || !terms.group
-    ? ''
-    : `${terms.group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
+  phase === null || phase === undefined || !terms.group ? '' : `${terms.group} ${phase}${sectionSuffix(section)}`
 /** A stored category as the table shows it: "2_bedroom_deluxe" -> "2 Bedroom Deluxe". */
 export const categoryLabel = (category) =>
   text(category)
@@ -365,9 +380,9 @@ export function parsePhaseFilter(value) {
       (a, b) => b.length - a.length,
     )[0] ?? ''
   const withoutCategory = category ? label.slice(0, -categoryLabel(category).length).trim() : label
-  const matched = /(\d+)\s*(East|[ABC])?$/i.exec(withoutCategory)
+  const matched = /(\d+)\s*([A-Za-z]+)?$/.exec(withoutCategory)
   const phase = matched ? num(matched[1], NaN) : NaN
-  const section = matched?.[2] ? (matched[2].toLowerCase() === 'east' ? 'East' : matched[2].toUpperCase()) : null
+  const section = normalizeSection(matched?.[2]) || null
   return { phase: Number.isFinite(phase) ? phase : null, section, category }
 }
 
@@ -387,16 +402,28 @@ function emptyPayload(query, source) {
 async function fetchProjects() {
   const data = await cached(['projects'], async () => {
     const read = (columns) => supabase.from('projects').select(columns).order('id', { ascending: false })
-    // `paused` needs 20261012_add_project_paused.sql; until then every project reads as active.
-    const withPaused = await read('id, code, name, paused')
-    if (withPaused.error && /paused/.test(withPaused.error.message)) return unwrap(await read('id, code, name')).data
-    return unwrap(withPaused).data
+    /*
+     * Each attempt drops the newest optional columns: the portal-added project
+     * columns need 20261120_add_projects_and_phases.sql and `paused` needs
+     * 20261012_add_project_paused.sql. Until then those read as unset.
+     */
+    const attempts = [
+      'id, code, name, description, paused, lot_table, price_table, group_label',
+      'id, code, name, description, paused',
+      'id, code, name',
+    ]
+    for (const [index, columns] of attempts.entries()) {
+      const result = await read(columns)
+      if (!result.error || index === attempts.length - 1) return unwrap(result).data
+      if (!/description|paused|lot_table|price_table|group_label/.test(result.error.message)) return unwrap(result).data
+    }
   })
   const byCode = new Map()
   data.forEach((row) => {
     const code = text(row.code).trim()
     if (code && !byCode.has(code)) byCode.set(code, row)
   })
+  byCode.forEach(registerProject)
   return [...byCode.values()]
     .map((row) => ({
       id: row.id,
@@ -404,8 +431,195 @@ async function fetchProjects() {
       name: text(row.name, row.code),
       hasLots: Boolean(LOT_TABLES[row.code]),
       paused: row.paused === true,
+      description: text(row.description),
+      // Added from the portal: its grouping can be changed and it can be deleted.
+      custom: isPortalProject(row.code),
+      groupLabel: text(row.group_label),
     }))
     .sort((a, b) => a.code.localeCompare(b.code))
+}
+
+/**
+ * Projects added from the portal (createProject) name their own lot and price
+ * tables, and what their lots are grouped by, in the `projects` row. Recording
+ * them here lets every reader of LOT_TABLES, PRICE_CONFIG and lotTermsFor treat
+ * them exactly like the built-in projects. Built-in entries are never replaced.
+ */
+const BUILT_IN_CODES = new Set(Object.keys(LOT_TABLES))
+/** Codes of the projects added from the portal — the ones that can be deleted. */
+const PORTAL_PROJECTS = new Set()
+
+function registerProject(row) {
+  const code = text(row.code).trim()
+  if (!code || !text(row.lot_table) || BUILT_IN_CODES.has(code)) return
+  PORTAL_PROJECTS.add(code)
+  LOT_TABLES[code] = text(row.lot_table)
+  // '' (or null) is a project whose lots are not grouped at all. Re-read on every
+  // load, so an edited grouping shows without reloading the page.
+  LOT_TERMS_BY_PROJECT[code] = { ...DEFAULT_LOT_TERMS, group: text(row.group_label).trim() || null }
+  if (text(row.price_table)) registerPriceTable(code, text(row.price_table))
+}
+
+/** Forget a deleted project, so no page reads its dropped tables. */
+function unregisterProject(code) {
+  PORTAL_PROJECTS.delete(code)
+  delete LOT_TABLES[code]
+  delete LOT_TERMS_BY_PROJECT[code]
+  unregisterPriceTable(code)
+}
+
+/** Whether a project was added from the portal (so it can be deleted). */
+export const isPortalProject = (code) => PORTAL_PROJECTS.has(text(code).trim())
+
+/**
+ * Load the project list so projects added from the portal are in LOT_TABLES —
+ * for pages (Dashboard, Brokers) that read every project's lots without first
+ * opening Projects & Lots. Never throws.
+ */
+export async function loadProjectRegistry() {
+  if (!supabase) return
+  try {
+    await fetchProjects()
+  } catch (err) {
+    console.error('[projects] could not load the project list:', err)
+  }
+}
+
+/** What a new project's lots may be grouped by; '' is no grouping. */
+export const GROUP_OPTIONS = ['Phase', 'Block', 'Tower', 'Floor', 'Cluster', 'Section', '']
+
+const PROVISION_MISSING =
+  'Run supabase/migrations/20261120_add_projects_and_phases.sql in the Supabase SQL Editor, then add the project again to finish setting it up.'
+
+/**
+ * Add a project to the `projects` table and give it its lot table, price table,
+ * and map bucket (provision_project). `groupLabel` is what its lots are grouped
+ * by — "Phase", "Block", any word, or '' for none.
+ *
+ * Adding a code that already exists but was never set up finishes setting it
+ * up instead of failing, so a run before the migration can be completed later.
+ * Resolves { code, warning } — `warning` when the row was saved but the tables
+ * could not be made.
+ */
+export async function createProject({ code, name, description = '', groupLabel = 'Phase' }) {
+  if (!supabase) throw new Error('No database connected.')
+  const projectCode = text(code).trim().toUpperCase()
+  if (!/^[A-Z][A-Z0-9]{1,11}$/.test(projectCode)) {
+    throw new Error('Project code must be 2–12 letters or digits, starting with a letter (e.g. RHS2).')
+  }
+  const projectName = text(name).trim()
+  if (!projectName) throw new Error('Project name is required.')
+  const group = text(groupLabel).trim()
+  if (group.length > 20) throw new Error('The grouping name must be 20 characters or fewer.')
+
+  const { data: auth } = await supabase.auth.getUser()
+  if (!auth?.user) throw new Error('Sign in to add projects.')
+
+  // The code is letters and digits only, so it is safe in an ilike pattern.
+  const { data: existing } = unwrap(await supabase.from('projects').select('id, code').ilike('code', projectCode).limit(1))
+  const found = existing[0]
+  // A built-in project, or one already set up (registered when the list loaded).
+  if (found && LOT_TABLES[text(found.code).trim()]) throw new Error(`A project with code ${projectCode} already exists.`)
+  /*
+   * Maps in `uploads` are found by the start of their project label ("MSCC -
+   * paused"), so a code that starts another one (RH and RHN) would share maps.
+   */
+  const clash = (await fetchProjects()).find(
+    (project) => project.code !== found?.code && (project.code.startsWith(projectCode) || projectCode.startsWith(project.code)),
+  )
+  if (clash) throw new Error(`${projectCode} is too close to ${clash.code}: a code cannot start another project's code. Choose another.`)
+
+  if (!found) {
+    const row = {
+      code: projectCode,
+      name: projectName,
+      description: text(description).trim() || null,
+      user_id: auth.user.id,
+      group_label: group,
+    }
+    let result = await supabase.from('projects').insert(row).select('id')
+    // Before the migration there is no group_label column: save the project, and say what to run.
+    if (result.error && /group_label/.test(result.error.message)) {
+      delete row.group_label
+      result = await supabase.from('projects').insert(row).select('id')
+    }
+    if (result.error) throw new Error(result.error.message)
+    if (!result.data?.length) throw new Error('The database did not accept the new project — you may need to sign in.')
+  }
+
+  const { error } = await supabase.rpc('provision_project', { p_code: projectCode })
+  if (error) {
+    const missing = /provision_project|function|schema cache/i.test(error.message)
+    return { code: projectCode, warning: missing ? PROVISION_MISSING : `The project was saved, but its tables were not set up: ${error.message}` }
+  }
+  return { code: projectCode, warning: '' }
+}
+
+/**
+ * Change a project's name and description and — for a project added from the
+ * portal — what its lots are grouped by. The code never changes: it names the
+ * project's tables and map folder. Every row with the code is updated, since
+ * the projects table repeats codes.
+ */
+export async function updateProject(code, { name, description = '', groupLabel }) {
+  if (!supabase) throw new Error('No database connected.')
+  const projectName = text(name).trim()
+  if (!projectName) throw new Error('Project name is required.')
+  const changes = { name: projectName, description: text(description).trim() || null, updated_at: new Date().toISOString() }
+  if (groupLabel !== undefined && isPortalProject(code)) {
+    const group = text(groupLabel).trim()
+    if (group.length > 20) throw new Error('The grouping name must be 20 characters or fewer.')
+    changes.group_label = group
+  }
+
+  const write = (body) => supabase.from('projects').update(body).eq('code', code).select('id')
+  let result = await write(changes)
+  // Older databases may lack updated_at; the edit still goes through without it.
+  if (result.error && /updated_at/.test(result.error.message)) {
+    delete changes.updated_at
+    result = await write(changes)
+  }
+  if (result.error) throw new Error(result.error.message)
+  if (!result.data?.length) throw new Error(`The database did not accept the change to ${code} — you may need to sign in.`)
+}
+
+/**
+ * Delete a project added from the portal, with everything that belongs only to
+ * it: its map pictures (from its bucket), then — in delete_project — its map
+ * rows, lot outlines, map colours, lot and price tables, and projects row.
+ *
+ * Refused for the built-in projects and while the project has lots, so no
+ * sales record can be lost this way.
+ */
+export async function deleteProject(code) {
+  if (!supabase) throw new Error('No database connected.')
+  const projectCode = text(code).trim()
+  if (!isPortalProject(projectCode)) {
+    throw new Error(`${projectCode} is built into the portal and cannot be deleted. Pause it instead.`)
+  }
+
+  const lots = unwrap(await supabase.from(LOT_TABLES[projectCode]).select('id', { count: 'exact', head: true })).count ?? 0
+  if (lots > 0) throw new Error(`${projectCode} still has ${lots} lot${lots === 1 ? '' : 's'}. Delete its lots first.`)
+
+  // The pictures go first: once the rows are gone nothing says where they are.
+  const { data: maps } = unwrap(
+    await supabase.from('uploads').select('storage_path').eq('kind', 'map').ilike('project', `${projectCode}%`),
+  )
+  const paths = maps.map((row) => text(row.storage_path)).filter(Boolean)
+  if (paths.length) {
+    const { error } = await supabase.storage.from(projectCode.toLowerCase()).remove(paths)
+    if (error) console.error(`[projects] ${projectCode} map files not removed:`, error)
+  }
+
+  const { error } = await supabase.rpc('delete_project', { p_code: projectCode })
+  if (error) {
+    throw new Error(
+      /delete_project|schema cache/i.test(error.message) && !/still has|built in/.test(error.message)
+        ? 'Run supabase/migrations/20261120_add_projects_and_phases.sql in the Supabase SQL Editor first.'
+        : error.message,
+    )
+  }
+  unregisterProject(projectCode)
 }
 
 /** Project-wide stats and filter facets for one lot table — independent of table state. */
@@ -695,7 +909,16 @@ export async function fetchProjectLots(query = {}) {
       projects,
       terms: lotTermsFor(selected?.code),
       project: selected
-        ? { ...EMPTY_PROJECT_LOTS.project, id: selected.id, name: selected.name, code: selected.code, paused: selected.paused }
+        ? {
+            ...EMPTY_PROJECT_LOTS.project,
+            id: selected.id,
+            name: selected.name,
+            code: selected.code,
+            paused: selected.paused,
+            description: selected.description,
+            custom: selected.custom,
+            groupLabel: selected.groupLabel,
+          }
         : EMPTY_PROJECT_LOTS.project,
     }
 

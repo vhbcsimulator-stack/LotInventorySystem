@@ -7,21 +7,38 @@
  */
 import { SOURCE, num, text } from './api'
 import { supabase, unwrap } from './supabase'
+import { lotTermsFor, normalizeSection, sectionSuffix } from './projectsData'
 import { checkUpload } from '@/lib/uploadRules'
 import { isSvgFile, prepareSvgFile } from '@/lib/svgMaps'
 
-const MVLC_SECTIONS = [
-  { phase: 1, section: 'A' }, { phase: 1, section: 'B' }, { phase: 1, section: 'C' }, { phase: 1, section: 'East' },
-  { phase: 2, section: 'A' }, { phase: 2, section: 'B' }, { phase: 2, section: 'East' },
-  { phase: 3, section: null },
-]
-
 const isMvlc = (projectCode) => /^mvlc$/i.test(projectCode ?? '')
+// MVLC's older Phase 1 and 2 maps were stored without a section: they are the East maps.
 const sectionFor = (phase, section, projectCode) =>
-  section || (isMvlc(projectCode) && (phase === 1 || phase === 2) ? 'East' : null)
+  normalizeSection(section) || (isMvlc(projectCode) && (phase === 1 || phase === 2) ? 'East' : null)
 
 export const mapTabValue = ({ phase, section, commercial }) =>
   commercial ? 'commercial' : phase === null ? 'whole' : `phase-${phase}${section ? `-${section.toLowerCase()}` : ''}`
+
+/**
+ * A map tab's value as the slot it stands for — 'phase-1-d' is
+ * { phase: 1, section: 'D' }, 'phase-2-east' is Phase 2 East — the reverse of
+ * mapTabValue. 'whole' (or anything unknown) has a null phase.
+ */
+export function parseSlotValue(value) {
+  if (value === 'commercial') return { phase: null, section: null, commercial: true }
+  const match = /^phase-(\d+)(?:-([a-z]+))?$/.exec(text(value))
+  return {
+    phase: match ? Number(match[1]) : null,
+    section: normalizeSection(match?.[2]) || null,
+    commercial: false,
+  }
+}
+
+/** What a project's map slots are called: Floor (MSCC), else its lots' grouping — Phase by default. */
+export const slotUnitFor = (projectCode) => (usesFloors(projectCode) ? 'Floor' : lotTermsFor(projectCode).group || 'Phase')
+
+/** A slot's name, as its tab shows it: "Phase 1D", "Phase 2 East", "Floor 3". */
+export const slotName = (projectCode, { phase, section = null }) => `${slotUnitFor(projectCode)} ${phase}${sectionSuffix(section)}`
 
 function toMap(row, projectCode) {
   const phase = typeof row.Phase === 'number' ? row.Phase : num(row.Phase, NaN)
@@ -29,6 +46,7 @@ function toMap(row, projectCode) {
     id: row.id,
     url: text(row.image_URL),
     name: text(row.name),
+    current: row.current !== false,
     phase: Number.isFinite(phase) ? phase : null,
     section: text(row.type).toLowerCase() === 'commercial' ? null : sectionFor(phase, text(row.map_section) || null, projectCode),
     commercial: text(row.type).toLowerCase() === 'commercial',
@@ -85,46 +103,124 @@ export async function fetchProjectMaps({ projectCode } = {}) {
         .ilike('project', `${projectCode}%`)
         .order('uploaded_at', { ascending: false }),
     )
-    const maps = data.map((row) => toMap(row, projectCode)).filter((map) => map.url)
-    return { tabs: buildTabs(maps, projectCode), maps, source: SOURCE.DATABASE }
+    /*
+     * Every current row is a slot — a phase, a section of one, a floor, or a
+     * commercial map — including one added with "Add phase" that has no
+     * picture yet. Only rows with a picture are maps to show.
+     */
+    const slots = data.map((row) => toMap(row, projectCode))
+    const maps = slots.filter((map) => map.url)
+    return { tabs: buildTabs(slots, projectCode), maps, source: SOURCE.DATABASE }
   } catch (err) {
     console.error('[project maps] falling back to no maps:', err)
     return empty(SOURCE.UNAVAILABLE)
   }
 }
 
-function buildTabs(maps, projectCode) {
-  const unit = usesFloors(projectCode) ? 'Floor' : 'Phase'
-  const withCaption = (map) => ({ ...map, caption: map.phase === null ? '' : `${unit} ${map.phase}${map.section || ''}` })
-  const phases = [...new Set(maps.filter((map) => !map.commercial && map.phase !== null).map((map) => map.phase))].sort(
-    (a, b) => a - b,
-  )
+// Phases in order, then sections: none first, letters (A, B, D) before words (East).
+const bySlot = (a, b) =>
+  a.phase - b.phase ||
+  Number(Boolean(a.section)) - Number(Boolean(b.section)) ||
+  text(a.section).length - text(b.section).length ||
+  text(a.section).localeCompare(text(b.section))
 
-  const commercial = maps.filter((map) => map.commercial).sort((a, b) => (a.phase ?? 0) - (b.phase ?? 0))
-  const whole = maps.filter((map) => !map.commercial && map.phase === null).map(withCaption)
+/**
+ * The tabs, from the project's rows in `uploads`: Whole Map, one tab per
+ * phase (or floor) and section, and Commercial. Nothing is hard-coded, so a
+ * phase added from the portal — or straight in the table — gets its tab.
+ */
+function buildTabs(slots, projectCode) {
+  const unit = slotUnitFor(projectCode)
+  const withCaption = (map) => ({ ...map, caption: map.phase === null ? '' : slotName(projectCode, map) })
+  const shown = (list) => list.filter((map) => map.url).map(withCaption)
+
+  const phased = slots.filter((map) => !map.commercial && map.phase !== null)
+  const phaseSlots = [...new Map(phased.map((map) => [mapTabValue(map), { phase: map.phase, section: map.section }])).values()].sort(bySlot)
+  const commercial = slots.filter((map) => map.commercial).sort((a, b) => (a.phase ?? 0) - (b.phase ?? 0))
+  const whole = slots.filter((map) => !map.commercial && map.phase === null)
 
   return [
     /*
      * Only once a whole-site map is uploaded — a condominium never has one.
      * "Add map" still offers Whole Map, and uploading one brings the tab in.
      */
-    ...(unit === 'Phase' && whole.length ? [{ value: 'whole', label: 'Whole Map', maps: whole }] : []),
-    ...(isMvlc(projectCode) ? MVLC_SECTIONS.map(({ phase, section }) => ({
-      value: mapTabValue({ phase, section, commercial: false }),
-      label: `Phase ${phase}${section || ''}`,
-      maps: maps.filter((map) => !map.commercial && map.phase === phase && map.section === section).map(withCaption),
-    })) : phases.map((phase) => ({
-      value: `phase-${phase}`,
-      label: `${unit} ${phase}`,
-      maps: maps.filter((map) => !map.commercial && map.phase === phase).map(withCaption),
-    }))),
+    ...(unit !== 'Floor' && whole.length ? [{ value: 'whole', label: 'Whole Map', maps: shown(whole) }] : []),
+    ...phaseSlots.map((slot) => ({
+      value: mapTabValue({ ...slot, commercial: false }),
+      label: slotName(projectCode, slot),
+      phase: slot.phase,
+      section: slot.section,
+      maps: shown(phased.filter((map) => map.phase === slot.phase && map.section === slot.section)),
+    })),
     /*
      * Only where commercial maps exist, exactly as the phase tabs above work.
      * A project that sells no commercial lots (ERHD) then has no empty tab to
      * click into, and uploading one through "Add map" brings the tab back.
      */
-    ...(commercial.length ? [{ value: 'commercial', label: 'Commercial', maps: commercial.map(withCaption) }] : []),
+    ...(commercial.length ? [{ value: 'commercial', label: 'Commercial', maps: shown(commercial) }] : []),
   ]
+}
+
+/**
+ * Add a phase to a project: a map row in `uploads` with no picture yet, so its
+ * tab appears straight away and "Add map" fills it in (saveProjectMap reuses
+ * the row rather than adding a second one).
+ *
+ * Not limited to plain phases: `section` makes a section of one (a letter such
+ * as D, or a word such as East — "Phase 1D", "Phase 2 East"), and `commercial`
+ * a commercial map for the phase. A condominium's phases are its floors.
+ * Resolves the new slot's tab value.
+ */
+export async function addPhase({ projectCode, projectId = null, phase, section = '', commercial = false }) {
+  if (!supabase) throw new Error('No database connected — set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.')
+  if (!projectCode) throw new Error('Choose a project first.')
+  const unit = slotUnitFor(projectCode)
+  if (!(Number.isInteger(phase) && phase > 0)) throw new Error(`${unit} must be a whole number above 0.`)
+  const name = commercial ? '' : normalizeSection(section)
+  if (name && !/^[A-Za-z]{1,12}$/.test(name)) {
+    throw new Error('A section is one letter (such as D) or one word (such as East), up to 12 letters.')
+  }
+
+  const { data: auth } = await supabase.auth.getUser()
+  if (!auth?.user) throw new Error('Sign in to add phases.')
+
+  const target = { phase, section: commercial ? null : sectionFor(phase, name || null, projectCode), commercial }
+  const label = commercial ? `Commercial ${unit} ${phase}` : slotName(projectCode, target)
+
+  const { data } = unwrap(
+    await supabase
+      .from('uploads')
+      .select('id, name, project, project_id, phase_id, Phase, map_section, type, image_URL, storage_path, current, uploaded_at')
+      .eq('kind', 'map')
+      .ilike('project', `${projectCode}%`)
+      .order('uploaded_at', { ascending: false }),
+  )
+  const rows = data.map((row) => toMap(row, projectCode)).filter((map) => map.current)
+  if (rows.some((map) => sameSlot(map, target))) throw new Error(`${label} already exists for ${projectCode}.`)
+
+  // The project's other maps say how it is labelled in `uploads` ("MSCC - paused") and its id.
+  const reference = rows.find((map) => map.projectId) ?? rows[0]
+  const { data: saved, error } = await supabase
+    .from('uploads')
+    .insert({
+      project_id: reference?.projectId ?? projectId ?? null,
+      kind: 'map',
+      name: label,
+      mime_type: '',
+      storage_path: '',
+      current: true,
+      user_id: auth.user.id,
+      project: reference?.projectLabel || projectCode,
+      image_URL: '',
+      Phase: phase,
+      map_section: target.section,
+      type: commercial ? 'commercial' : 'residential',
+      uploaded_at: new Date().toISOString(),
+    })
+    .select('id')
+  if (error) throw new Error(error.message)
+  if (!saved?.length) throw new Error('The database did not accept the new phase — you may need to sign in.')
+  return mapTabValue(target)
 }
 
 /**
@@ -406,6 +502,101 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
   }
 
   return result
+}
+
+/** Every map row (current or not) in one phase tab's slot, read from the database. */
+async function rowsInSlot(projectCode, slotValue) {
+  const slot = parseSlotValue(slotValue)
+  if (slot.phase === null || slot.commercial) throw new Error('Choose a phase tab first.')
+  const target = { ...slot, section: sectionFor(slot.phase, slot.section, projectCode) }
+  const { data } = unwrap(
+    await supabase
+      .from('uploads')
+      .select('id, name, project, project_id, phase_id, Phase, map_section, type, image_URL, storage_path, current, uploaded_at')
+      .eq('kind', 'map')
+      .ilike('project', `${projectCode}%`),
+  )
+  const all = data.map((row) => toMap(row, projectCode))
+  return { target, all, rows: all.filter((map) => sameSlot(map, target)) }
+}
+
+/**
+ * Move one slot's rows in a table keyed by project + slot (lot outlines, map
+ * colours) along with its phase. A table that does not exist yet has nothing to move.
+ */
+async function moveSlotRows(table, projectCode, from, to, fields) {
+  const { error } = await supabase.from(table).update({ slot: to, ...fields }).eq('project', projectCode).eq('slot', from)
+  if (error && !/does not exist|schema cache/i.test(error.message)) {
+    throw new Error(`The phase was renamed, but its ${table === 'annotated_images' ? 'lot outlines' : 'map colours'} were not moved: ${error.message}`)
+  }
+}
+
+/**
+ * Rename a phase tab — its number and/or section ("Phase 4" to "Phase 5", or
+ * "Phase 1D" to "Phase 1 North"). Its maps, lot outlines and map colours move
+ * with it. Lots are not changed: they keep the phase number they were saved
+ * with. Resolves the tab's new value.
+ */
+export async function editPhase({ projectCode, slot, phase, section = '' }) {
+  if (!supabase) throw new Error('No database connected.')
+  const unit = slotUnitFor(projectCode)
+  if (!(Number.isInteger(phase) && phase > 0)) throw new Error(`${unit} must be a whole number above 0.`)
+  const name = normalizeSection(section)
+  if (name && !/^[A-Za-z]{1,12}$/.test(name)) {
+    throw new Error('A section is one letter (such as D) or one word (such as East), up to 12 letters.')
+  }
+
+  const { target: from, all, rows } = await rowsInSlot(projectCode, slot)
+  if (!rows.length) throw new Error('That phase is no longer in the table — refresh the maps.')
+  const to = { phase, section: sectionFor(phase, name || null, projectCode), commercial: false }
+  const next = mapTabValue(to)
+  if (next === mapTabValue(from)) return next
+  if (all.some((map) => map.current && sameSlot(map, to))) throw new Error(`${slotName(projectCode, to)} already exists.`)
+
+  const { data, error } = await supabase
+    .from('uploads')
+    .update({ Phase: to.phase, map_section: to.section })
+    .in('id', rows.map((map) => map.id))
+    .select('id')
+  if (error) throw new Error(error.message)
+  if (!data?.length) throw new Error('The database did not accept the change — you may need to sign in.')
+
+  const moved = { phase: to.phase, map_section: to.section }
+  await moveSlotRows('annotated_images', projectCode, slot, next, moved)
+  await moveSlotRows('map_legend_colors', projectCode, slot, next, moved)
+  return next
+}
+
+/**
+ * Delete a phase tab: its map rows and pictures, lot outlines and map colours.
+ * The project's lots are not touched — lots in that phase stay, and keep their
+ * phase number.
+ */
+export async function deletePhase({ projectCode, slot }) {
+  if (!supabase) throw new Error('No database connected.')
+  const { rows } = await rowsInSlot(projectCode, slot)
+  if (!rows.length) return
+
+  for (const table of ['annotated_images', 'map_legend_colors']) {
+    const { error } = await supabase.from(table).delete().eq('project', projectCode).eq('slot', slot)
+    if (error && !/does not exist|schema cache/i.test(error.message)) throw new Error(error.message)
+  }
+
+  const { data, error } = await supabase
+    .from('uploads')
+    .delete()
+    .in('id', rows.map((map) => map.id))
+    .select('id')
+  if (error) throw new Error(error.message)
+  if (!data?.length) throw new Error('The database did not delete the phase — you may need to sign in.')
+
+  // Only once nothing points at them are the pictures removed.
+  const bucketName = projectCode.toLowerCase()
+  const paths = rows.map((map) => pathInBucket(map, bucketName)).filter(Boolean)
+  if (paths.length) {
+    const { error: removeError } = await supabase.storage.from(bucketName).remove(paths)
+    if (removeError) throw new Error(`The phase was deleted, but its pictures are still in the "${bucketName}" bucket: ${removeError.message}`)
+  }
 }
 
 /** The tables fetchProjectMaps reads, so its Refresh button knows what to check. */

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Box, CloseButton, Dialog, Flex, Icon, Input, NativeSelect, Portal, Spinner, Text } from '@chakra-ui/react'
 import { LuTags } from 'react-icons/lu'
-import { PRICE_CONFIG, fetchPrices, savePrices } from '@/data/pricesData'
+import { ALL_PHASES, PRICE_CONFIG, defaultScopeValue, fetchPrices, savePrices } from '@/data/pricesData'
 import { fetchProjectMaps } from '@/data/projectMapsData'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved } from '@/lib/notify'
@@ -23,6 +23,17 @@ function tabPhase(tabValue) {
  */
 function buildScopeOptions(config, tabs) {
   if (!config) return []
+  /*
+   * A phased table prices any phase, so every phase tab is offered — including
+   * a phase just added on the Map tab. A project added from the portal also has
+   * an "All phases" price for phases without one of their own.
+   */
+  if (config.phased) {
+    const phases = tabs
+      .filter((tab) => tabPhase(tab.value) !== null)
+      .map((tab) => ({ value: tab.value, label: tab.label, scope: String(tabPhase(tab.value)) }))
+    return config.allPhases ? [{ value: ALL_PHASES, label: 'All phases', scope: ALL_PHASES }, ...phases] : phases
+  }
   return tabs
     .filter((tab) => tab.value !== 'whole')
     .map((tab) => {
@@ -51,7 +62,7 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
 
   // Until the map tabs arrive the first price scope stands in, so the fields
   // still fill for a project whose maps are missing or slow.
-  const scope = options.find((option) => option.value === tab)?.scope ?? config?.scopes[0].value ?? ''
+  const scope = options.find((option) => option.value === tab)?.scope ?? defaultScopeValue(config)
   const loadKey = `${project.code}:${scope}`
 
   useEffect(() => {
@@ -91,6 +102,8 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
   }, [open, config, project.code, scope, loadKey])
 
   const loading = Boolean(config) && loaded !== loadKey
+  // A scope with no price stored at all — a new phase — offers every category.
+  const unpriced = Object.values(stored).every((price) => price === null || price === undefined)
 
   function handleOpenChange({ open: next }) {
     if (next || saving) return
@@ -147,7 +160,7 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
               ) : (
                 <Flex direction="column" gap="16px">
 
-                  {config.scopes.length > 1 && options.length > 1 ? (
+                  {(config.phased || config.scopes.length > 1) && options.length > 1 ? (
                     <Flex align="center" gap="10px" flexWrap="wrap">
                       <Text as="label" htmlFor="price-scope" fontFamily={FONT} fontSize="14px" color={COLORS.heading}>
                         Price scope:
@@ -184,10 +197,12 @@ export default function CategoryPricesDialog({ open, project, onClose, onSaved }
                      * categories in each one, so only those already priced in this
                      * scope are shown. A project with a single scope shows all of its
                      * categories, so one that has never been priced can still be given
-                     * a first price. Clearing a field keeps it visible either way.
+                     * a first price, and so does a phase with no prices yet (one just
+                     * added) or a project added from the portal. Clearing a field
+                     * keeps it visible either way.
                      */
                     config.categories
-                      .filter(({ key }) => config.scopes.length === 1 || (stored[key] !== null && stored[key] !== undefined))
+                      .filter(({ key }) => !config.phased || config.allPhases || unpriced || (stored[key] !== null && stored[key] !== undefined))
                       .map(({ key, label }) => (
                       <Flex key={key} align="center" justify="space-between" gap="16px">
                         <Text as="label" htmlFor={`price-${key}`} fontFamily={FONT} fontSize="14px" color={COLORS.heading}>

@@ -123,9 +123,20 @@ const SECTIONS = [
         'Saving recolored lots always stores the map as SVG: the original map, never re-compressed (a JPG or PNG map is embedded as uploaded), with each colored lot written in as vector shapes, so nothing loses quality and the new colors show in the mobile app too. Scripts and links to outside files are removed from an SVG when it is uploaded.',
         'Use Open full size to inspect an image. Zoom with the buttons or Ctrl plus mouse wheel, drag to pan, and double-click to reset. When the map tab has lot outlines, Open full size shows the map with its outlines (see Lot outlines & coloring); a tab’s other maps and maps without outlines open as the plain image. A spinner shows while the map loads.',
       ] },
-      { heading: 'MVLC map sections', points: [
-        'MVLC has separate slots for Phase 1A, 1B, 1C, 1East, 2A, 2B, 2East, and Phase 3.',
-        'The East and Phase 3 maps already in the portal stay in their own slots. Empty section tabs are ready for the corresponding images.',
+      { heading: 'Add a phase', steps: [
+        'Open Map and choose Add phase (Add floor for a condominium). Enter the phase number and, for a part of a phase with its own map, a section: one letter such as D, or one word such as East. Choose Commercial for a commercial map of that phase.',
+        'The new phase is saved in the uploads table and its tab appears straight away, empty until you use Add map to upload its map.',
+        'A new phase can be priced in Update category prices and chosen when adding a lot, like the phases already there.',
+        'To rename a phase, open its tab and choose Edit phase: its maps, lot outlines and map colours move with it. Lots keep the phase number they were saved with.',
+        'To remove a phase, open its tab and choose Delete phase. Its maps, pictures, lot outlines and map colours are deleted; its lots are not.',
+      ] },
+      { heading: 'Add, edit or delete a project', steps: [
+        'Project Actions → Add project: enter a code (it cannot be changed later), a name, and what its lots are grouped by. Its lot table, prices and map storage are set up with it.',
+        'Project Actions → Edit project changes the name and description, and — for projects added from the portal — the grouping.',
+        'Project Actions → Delete project is only for projects added from the portal, and only once they have no lots. Type the code to confirm; it cannot be undone. Built-in projects can be paused instead.',
+      ] },
+      { heading: 'Map sections', points: [
+        'Every phase and section stored in the uploads table has its own tab — MVLC’s Phase 1A, 1B, 1C, 1D, 1 East, 2A, 2B, 2 East and Phase 3, and any added since.',
       ] },
       { heading: 'Lot outlines & coloring', steps: [
         'Open the map tab, then Lot outlines → Upload COCO JSON (.json, up to 20 MB) for that map.',
@@ -195,7 +206,7 @@ const SECTIONS = [
       ['Lot / unit', 'An individual item for sale. Land projects use lots; MSCC uses condominium units.'],
       ['Lot identifier', 'The project-specific lot number or code used to find a record.'],
       ['Phase / tower', 'A project grouping. Land projects may use phases; MSCC uses towers.'],
-      ['Section', 'A subdivision within an MVLC map phase, such as A, B, C, or East.'],
+      ['Section', 'A part of a phase with its own map, such as A, D, or East.'],
       ['Category', 'The pricing grade or unit type assigned to a lot or unit.'],
       ['sqm', 'Square metres, the unit used for lot and unit area.'],
       ['Price / sqm', 'The price for one square metre in a pricing category.'],

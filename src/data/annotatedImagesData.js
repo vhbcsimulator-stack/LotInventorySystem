@@ -13,7 +13,7 @@
  * a phase that already has one replaces it rather than stacking copies.
  */
 import { SOURCE, num, text } from './api'
-import { fetchProjectMaps, sameSlot, saveProjectMap } from './projectMapsData'
+import { fetchProjectMaps, parseSlotValue, sameSlot, saveProjectMap } from './projectMapsData'
 import { supabase, unwrap } from './supabase'
 import { UPLOAD_RULES, checkUpload } from '@/lib/uploadRules'
 import { fitSvg, isSvgFile, pictureSvg, prepareSvgFile } from '@/lib/svgMaps'
@@ -29,13 +29,7 @@ const countAnnotations = (coco) => (Array.isArray(coco?.annotations) ? coco.anno
  * floors too — the tab reads "Floor 2" but the column is still `phase`.
  */
 export function parseSlot(slot) {
-  if (slot === 'commercial') return { phase: null, section: null, commercial: true }
-  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(text(slot))
-  return {
-    phase: match ? Number(match[1]) : null,
-    section: match?.[2] ? match[2].toUpperCase() === 'EAST' ? 'East' : match[2].toUpperCase() : null,
-    commercial: false,
-  }
+  return parseSlotValue(slot)
 }
 
 /** The slot a row belongs to, for rows written before the slot column existed. */

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Flex, Icon, Text } from '@chakra-ui/react'
-import { LuBuilding2, LuCirclePause, LuCirclePlay, LuDownload, LuFileSpreadsheet, LuHammer, LuImages, LuPercent, LuPlus, LuSparkles, LuStar, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
+import { LuBuilding2, LuCirclePause, LuCirclePlay, LuDownload, LuFileSpreadsheet, LuFolderPen, LuFolderPlus, LuFolderX, LuHammer, LuImages, LuPercent, LuPlus, LuSparkles, LuStar, LuTags, LuTrash2, LuUpload } from 'react-icons/lu'
 import ProjectsSkeleton from '@/components/skeletons/ProjectsSkeleton'
 import CategoryPricesDialog from '@/components/projects/CategoryPricesDialog'
 import DiscountsDialog from '@/components/projects/DiscountsDialog'
@@ -25,6 +25,9 @@ import FutureProjectsDialog from '@/components/projects/FutureProjectsDialog'
 import { FeaturedProjectsDialog } from '@/components/projects/FeaturedProjectsView'
 import LotImportDialog from '@/components/projects/LotImportDialog'
 import PauseProjectDialog from '@/components/projects/PauseProjectDialog'
+import AddProjectDialog from '@/components/projects/AddProjectDialog'
+import DeleteProjectDialog from '@/components/projects/DeleteProjectDialog'
+import { invalidateTables } from '@/data/queryClient'
 import LotStatsRow from '@/components/projects/LotStatsRow'
 import LotFilters from '@/components/projects/LotFilters'
 import LotsTable from '@/components/projects/LotsTable'
@@ -57,6 +60,11 @@ const PROJECT_ACTIONS = [
   { value: 'export-mscc-report', label: 'Export MSCC status sheet', icon: LuFileSpreadsheet, category: 'Lots & data' },
   // Reads "Resume project" while the project is paused.
   { value: 'pause-project', label: 'Pause project', icon: LuCirclePause, category: 'Project' },
+  // A new row in the projects table, with its own lot table, price table and map bucket.
+  { value: 'add-project', label: 'Add project', icon: LuFolderPlus, category: 'Project' },
+  { value: 'edit-project', label: 'Edit project', icon: LuFolderPen, category: 'Project' },
+  // Only for projects added from the portal; built-in ones show it disabled.
+  { value: 'delete-project', label: 'Delete project', icon: LuFolderX, category: 'Project' },
 ]
 
 /**
@@ -128,6 +136,9 @@ export default function ProjectsPage({
   const [importOpen, setImportOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [pauseOpen, setPauseOpen] = useState(false)
+  const [addProjectOpen, setAddProjectOpen] = useState(false)
+  // 'edit' | 'delete' while the project shown is being edited or deleted.
+  const [projectDialog, setProjectDialog] = useState('')
   // { type: 'details' | 'add' | 'update' | 'delete', lot } for the open lot dialog, or null (lot is null for 'add').
   const [lotDialog, setLotDialog] = useState(null)
   // True while the selected lots are waiting on a delete confirmation.
@@ -423,6 +434,9 @@ export default function ProjectsPage({
     if (action === 'export-lots') handleExport()
     if (action === 'export-mscc-report') handleExport('mscc-report')
     if (action === 'pause-project' && data.project.code) setPauseOpen(true)
+    if (action === 'add-project') setAddProjectOpen(true)
+    if (action === 'edit-project' && data.project.code) setProjectDialog('edit')
+    if (action === 'delete-project' && data.project.custom) setProjectDialog('delete')
     if (action === 'add-lot') {
       setPricesNotice('')
       // Lots live in a per-project table (LOT_TABLES); without one there is nowhere to save.
@@ -476,6 +490,8 @@ export default function ProjectsPage({
             if (item.value === 'import-lots') return { ...item, label: `Import ${one}s (CSV)` }
             if (item.value === 'export-lots') return { ...item, label: `Export ${one}s` }
             if (item.value === 'pause-project' && data.project.paused) return { ...item, label: 'Resume project', icon: LuCirclePlay }
+            // Built-in projects hold the portal's own tables, so only portal-added ones can be deleted.
+            if (item.value === 'delete-project' && !data.project.custom) return { ...item, label: 'Delete project (built-in)', disabled: true }
             return item
           })
           // Developer Controls: hidden items go, items under maintenance stay but cannot be picked.
@@ -497,6 +513,42 @@ export default function ProjectsPage({
           reload()
         }}
       />
+
+      {addProjectOpen ? (
+        <AddProjectDialog
+          onClose={() => setAddProjectOpen(false)}
+          onSaved={async (code) => {
+            setAddProjectOpen(false)
+            // The project list is cached: drop it so the switcher lists the new project, then open it.
+            await invalidateTables(['projects'])
+            handleProjectChange(code)
+          }}
+        />
+      ) : null}
+
+      {projectDialog === 'edit' ? (
+        <AddProjectDialog
+          project={data.project}
+          onClose={() => setProjectDialog('')}
+          onSaved={async () => {
+            setProjectDialog('')
+            await invalidateTables(['projects'])
+            reload()
+          }}
+        />
+      ) : null}
+
+      {projectDialog === 'delete' ? (
+        <DeleteProjectDialog
+          project={data.project}
+          onClose={() => setProjectDialog('')}
+          onDeleted={async () => {
+            setProjectDialog('')
+            await invalidateTables(['projects'])
+            handleProjectChange(DEFAULT_PROJECT_CODE)
+          }}
+        />
+      ) : null}
 
       <SourceNotice source={data.source} envVar={SUPABASE_ENV} />
 

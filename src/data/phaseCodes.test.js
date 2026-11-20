@@ -76,3 +76,16 @@ describe('parsePhaseCode with the shared category codes', () => {
     expect(parsePhaseCode('GLS', 'GLS P')).toEqual({ phase: null, category: '' })
   })
 })
+
+describe('sections beyond A, B, C and East', () => {
+  it('reads any section in a phase filter, letter or word', async () => {
+    const { parsePhaseFilter, sectionSuffix } = await import('./projectsData')
+    expect(parsePhaseFilter('Phase 1D')).toEqual({ phase: 1, section: 'D', category: '' })
+    expect(parsePhaseFilter('Phase 2 East')).toEqual({ phase: 2, section: 'East', category: '' })
+    expect(parsePhaseFilter('Phase 3 West Commercial')).toEqual({ phase: 3, section: 'West', category: 'commercial' })
+    expect(parsePhaseFilter('Block 7')).toEqual({ phase: 7, section: null, category: '' })
+    expect(sectionSuffix('d')).toBe('D')
+    expect(sectionSuffix('east')).toBe(' East')
+    expect(sectionSuffix('')).toBe('')
+  })
+})

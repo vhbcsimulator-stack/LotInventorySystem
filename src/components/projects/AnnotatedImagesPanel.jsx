@@ -16,7 +16,8 @@ import {
   uploadMapImage,
 } from '@/data/annotatedImagesData'
 import { SOURCE } from '@/data/api'
-import { fetchLotsByIdentifier, updateLotStatuses } from '@/data/projectsData'
+import { fetchLotsByIdentifier, sectionSuffix, updateLotStatuses } from '@/data/projectsData'
+import { parseSlotValue } from '@/data/projectMapsData'
 import { COLORS } from '@/theme/colors'
 import { notifyFailed, notifySaved, notifyWarning } from '@/lib/notify'
 import { acceptFor, describeUpload, uploadProblem } from '@/lib/uploadRules'
@@ -31,9 +32,9 @@ const FONT = 'Inter, system-ui, sans-serif'
 function slotLabel(slot, slots) {
   const known = slots.find((option) => option.value === slot)
   if (known) return known.label
-  // Named as the tabs are (projectMapsData): 'phase-2-b' reads "Phase 2B".
-  const match = /^phase-(\d+)(?:-(a|b|c|east))?$/.exec(slot ?? '')
-  if (match) return `Phase ${match[1]}${match[2] ? (match[2] === 'east' ? 'East' : match[2].toUpperCase()) : ''}`
+  // Named as the tabs are (projectMapsData): 'phase-2-b' reads "Phase 2B", 'phase-1-east' "Phase 1 East".
+  const parsed = parseSlotValue(slot)
+  if (parsed.phase !== null) return `Phase ${parsed.phase}${sectionSuffix(parsed.section)}`
   return slot === 'commercial' ? 'Commercial' : 'Whole Map'
 }
 

@@ -19,6 +19,7 @@ import {
   isLotIdentifierValid,
   lotTermsFor,
   parsePhaseCode,
+  sectionSuffix,
   CATEGORY_CODES,
   CATEGORIES_BY_PROJECT,
 } from './projectsData'
@@ -223,7 +224,7 @@ const normalizeCategory = (value) => text(value).trim().toLowerCase().replace(/[
 const matchKey = (lotNo, phase, section = '') =>
   `${text(lotNo).trim().toLowerCase().replace(/\s+/g, ' ')}|${phase ?? ''}|${text(section).toLowerCase()}`
 const phaseDisplay = (phase, section, group = 'Phase') =>
-  phase === null ? '—' : `${group} ${phase}${section ? (section === 'East' ? ' East' : section) : ''}`
+  phase === null ? '—' : `${group} ${phase}${sectionSuffix(section)}`
 
 function parseNumber(value) {
   const cleaned = text(value).replace(/[₱,\s]/g, '').replace(/sqm$/i, '')
