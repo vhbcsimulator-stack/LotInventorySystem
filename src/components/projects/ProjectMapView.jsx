@@ -65,8 +65,9 @@ function ActionButton({ icon, children, tone = 'neutral', loading, ...rest }) {
 }
 
 const ZOOM_MIN = 1
-const ZOOM_MAX = 4
-const ZOOM_STEP = 0.25
+const ZOOM_MAX = 10
+// Each button press multiplies (or divides) the zoom by this, so 1× → 10× is ~6 clicks.
+const ZOOM_STEP = 1.5
 
 const clampZoom = (z) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z))
 
@@ -105,7 +106,7 @@ export function ZoomableImage({ src, alt, height, fill = false }) {
       return clampPan({ zoom: z, x: px - (px - prev.x) * ratio, y: py - (py - prev.y) * ratio })
     })
   }
-  const change = (delta) => zoomAt((current) => current + delta)
+  const change = (factor) => zoomAt((current) => current * factor)
 
   // Ctrl + wheel zooms toward the cursor. React's onWheel is passive, so the
   // browser's own page zoom can only be blocked with a native listener.
@@ -207,7 +208,7 @@ export function ZoomableImage({ src, alt, height, fill = false }) {
         borderRadius="8px"
         boxShadow="0 1px 3px rgba(0,0,0,0.08)"
       >
-        <Flex {...controlStyle} aria-label="Zoom out" disabled={zoom <= ZOOM_MIN} onClick={() => change(-ZOOM_STEP)}>
+        <Flex {...controlStyle} aria-label="Zoom out" disabled={zoom <= ZOOM_MIN} onClick={() => change(1 / ZOOM_STEP)}>
           <Icon as={LuZoomOut} boxSize="16px" />
         </Flex>
         <Box

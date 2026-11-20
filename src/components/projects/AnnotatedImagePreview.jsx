@@ -192,8 +192,9 @@ const OUTLINE = '#1D4ED8'
 const SELECTED = '#000'
 
 const ZOOM_MIN = 1
-const ZOOM_MAX = 8
-const ZOOM_STEP = 0.25
+const ZOOM_MAX = 10
+// Each button press multiplies (or divides) the zoom by this, so 1× → 10× is ~6 clicks.
+const ZOOM_STEP = 1.5
 const clampZoom = (zoom) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom))
 /*
  * Farther than this between pointer down and up and it was a drag, not a click on
@@ -2387,7 +2388,7 @@ export default function AnnotatedImagePreview({
                         {...zoomControl}
                         aria-label="Zoom out"
                         disabled={view.zoom <= ZOOM_MIN}
-                        onClick={() => zoomAt((current) => current - ZOOM_STEP)}
+                        onClick={() => zoomAt((current) => current / ZOOM_STEP)}
                       >
                         <Icon as={LuZoomOut} boxSize="16px" />
                       </Flex>
@@ -2409,7 +2410,7 @@ export default function AnnotatedImagePreview({
                         {...zoomControl}
                         aria-label="Zoom in"
                         disabled={view.zoom >= ZOOM_MAX}
-                        onClick={() => zoomAt((current) => current + ZOOM_STEP)}
+                        onClick={() => zoomAt((current) => current * ZOOM_STEP)}
                       >
                         <Icon as={LuZoomIn} boxSize="16px" />
                       </Flex>
