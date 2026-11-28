@@ -1603,7 +1603,12 @@ export default function AnnotatedImagePreview({
         ...[...newest].map(([id, paint]) => ({ label: labels.get(id) ?? `Annotation ${id}`, fill: paint.status ?? 'open', paint })),
         ...[...linkedPaints.values()].map((paint) => ({ label: paint.lot.lotNo, fill: paint.status ?? 'open', paint })),
       ]
-      setReview({ plan: planStatusUpdate(shapes, statusPaints, await loadLots()), painted })
+      /*
+       * `loadLots` gives only this map's lots — one phase's (and section's) for a
+       * phase map — so saving can only ever change lots of the phase colored here.
+       */
+      const scope = paletteSlot ? slotName(paletteSlot) : 'this map'
+      setReview({ plan: planStatusUpdate(shapes, statusPaints, await loadLots(), { scope }), painted })
     } catch (err) {
       setReview({ error: err.message })
     }
@@ -2782,7 +2787,7 @@ export default function AnnotatedImagePreview({
         }}
         onCancel={() => setReview(null)}
         onConfirm={() => confirmSave(true)}
-        onSaveMapOnly={allowMapOnlySave && review?.plan?.changes.length ? () => confirmSave(false) : null}
+        onSaveMapOnly={allowMapOnlySave ? () => confirmSave(false) : null}
       />
       <DiscardColorsDialog
         open={discardOpen}
@@ -2891,6 +2896,37 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
   const review = current ?? last
   const plan = review?.plan
   const text = { fontFamily: FONT, fontSize: '12.5px', color: COLORS.heading }
+  const hasChanges = Boolean(plan?.changes.length)
+  /*
+   * A plain warning when the table cannot take every color: the phase, a block,
+   * or a lot is not in it yet. Those colors stay on the map only; saving the map
+   * alone is always on offer.
+   */
+  const missing = plan?.missing ?? { phase: 0, block: 0, lot: 0 }
+  const scope = plan?.scope ?? 'this map'
+  const missingWarning = review?.error
+    ? onSaveMapOnly
+      ? 'You can still save the new colors on the map only — no lot statuses change in the table.'
+      : ''
+    : missing.phase
+      ? `${scope} has no lots in the lot table yet, so no lot statuses can be updated. Add its lots in the table first, or save the map only.`
+      : missing.block || missing.lot
+        ? [
+            missing.block ? `${missing.block} colored lot${missing.block === 1 ? ' is in a block' : 's are in blocks'} not yet in the table for ${scope}` : '',
+            missing.lot ? `${missing.lot} colored lot${missing.lot === 1 ? ' is' : 's are'} not yet in the table for ${scope}` : '',
+          ]
+            .filter(Boolean)
+            .join(', and ') +
+          `. Those colors are saved on the map only${hasChanges ? '; the lots found below are still updated' : ''}.`
+        : ''
+  const warningBox = missingWarning ? (
+    <Flex role="alert" mb="12px" px="12px" py="8px" gap="8px" align="flex-start" borderRadius="8px" border="1px solid #F5C77E" bg="#FFF7E6">
+      <Icon as={LuTriangleAlert} boxSize="16px" color="#B45309" mt="1px" flexShrink={0} />
+      <Text fontFamily={FONT} fontSize="12.5px" color="#7C2D12">
+        {missingWarning}
+      </Text>
+    </Flex>
+  ) : null
   return (
     <Dialog.Root open={open} onOpenChange={({ open: next }) => (next || saving ? null : onCancel())} placement="center" size="md">
       {review ? (
@@ -2905,11 +2941,15 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
             </Dialog.Header>
             <Dialog.Body py="14px" overflowY="auto">
               {review.error ? (
-                <Text role="alert" {...text} color="#B91C1C">
-                  The lots could not be loaded, so nothing was saved: {review.error}
-                </Text>
+                <>
+                  <Text role="alert" {...text} color="#B91C1C" mb="12px">
+                    The lots could not be loaded, so nothing was saved: {review.error}
+                  </Text>
+                  {warningBox}
+                </>
               ) : (
                 <>
+                  {warningBox}
                   <Text {...text} fontWeight="600" mb="6px">
                     New map colors ({review.painted.length + plan.mapOnly})
                   </Text>
@@ -2929,7 +2969,9 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
                   <Text {...text} fontWeight="600" mb="6px">
                     {plan.changes.length
                       ? `${plan.changes.length} lot status${plan.changes.length === 1 ? '' : 'es'} will also change in the table`
-                      : 'The lot table already matches these colors — only the map image is saved.'}
+                      : missing.phase || missing.block || missing.lot
+                        ? 'No lot statuses will change in the table — only the map image is saved.'
+                        : 'The lot table already matches these colors — only the map image is saved.'}
                   </Text>
                   <Flex direction="column" gap="4px">
                     {plan.changes.map((change) => (
@@ -3010,7 +3052,29 @@ function SaveReviewDialog({ open, review: current, palette, saving, error, contr
               <Flex {...controlStyle} opacity={saving ? 0.55 : 1} onClick={saving ? undefined : onCancel}>
                 Keep editing
               </Flex>
-              {review.error ? null : (
+              {/*
+                * With lot changes to make: Save map only beside Save update. With
+                * none — the lots are not in the table, or already match — saving
+                * is the map alone, and the one button says so. The lots failing to
+                * load leaves only Save map only.
+                */}
+              {review.error || !hasChanges ? (
+                onSaveMapOnly || (!review.error && !hasChanges) ? (
+                  <Flex
+                    {...controlStyle}
+                    bg={COLORS.brandGreen}
+                    borderColor={COLORS.brandGreen}
+                    color="#FFFFFF"
+                    _hover={{ bg: '#00541F' }}
+                    cursor={saving ? 'progress' : 'pointer'}
+                    title="Save the new colors without changing lot statuses in the table"
+                    onClick={saving ? undefined : (onSaveMapOnly ?? onConfirm)}
+                  >
+                    {saving ? <Spinner size="xs" /> : <Icon as={LuSave} boxSize="14px" />}
+                    {saving ? 'Saving…' : 'Save map only'}
+                  </Flex>
+                ) : null
+              ) : (
                 <>
                   {onSaveMapOnly ? (
                     <Flex

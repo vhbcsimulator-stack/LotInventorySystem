@@ -95,12 +95,15 @@ describe('saveProjectMap — updating a map reuses what is there', () => {
     expect(uploads()[0].path).toBe('owner-id/MVLC/phase-2-east/old.png')
     expect(uploads()[0].options.upsert).toBe(true)
     expect(tableOps('insert')).toHaveLength(0)
-    const [update] = tableOps('update')
+    const [update, link] = tableOps('update')
     const fields = update.steps.find(([step]) => step === 'update')[1]
     expect(fields.storage_path).toBe('owner-id/MVLC/phase-2-east/old.png')
-    expect(fields.image_URL).toMatch(/old\.png\?v=\d+$/)
-    // The row was written before the file was overwritten, and nothing was deleted.
+    // The new link waits for the new file, so nothing loads the old picture under it.
+    expect(fields).not.toHaveProperty('image_URL')
+    expect(link.steps.find(([step]) => step === 'update')[1].image_URL).toMatch(/old\.png\?v=\d+$/)
+    // The row was written before the file was overwritten, the link after, and nothing was deleted.
     expect(calls.indexOf(update)).toBeLessThan(calls.indexOf(uploads()[0]))
+    expect(calls.indexOf(link)).toBeGreaterThan(calls.indexOf(uploads()[0]))
     expect(removes()).toHaveLength(0)
   })
 
@@ -216,7 +219,8 @@ describe('phases come from the uploads table', () => {
     await saveProjectMap({ projectCode: 'MVLC', projectId: 1, target: { phase: 4, section: null, commercial: false }, file: png('p4.png') })
 
     expect(tableOps('insert')).toHaveLength(0)
-    expect(tableOps('update')).toHaveLength(1)
+    // The row, then — once the file is up — its link.
+    expect(tableOps('update')).toHaveLength(2)
     expect(uploads()[0].options.upsert).toBe(false)
     expect(removes()).toHaveLength(0)
   })

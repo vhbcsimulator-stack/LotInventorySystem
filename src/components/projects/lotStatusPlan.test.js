@@ -7,7 +7,7 @@ vi.mock('@/data/projectsData', () => ({
       .replace(/[^a-z0-9]/g, ''),
 }))
 
-const { annotationIdsForLot, fillForStatus, planStatusUpdate } = await import('./lotStatusPlan')
+const { annotationIdsForLot, blockOf, fillForStatus, planStatusUpdate } = await import('./lotStatusPlan')
 
 const lots = (entries) => new Map(entries)
 const shapes = [
@@ -225,5 +225,43 @@ describe('planStatusUpdate with clicked areas', () => {
     )
     expect(plan.changes).toEqual([{ id: 60, lotNo: 'L6', label: 'L6', from: 'available', status: 'hold' }])
     expect(plan.skipped).toHaveLength(1)
+  })
+})
+
+describe('planStatusUpdate — lots missing from the phase', () => {
+
+  it('reads the block from any way a lot is written', () => {
+    expect(blockOf('B21 L1')).toBe('21')
+    expect(blockOf('B1-L4')).toBe('1')
+    expect(blockOf('B23-B L1')).toBe('23-B')
+    expect(blockOf('Block 5 Lot 3')).toBe('5')
+    expect(blockOf('21-32A')).toBe('21')
+    expect(blockOf('23-B-1')).toBe('23-B')
+    expect(blockOf('C L1')).toBeNull()
+    expect(blockOf('Road')).toBeNull()
+  })
+
+  it('says the phase has no lots when its table is empty', () => {
+    const plan = planStatusUpdate(shapes, [{ shapeId: 1, status: 'sold' }], lots([]), { scope: 'Phase 1D' })
+    expect(plan.changes).toEqual([])
+    expect(plan.missing).toEqual({ phase: 1, block: 0, lot: 0 })
+    expect(plan.skipped[0].reason).toMatch(/Phase 1D has no lots/)
+  })
+
+  it('tells a missing block from a missing lot, and still updates the lots it finds', () => {
+    const plan = planStatusUpdate(
+      shapes,
+      [
+        { shapeId: 1, status: 'sold' },
+        { shapeId: 2, status: 'hold' },
+        { shapeId: 3, status: 'sold' },
+      ],
+      lots([['b1l3', [{ id: 10, lotNo: 'B1 L3', status: 'available' }]]]),
+      { scope: 'Phase 1D' },
+    )
+    expect(plan.changes.map((change) => change.id)).toEqual([10])
+    expect(plan.missing).toEqual({ phase: 0, block: 1, lot: 1 })
+    expect(plan.skipped.find((entry) => entry.label === 'B2 L1').reason).toMatch(/Block 2 is not in the table for Phase 1D/)
+    expect(plan.skipped.find((entry) => entry.label === 'B1-L4').missing).toBe('lot')
   })
 })

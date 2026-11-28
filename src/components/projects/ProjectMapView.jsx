@@ -905,7 +905,8 @@ export default function ProjectMapView({ projectCode, projectName, projectId, in
 
       <FullscreenImageDialog
         open={Boolean(fullscreen)}
-        src={fullscreen?.url}
+        // The live row's link, so a map replaced while it is open shows at once.
+        src={(fullscreen && data?.maps?.find((map) => map.id === fullscreen.id)?.url) || fullscreen?.url}
         alt={`${projectName || projectCode} — ${active?.label} map`}
         title={fullscreen?.name}
         onClose={() => setFullscreen(null)}

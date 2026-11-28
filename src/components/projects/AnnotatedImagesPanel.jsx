@@ -98,6 +98,18 @@ export default function AnnotatedImagesPanel({
   const images = useMemo(() => data?.images ?? [], [data])
   const current = images.find((image) => image.slot === slot) ?? null
   /*
+   * The open preview follows the live rows, not the copy taken when it opened:
+   * a COCO JSON or map replaced meanwhile — here, or by anyone, through live
+   * updates — shows at once, without reopening it or reloading the page.
+   * Freehand coloring has no row to follow.
+   */
+  const previewImage = previewing
+    ? previewing.freehand
+      ? previewing.image
+      : (images.find((image) => image.slot === previewing.image.slot) ?? previewing.image)
+    : null
+  const previewUrl = previewing ? (previewing.freehand ? previewing.url : previewImage.url || previewing.url) : ''
+  /*
    * Uploading is offered whenever there is a database to upload to. The table
    * itself may still be missing — the migration not yet run — which reads as
    * UNAVAILABLE; hiding the button then would leave no way forward, whereas
@@ -256,7 +268,18 @@ export default function AnnotatedImagesPanel({
       const url = await uploadMapImage({ projectCode, projectId, slot: image.slot, file })
       // Freehand coloring has no annotations row to point at the new map.
       if (url && image.id !== FREEHAND) await saveAnnotatedImage({ projectCode, slot: image.slot, existing: image, imageUrl: url })
-      const { updated, failed, clientsFailed } = await updateLotStatuses(changes, projectCode)
+      /*
+       * Only lots of the map's own phase (and section) are written: Phase 1D's
+       * map changes Phase 1D's lots and no other phase's, even where another
+       * phase has a lot with the same block and lot number.
+       */
+      const inScope = changes.length ? new Set([...(await loadLots(image)).values()].flat().map((lot) => lot.id)) : new Set()
+      const scoped = changes.filter((change) => inScope.has(change.id))
+      const { updated, failed, clientsFailed } = await updateLotStatuses(scoped, projectCode)
+      if (scoped.length < changes.length) {
+        const outside = changes.filter((change) => !inScope.has(change.id)).map((change) => change.lotNo)
+        notifyWarning('Some lots not updated', `${outside.join(', ')} ${outside.length === 1 ? 'is' : 'are'} not in ${slotLabel(image.slot, slots)}, so only the map was saved for them.`)
+      }
       const name = slotLabel(image.slot, slots)
       const message =
         `The colored map was saved — the ${name} map tab now shows it` +
@@ -404,16 +427,16 @@ export default function AnnotatedImagesPanel({
           projectCode={projectCode}
           title={`${projectName || projectCode} — ${slotLabel(previewing.image.slot, slots)}${previewing.freehand ? ' (no outlines)' : ''}`}
           warning={previewing.freehand ? FREEHAND_WARNING : ''}
-          url={previewing.url}
-          paletteSlot={previewing.image.slot}
+          url={previewUrl}
+          paletteSlot={previewImage.slot}
           slotName={(slot) => slotLabel(slot, slots)}
-          coco={previewing.image.coco}
+          coco={previewImage.coco}
           fitting={busy === 'fit'}
           fitError={fitError}
-          onFitImage={(size) => refit(previewing.image, size)}
-          loadLots={canEdit ? () => loadLots(previewing.image) : undefined}
-          lookupLots={() => loadLots(previewing.image)}
-          onSaveUpdate={canEdit ? (update) => saveColoredUpdate(previewing.image, update) : undefined}
+          onFitImage={(size) => refit(previewImage, size)}
+          loadLots={canEdit ? () => loadLots(previewImage) : undefined}
+          lookupLots={() => loadLots(previewImage)}
+          onSaveUpdate={canEdit ? (update) => saveColoredUpdate(previewImage, update) : undefined}
           allowMapOnlySave={canEdit}
           saving={busy === 'upload'}
           saveError={uploadError}

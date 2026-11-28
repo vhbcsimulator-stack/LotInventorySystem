@@ -426,7 +426,16 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
      * upload then fail, the row is put back as it was.
      */
     const { data: before } = await supabase.from('uploads').select(Object.keys(fields).join(', ')).eq('id', replacing.id).maybeSingle()
-    const { data, error } = await supabase.from('uploads').update(fields).eq('id', replacing.id).select('id')
+    /*
+     * The new link is written only once the new file is in the bucket. Every
+     * write to `uploads` is broadcast live, and open pages refetch at once — a
+     * link written before the upload finished would be loaded while the bucket
+     * still held the old picture, and the browser would then keep showing that
+     * old picture under the new link until the page was reloaded.
+     */
+    const first = { ...fields }
+    delete first.image_URL
+    const { data, error } = await supabase.from('uploads').update(first).eq('id', replacing.id).select('id')
     if (error) throw new Error(error.message)
     if (!data?.length) throw refused()
     try {
@@ -435,6 +444,8 @@ export async function saveProjectMap({ projectCode, projectId, target, file, exi
       if (before) await supabase.from('uploads').update(before).eq('id', replacing.id)
       throw err
     }
+    const { error: linkError } = await supabase.from('uploads').update({ image_URL: imageUrl }).eq('id', replacing.id)
+    if (linkError) throw new Error(`The new map was uploaded, but its link could not be saved: ${linkError.message}`)
     saved = data
   } else {
     await upload()

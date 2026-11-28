@@ -66,10 +66,26 @@ export function lotsForLabel(label, lotsByKey) {
  * gives the colour's status (and reserve type), so only their map colour is saved.
  * A reserved lot whose reserve type differs is a change even though its status is not.
  * where `mapOnly` counts clicked areas not linked to any lot.
+ *
+ * `lotsByKey` holds only the lots of the map being colored — one phase's (and
+ * section's) for a phase map — so a lot of another phase can never be changed.
+ * `scope` names that map ('Phase 1D') for the reasons given. A lot not found is
+ * skipped with `missing` — 'phase' (the phase has no lots in the table at all),
+ * 'block' (no lot of its block is there), or 'lot' — and counted in `missing`,
+ * so the review can warn and offer saving the map only.
  */
-export function planStatusUpdate(shapes, paints, lotsByKey) {
+export function planStatusUpdate(shapes, paints, lotsByKey, { scope = 'this map' } = {}) {
   const labels = new Map(shapes.map((shape) => [shape.id, shape.label]))
   const byId = new Map([...lotsByKey.values()].flat().map((lot) => [lot.id, lot]))
+  const blocks = new Set([...byId.values()].map((lot) => blockOf(lot.lotNo)).filter(Boolean))
+  const onMapOnly = 'the color is saved on the map only.'
+  // Why a label names no lot of this map: its phase, its block, or the lot itself is not in the table.
+  const whyMissing = (label) => {
+    if (!byId.size) return { missing: 'phase', reason: `${scope} has no lots in the table yet — ${onMapOnly}` }
+    const block = blockOf(label)
+    if (block && !blocks.has(block)) return { missing: 'block', reason: `Block ${block} is not in the table for ${scope} — ${onMapOnly}` }
+    return { missing: 'lot', reason: `This lot is not in the table for ${scope} — ${onMapOnly}` }
+  }
   // The newest paint of each annotated lot, and of each linked lot, wins, as it does on the map.
   const latest = new Map()
   const linked = new Map()
@@ -86,21 +102,22 @@ export function planStatusUpdate(shapes, paints, lotsByKey) {
   const entries = [
     ...[...latest].map(([shapeId, paint]) => {
       const label = labels.get(shapeId) ?? `Annotation ${shapeId}`
-      return { label, paint, matches: lotsForLabel(label, lotsByKey), missing: 'No lot with this identifier — the color is saved on the map only.' }
+      return { label, paint, matches: lotsForLabel(label, lotsByKey), why: () => whyMissing(label) }
     }),
     ...[...linked].map(([id, paint]) => ({
       label: paint.lot.lotNo || `Lot ${id}`,
       paint,
       matches: byId.has(id) ? [byId.get(id)] : [],
-      missing: 'This lot is no longer in the table — the color is saved on the map only.',
+      why: () => ({ missing: 'lot', reason: `This lot is no longer in the table for ${scope} — ${onMapOnly}` }),
     })),
   ]
+  const missing = { phase: 0, block: 0, lot: 0 }
 
   const changes = []
   const skipped = []
   const upToDate = []
   const claimed = new Map() // lot id → label that set it, so two shapes cannot fight over one lot
-  for (const { label, paint, matches, missing } of entries) {
+  for (const { label, paint, matches, why } of entries) {
     const { status: fill, reserveType } = paint
     // A lot only cleared of its printed (sold) circle is open again: Available.
     const status = fill ? LOT_STATUS_BY_FILL[fill] : paint.eraseRing ? 'available' : undefined
@@ -109,7 +126,9 @@ export function planStatusUpdate(shapes, paints, lotsByKey) {
       continue
     }
     if (matches.length === 0) {
-      skipped.push({ label, reason: missing })
+      const found = why()
+      missing[found.missing] += 1
+      skipped.push({ label, ...found })
       continue
     }
     if (matches.length > 1) {
@@ -138,5 +157,18 @@ export function planStatusUpdate(shapes, paints, lotsByKey) {
     }
     changes.push({ id: lot.id, lotNo: lot.lotNo, label, from: lot.status, status })
   }
-  return { changes, upToDate, skipped, mapOnly }
+  return { changes, upToDate, skipped, mapOnly, missing, scope }
+}
+
+/**
+ * The block a lot identifier names — '21' for "B21 L1", "B21-L1", "Block 21 Lot 1"
+ * or the legacy "21-1"; '23-B' for "B23-B L1" or "23-B-1" — or null when it
+ * names none (a commercial "C L1", a road).
+ */
+export function blockOf(identifier) {
+  const raw = String(identifier ?? '').trim()
+  const named = /^(?:block|blk|b)\s*\.?\s*(\d+)(?:\s*-\s*([a-z]))?\s*[- ]*\s*(?:lot|l)\s*\.?\s*\d/i.exec(raw)
+  const legacy = /^(\d+)(?:-([a-z]))?-\d+[a-z]?$/i.exec(raw)
+  const match = named ?? legacy
+  return match ? `${Number(match[1])}${match[2] ? `-${match[2].toUpperCase()}` : ''}` : null
 }
